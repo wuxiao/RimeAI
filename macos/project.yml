@@ -1,0 +1,61 @@
+name: RimeAIInputMethod
+options:
+  minimumXcodeGenVersion: 2.44.1
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    CLANG_CXX_LANGUAGE_STANDARD: c++17
+    SWIFT_VERSION: "6.0"
+targets:
+  RimeAIInputMethod:
+    type: application
+    platform: macOS
+    sources:
+      - path: RimeAIInputMethod
+      - path: ../Sources/RimeAIInputCore
+      - path: ../Sources/RimeBridgeC/RimeBridgeC.cc
+      - path: ../Sources/RimeBridgeC/include/RimeBridgeC.h
+        buildPhase: headers
+      - path: ../.rimeai/rime/shared
+        type: folder
+        buildPhase: resources
+      - path: Resources/RimeAI.pdf
+        buildPhase: resources
+    dependencies:
+      - sdk: AppKit.framework
+      - sdk: Carbon.framework
+      - sdk: InputMethodKit.framework
+      - sdk: Network.framework
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: fun.wwcn.inputmethod.RimeAI
+        PRODUCT_NAME: RimeAIInputMethod
+        SWIFT_VERSION: "5.0"
+        INFOPLIST_FILE: RimeAIInputMethod/Info.plist
+        SWIFT_OBJC_BRIDGING_HEADER: RimeAIInputMethod/RimeAIInputMethod-Bridging-Header.h
+        HEADER_SEARCH_PATHS:
+          - "$(SRCROOT)/../Sources/RimeBridgeC/include"
+          - "/opt/homebrew/include"
+        LIBRARY_SEARCH_PATHS:
+          - "/opt/homebrew/lib"
+        OTHER_LDFLAGS:
+          - "-lrime"
+        CODE_SIGN_STYLE: Manual
+        DEVELOPMENT_TEAM: ""
+        CODE_SIGN_IDENTITY: "-"
+        ENABLE_HARDENED_RUNTIME: true
+        GENERATE_INFOPLIST_FILE: false
+        MACOSX_DEPLOYMENT_TARGET: "14.0"
+        ONLY_ACTIVE_ARCH: true
+        SKIP_INSTALL: false
+schemes:
+  RimeAIInputMethod:
+    build:
+      targets:
+        RimeAIInputMethod: all
+    run:
+      config: Debug
+    archive:
+      config: Release

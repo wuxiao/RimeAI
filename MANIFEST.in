@@ -1,0 +1,4 @@
+global-exclude ._*
+global-exclude *.py[cod]
+prune **/__pycache__
+

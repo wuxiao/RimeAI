@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "name": "pinyin-beam-ngram",
+  "command": ["./script/beam_sentence_service.sh"],
+  "timeout_ms": 8000
+}

@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "name": "qwen2.5-0.5b-instruct",
+  "command": ["./script/qwen_sentence_service.sh"],
+  "timeout_ms": 60000
+}

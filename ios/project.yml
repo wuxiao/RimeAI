@@ -1,0 +1,140 @@
+name: RimeAIiOS
+options:
+  minimumXcodeGenVersion: 2.44.1
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    DEVELOPMENT_TEAM: S3T42U45P8
+    CODE_SIGN_STYLE: Automatic
+    SWIFT_VERSION: "6.0"
+    IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+    TARGETED_DEVICE_FAMILY: "1,2"
+    SUPPORTS_MACCATALYST: false
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "2"
+targets:
+  RimeAI:
+    type: application
+    platform: iOS
+    sources:
+      - path: HostApp
+        excludes:
+          - Info.plist
+      - path: ../Sources/RimeAIInputCore
+        excludes:
+          - ProductDataLayout.swift
+      - path: ThirdPartyLicenses
+        type: folder
+        buildPhase: resources
+    dependencies:
+      - target: RimeAIKeyboard
+        embed: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: fun.wwcn.rimeai.app
+        PRODUCT_NAME: RimeAI
+        INFOPLIST_FILE: HostApp/Info.plist
+        GENERATE_INFOPLIST_FILE: false
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        SKIP_INSTALL: false
+      configs:
+        Release:
+          CODE_SIGN_STYLE: Manual
+          CODE_SIGN_IDENTITY: Apple Distribution
+          PROVISIONING_PROFILE_SPECIFIER: RimeAI iOS App App Store
+  RimeAIKeyboard:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: KeyboardExtension
+        excludes:
+          - Info.plist
+      - path: ../Sources/RimeBridgeC/RimeBridgeC.cc
+      - path: RimeData
+        type: folder
+        buildPhase: resources
+      - path: ../Sources/RimeAIInputCore
+        excludes:
+          - ProductDataLayout.swift
+          - RimeAISettingsStore.swift
+    dependencies:
+      - framework: Native/RimeAINative.xcframework
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: fun.wwcn.rimeai.app.keyboard
+        PRODUCT_NAME: RimeAIKeyboard
+        INFOPLIST_FILE: KeyboardExtension/Info.plist
+        GENERATE_INFOPLIST_FILE: false
+        APPLICATION_EXTENSION_API_ONLY: true
+        SWIFT_OBJC_BRIDGING_HEADER: KeyboardExtension/Keyboard-Bridging-Header.h
+        CLANG_CXX_LANGUAGE_STANDARD: c++17
+        HEADER_SEARCH_PATHS:
+          - $(inherited)
+          - $(PROJECT_DIR)/../Sources/RimeBridgeC/include
+          - $(PROJECT_DIR)/Native/include
+        OTHER_LDFLAGS:
+          - $(inherited)
+          - -liconv
+        SKIP_INSTALL: true
+      configs:
+        Release:
+          CODE_SIGN_STYLE: Manual
+          CODE_SIGN_IDENTITY: Apple Distribution
+          PROVISIONING_PROFILE_SPECIFIER: RimeAI iOS Keyboard App Store
+  RimeAIKeyboardTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: KeyboardTests
+      - path: KeyboardExtension
+        excludes:
+          - Info.plist
+      - path: ../Sources/RimeBridgeC/RimeBridgeC.cc
+      - path: RimeData
+        type: folder
+        buildPhase: resources
+    dependencies:
+      - framework: Native/RimeAINative.xcframework
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: fun.wwcn.rimeai.app.keyboard.tests
+        GENERATE_INFOPLIST_FILE: true
+        SWIFT_OBJC_BRIDGING_HEADER: KeyboardExtension/Keyboard-Bridging-Header.h
+        CLANG_CXX_LANGUAGE_STANDARD: c++17
+        HEADER_SEARCH_PATHS:
+          - $(inherited)
+          - $(PROJECT_DIR)/../Sources/RimeBridgeC/include
+          - $(PROJECT_DIR)/Native/include
+        OTHER_LDFLAGS:
+          - $(inherited)
+          - -liconv
+  RimeAIUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: UITests
+    dependencies:
+      - target: RimeAI
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: fun.wwcn.rimeai.app.uitests
+        GENERATE_INFOPLIST_FILE: true
+        TEST_TARGET_NAME: RimeAI
+schemes:
+  RimeAI:
+    build:
+      targets:
+        RimeAI: all
+        RimeAIKeyboard: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - RimeAIKeyboardTests
+        - RimeAIUITests
+    archive:
+      config: Release

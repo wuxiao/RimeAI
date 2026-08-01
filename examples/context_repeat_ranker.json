@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "name": "demo-context-repeat-worker",
+  "command": ["python3", "examples/context_repeat_worker.py"],
+  "timeout_ms": 400
+}

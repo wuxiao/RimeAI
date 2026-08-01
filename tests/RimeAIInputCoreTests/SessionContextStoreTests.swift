@@ -1,0 +1,54 @@
+import Testing
+@testable import RimeAIInputCore
+
+@Test
+func contextKeepsOnlyTheConfiguredCharacterWindow() {
+    var store = SessionContextStore(maxCharacters: 5)
+    store.activate(sessionID: "app-1")
+
+    store.appendCommittedText("前文内容")
+    store.appendCommittedText("新的句子")
+
+    #expect(store.context == "容新的句子")
+}
+
+@Test
+func switchingApplicationsCannotRecoverPreviousContext() {
+    var store = SessionContextStore(maxCharacters: 100)
+    store.activate(sessionID: "app-1")
+    store.appendCommittedText("应用一的私密内容")
+
+    store.activate(sessionID: "app-2")
+    #expect(store.context.isEmpty)
+    #expect(store.activeSessionID == "app-2")
+
+    store.activate(sessionID: "app-1")
+    #expect(store.context.isEmpty)
+}
+
+@Test
+func secureInputAndDeactivationEraseContext() {
+    var store = SessionContextStore(maxCharacters: 100)
+    store.activate(sessionID: "app-1")
+    store.appendCommittedText("不应保留")
+
+    store.enterSecureInput()
+    #expect(store.context.isEmpty)
+    #expect(store.activeSessionID == nil)
+
+    store.activate(sessionID: "app-2")
+    store.appendCommittedText("也不应保留")
+    store.deactivate()
+    #expect(store.context.isEmpty)
+    #expect(store.activeSessionID == nil)
+}
+
+@Test
+func contextIsAvailableOnlyToTheActiveSession() {
+    var store = SessionContextStore(maxCharacters: 100)
+    store.activate(sessionID: "app-1")
+    store.appendCommittedText("当前应用上下文")
+
+    #expect(store.context(for: "app-1") == "当前应用上下文")
+    #expect(store.context(for: "app-2").isEmpty)
+}

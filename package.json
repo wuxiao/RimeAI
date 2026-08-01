@@ -1,0 +1,21 @@
+{
+  "name": "rimeai-landing",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "vite build && find dist -type f -name '._*' -delete",
+    "deploy:pages": "npm run build && wrangler pages deploy dist --project-name rimeai --branch main",
+    "preview": "vite preview --host 0.0.0.0"
+  },
+  "dependencies": {
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^6.0.4",
+    "vite": "^8.1.5",
+    "wrangler": "^4.115.0"
+  }
+}

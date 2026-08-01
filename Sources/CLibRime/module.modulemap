@@ -1,0 +1,5 @@
+module CLibRime [system] {
+  header "shim.h"
+  link "rime"
+  export *
+}

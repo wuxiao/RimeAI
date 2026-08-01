@@ -1,0 +1,6 @@
+{"schema_version":1,"id":"developer-001","split":"test","domain":"developer","context":"PostgreSQL 的索引会影响查询性能，我们还需要增加一个","pinyin":"suoyin","gold_text":"索引","tags":["context-disambiguation","technical-term"]}
+{"schema_version":1,"id":"developer-002","split":"test","domain":"developer","context":"请在终端执行下面这条","pinyin":"mingling","gold_text":"命令","tags":["context-disambiguation","technical-term"]}
+{"schema_version":1,"id":"developer-003","split":"test","domain":"developer","context":"这个 API 需要增加","pinyin":"chaoshipeizhi","gold_text":"超时配置","tags":["mixed-script","technical-term"]}
+{"schema_version":1,"id":"general-001","split":"test","domain":"general","context":"感谢你的帮助，也","pinyin":"ganxie","gold_text":"感谢","tags":["context-disambiguation"]}
+{"schema_version":1,"id":"general-002","split":"test","domain":"general","context":"这个答案用于验证候选覆盖率","pinyin":"mudi","gold_text":"目的","tags":["coverage"]}
+{"schema_version":1,"id":"developer-004","split":"test","domain":"developer","context":"服务将通过 Kubernetes 完成","pinyin":"bushu","gold_text":"部署","tags":["technical-term"]}

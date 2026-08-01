@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "name": "gte-multilingual-reranker-base",
+  "command": ["./script/gte_ranker_service.sh"],
+  "timeout_ms": 60000
+}

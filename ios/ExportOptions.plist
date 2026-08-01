@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>destination</key>
+    <string>export</string>
+    <key>manageAppVersionAndBuildNumber</key>
+    <false/>
+    <key>method</key>
+    <string>app-store-connect</string>
+    <key>provisioningProfiles</key>
+    <dict>
+        <key>fun.wwcn.rimeai.app</key>
+        <string>RimeAI iOS App App Store</string>
+        <key>fun.wwcn.rimeai.app.keyboard</key>
+        <string>RimeAI iOS Keyboard App Store</string>
+    </dict>
+    <key>signingStyle</key>
+    <string>manual</string>
+    <key>stripSwiftSymbols</key>
+    <true/>
+    <key>teamID</key>
+    <string>S3T42U45P8</string>
+    <key>thinning</key>
+    <string>&lt;none&gt;</string>
+    <key>uploadSymbols</key>
+    <true/>
+</dict>
+</plist>

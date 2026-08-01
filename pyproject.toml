@@ -1,0 +1,26 @@
+[project]
+name = "rimeai-eval"
+version = "0.1.0"
+description = "Offline evaluation toolkit for RimeAI semantic candidate ranking"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.optional-dependencies]
+dataset = [
+    "jieba==0.42.1",
+    "pypinyin==0.55.0",
+]
+
+[project.scripts]
+rimeai-eval = "rimeai_eval.cli:main"
+rimeai-daemon = "rimeai_daemon.__main__:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["rimeai_eval", "rimeai_daemon"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

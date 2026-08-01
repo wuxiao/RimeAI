@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "name": "char-ngram-ranker",
+  "command": ["./script/ngram_ranker_service.sh"],
+  "timeout_ms": 8000
+}

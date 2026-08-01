@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "corpora": [
+    {
+      "id": "zhwikivoyage-20260701",
+      "domain": "general",
+      "url": "https://dumps.wikimedia.org/zhwikivoyage/20260701/zhwikivoyage-20260701-pages-articles.xml.bz2",
+      "sha1": "161380a9ec5e1a30b217667c18849b6610ca2544",
+      "license": "CC-BY-SA-4.0",
+      "attribution": "Wikivoyage contributors"
+    },
+    {
+      "id": "mdn-translated-content-9780b8c",
+      "domain": "developer",
+      "url": "https://github.com/mdn/translated-content.git",
+      "revision": "9780b8cb15f9973e0bfbf5a5d60d3461b3d386ef",
+      "path": "files/zh-cn",
+      "derived_archive_sha256": "cfd65764ba09cb164b37f678a56f87152d8e82d8bac2c78e6ce16082bb4c272a",
+      "license": "CC-BY-SA-2.5",
+      "attribution": "Mozilla contributors"
+    }
+  ],
+  "tooling": {
+    "jieba": {
+      "version": "0.42.1",
+      "license": "MIT",
+      "sdist_sha256": "055ca12f62674fafed09427f176506079bc135638a14e23e25be909131928db2"
+    },
+    "pypinyin": {
+      "version": "0.55.0",
+      "license": "MIT",
+      "wheel_sha256": "d53b1e8ad2cdb815fb2cb604ed3123372f5a28c6f447571244aca36fc62a286f"
+    }
+  }
+}

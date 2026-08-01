@@ -1,0 +1,5 @@
+/* The visible mode supplies the user-facing name in Keyboard Settings. */
+"CFBundleDisplayName" = "";
+"CFBundleName" = "";
+"fun.wwcn.inputmethod.RimeAI" = "RimeAI";
+"fun.wwcn.inputmethod.RimeAI.Primary" = "RimeAI";

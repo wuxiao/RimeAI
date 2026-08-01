@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "name": "librime-1.17.0-luna-pinyin-simp",
+  "command": ["./script/rime_candidate_service.sh"],
+  "timeout_ms": 60000
+}

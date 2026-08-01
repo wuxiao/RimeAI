@@ -1,0 +1,7 @@
+{"schema_version":1,"id":"developer-001","split":"test","domain":"developer","context":"PostgreSQL 的索引会影响查询性能，我们还需要增加一个","pinyin":"suoyin","candidates":["所以","索引","缩印"],"gold_text":"索引","tags":["context-disambiguation","technical-term"]}
+{"schema_version":1,"id":"developer-002","split":"test","domain":"developer","context":"请在终端执行下面这条","pinyin":"mingling","candidates":["明令","命令","名伶"],"gold_text":"命令","tags":["context-disambiguation","technical-term"]}
+{"schema_version":1,"id":"developer-003","split":"test","domain":"developer","context":"这个 API 需要增加","pinyin":"chaoshipeizhi","candidates":["潮湿配置","超时配置","超市配置"],"gold_text":"超时配置","tags":["mixed-script","technical-term"]}
+{"schema_version":1,"id":"general-001","split":"test","domain":"general","context":"感谢你的帮助，也","pinyin":"ganxie","candidates":["干些","感谢","敢写"],"gold_text":"感谢","tags":["context-disambiguation"]}
+{"schema_version":1,"id":"general-002","split":"test","domain":"general","context":"这个答案故意不在 Rime 候选中","pinyin":"mudi","candidates":["墓地","木笛"],"gold_text":"目的","tags":["coverage-gap"]}
+{"schema_version":1,"id":"developer-004","split":"test","domain":"developer","context":"服务将通过 Kubernetes 完成","pinyin":"bushu","candidates":["部署","不熟","部属"],"gold_text":"部署","tags":["technical-term"]}
+

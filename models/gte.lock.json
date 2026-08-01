@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "model": {
+    "id": "Alibaba-NLP/gte-multilingual-reranker-base",
+    "revision": "8215cf04918ba6f7b6a62bb44238ce2953d8831c",
+    "license": "Apache-2.0",
+    "model_file": {
+      "name": "model.safetensors",
+      "bytes": 611934706,
+      "sha256": "10ebaa49322dd7e01a13a91c49810939e3f91f231aceaa47fdf0cab3083954f6"
+    },
+    "tokenizer_file": {
+      "name": "tokenizer.json",
+      "bytes": 17083021,
+      "sha256": "d6f76fe13d42f80dcee0cb86a1aeb5f14f8909bb8a8782f7a4a4ad76697ef164"
+    }
+  },
+  "remote_code": {
+    "id": "Alibaba-NLP/new-impl",
+    "revision": "40ced75c3017eb27626c9d4ea981bde21a2662f4",
+    "license": "Apache-2.0",
+    "files": [
+      "configuration.py",
+      "modeling.py"
+    ]
+  },
+  "reference_runtime": {
+    "python": "3.9.6",
+    "torch": "2.8.0",
+    "transformers": "4.39.3",
+    "device": "mps",
+    "precision": "float16",
+    "max_length": 256
+  }
+}

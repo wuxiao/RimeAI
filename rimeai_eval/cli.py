@@ -1,0 +1,512 @@
+import argparse
+from collections import Counter
+import hashlib
+import json
+from math import isfinite
+from pathlib import Path
+import sys
+from typing import Optional, Sequence
+
+from .capture import CaptureError, capture_dataset
+from .beam_decoder import (
+    BeamDecoderError,
+    train_beam_decoder_config,
+    write_beam_config_atomic,
+)
+from .command_ranker import CommandRanker, RankerConfigurationError
+from .command_sentence_decoder import (
+    CommandSentenceDecoder,
+    SentenceDecoderConfigurationError,
+)
+from .dataset import DatasetValidationError, load_dataset
+from .evaluation import BaselineRanker, ContextRepeatRanker, evaluate_dataset
+from .ngram_ranker import (
+    NGramModelError,
+    load_ngram_model,
+    train_ngram_model,
+    write_ngram_model_atomic,
+)
+from .pinyin_guard import PinyinGuard
+from .reporting import (
+    ReportError,
+    load_reports,
+    render_markdown_comparison,
+    write_jsonl_atomic,
+)
+from .sentence_evaluation import evaluate_sentence_dataset
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="rimeai-eval")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    validate_parser = subparsers.add_parser(
+        "validate", help="validate a JSONL rerank dataset"
+    )
+    validate_parser.add_argument("dataset", type=Path)
+
+    evaluate_parser = subparsers.add_parser(
+        "evaluate", help="evaluate a ranker against a JSONL dataset"
+    )
+    evaluate_parser.add_argument("dataset", type=Path)
+    evaluate_parser.add_argument(
+        "--ranker",
+        choices=("baseline", "context-repeat", "command"),
+        default="baseline",
+    )
+    evaluate_parser.add_argument("--ranker-config", type=Path)
+    evaluate_parser.add_argument("--details-output", type=Path)
+    evaluate_parser.add_argument(
+        "--split",
+        choices=("train", "validation", "test", "all"),
+        default="test",
+    )
+    evaluate_parser.add_argument("--min-confidence", type=float, default=0.0)
+    evaluate_parser.add_argument(
+        "--candidate-limit",
+        type=int,
+        choices=range(1, 21),
+        default=20,
+        metavar="K",
+    )
+
+    compare_parser = subparsers.add_parser(
+        "compare", help="compare compatible aggregate evaluation reports"
+    )
+    compare_parser.add_argument("reports", nargs="+", type=Path)
+    compare_parser.add_argument(
+        "--format", choices=("markdown",), default="markdown"
+    )
+
+    capture_parser = subparsers.add_parser(
+        "capture", help="capture Rime candidates into a versioned JSONL dataset"
+    )
+    capture_parser.add_argument("source", type=Path)
+    capture_parser.add_argument("--candidate-config", required=True, type=Path)
+    capture_parser.add_argument("--output", required=True, type=Path)
+    capture_parser.add_argument("--provenance-output", required=True, type=Path)
+
+    train_ngram_parser = subparsers.add_parser(
+        "train-ngram",
+        help="train the deterministic character n-gram reranker",
+    )
+    train_ngram_parser.add_argument("dataset", type=Path)
+    train_ngram_parser.add_argument("--output", required=True, type=Path)
+
+    sentence_parser = subparsers.add_parser(
+        "evaluate-sentence",
+        help="evaluate a constrained local sentence decoder",
+    )
+    sentence_parser.add_argument("dataset", type=Path)
+    sentence_parser.add_argument(
+        "--decoder-config", required=True, type=Path
+    )
+    sentence_parser.add_argument(
+        "--rime-dictionary", required=True, type=Path
+    )
+    sentence_parser.add_argument("--details-output", type=Path)
+    sentence_parser.add_argument(
+        "--split",
+        choices=("train", "validation", "test", "all"),
+        default="test",
+    )
+    sentence_parser.add_argument(
+        "--candidate-limit",
+        type=int,
+        choices=range(1, 21),
+        default=10,
+        metavar="K",
+    )
+    sentence_parser.add_argument(
+        "--min-confidence", type=float, default=0.0
+    )
+
+    train_beam_parser = subparsers.add_parser(
+        "train-beam-decoder",
+        help="calibrate a pinyin-constrained beam sentence decoder",
+    )
+    train_beam_parser.add_argument("dataset", type=Path)
+    train_beam_parser.add_argument(
+        "--language-model", required=True, type=Path
+    )
+    train_beam_parser.add_argument(
+        "--rime-dictionary", required=True, type=Path
+    )
+    train_beam_parser.add_argument("--output", required=True, type=Path)
+    return parser
+
+
+def _validate(dataset_path: Path) -> int:
+    try:
+        dataset = load_dataset(dataset_path)
+    except DatasetValidationError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    samples = dataset.samples
+
+    report = {
+        "schema_version": 1,
+        "samples": len(samples),
+        "domains": dict(sorted(Counter(s["domain"] for s in samples).items())),
+        "splits": dict(sorted(Counter(s["split"] for s in samples).items())),
+    }
+    print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+    return 0
+
+
+def _evaluate(
+    dataset_path: Path,
+    ranker_name: str,
+    ranker_config: Optional[Path],
+    split: str,
+    min_confidence: float,
+    details_output: Optional[Path],
+    candidate_limit: int,
+) -> int:
+    if not isfinite(min_confidence) or not 0 <= min_confidence <= 1:
+        print(
+            "error: --min-confidence must be from 0 to 1",
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        dataset = load_dataset(dataset_path)
+    except DatasetValidationError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    samples = dataset.samples
+
+    selected_samples = (
+        samples
+        if split == "all"
+        else [sample for sample in samples if sample["split"] == split]
+    )
+    selected_samples = [
+        {
+            **sample,
+            "candidates": sample["candidates"][:candidate_limit],
+        }
+        for sample in selected_samples
+    ]
+    if not selected_samples:
+        print(
+            f"error: {dataset_path}: dataset contains no samples for split '{split}'",
+            file=sys.stderr,
+        )
+        return 2
+
+    if (
+        details_output is not None
+        and details_output.resolve() == dataset_path.resolve()
+    ):
+        print(
+            "error: --details-output must not overwrite the dataset",
+            file=sys.stderr,
+        )
+        return 2
+    details = [] if details_output is not None else None
+
+    if ranker_name in {"baseline", "context-repeat"}:
+        if ranker_config is not None:
+            print(
+                "error: --ranker-config is only valid with --ranker command",
+                file=sys.stderr,
+            )
+            return 2
+        ranker = (
+            BaselineRanker()
+            if ranker_name == "baseline"
+            else ContextRepeatRanker()
+        )
+        report = evaluate_dataset(
+            selected_samples,
+            ranker,
+            split,
+            min_confidence,
+            details,
+        )
+    else:
+        if ranker_config is None:
+            print(
+                "error: --ranker-config is required with --ranker command",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            with CommandRanker.from_config(ranker_config) as ranker:
+                report = evaluate_dataset(
+                    selected_samples,
+                    ranker,
+                    split,
+                    min_confidence,
+                    details,
+                )
+        except RankerConfigurationError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 2
+
+    report["dataset"]["sha256"] = dataset.sha256
+    if candidate_limit != 20:
+        report["dataset"]["candidate_limit"] = candidate_limit
+    if details_output is not None:
+        assert details is not None
+        try:
+            write_jsonl_atomic(details_output, details)
+        except OSError as error:
+            print(
+                f"error: cannot write details output '{details_output}': {error}",
+                file=sys.stderr,
+            )
+            return 2
+    print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+    return 0
+
+
+def _compare(report_paths: Sequence[Path]) -> int:
+    try:
+        reports = load_reports(report_paths)
+        comparison = render_markdown_comparison(reports)
+    except (ReportError, KeyError, TypeError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    print(comparison, end="")
+    return 0
+
+
+def _capture(
+    source_path: Path,
+    candidate_config_path: Path,
+    output_path: Path,
+    provenance_output_path: Path,
+) -> int:
+    try:
+        report = capture_dataset(
+            source_path,
+            candidate_config_path,
+            output_path,
+            provenance_output_path,
+        )
+    except (CaptureError, OSError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+    return 0
+
+
+def _train_ngram(dataset_path: Path, output_path: Path) -> int:
+    if output_path.resolve() == dataset_path.resolve():
+        print(
+            "error: --output must not overwrite the dataset",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        dataset = load_dataset(dataset_path)
+        model, report = train_ngram_model(
+            dataset.samples,
+            dataset_sha256=dataset.sha256,
+        )
+        artifact_sha256 = write_ngram_model_atomic(output_path, model)
+    except (DatasetValidationError, NGramModelError, OSError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    report["artifact"] = {
+        "path": str(output_path),
+        "bytes": output_path.stat().st_size,
+        "sha256": artifact_sha256,
+    }
+    print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+    return 0
+
+
+def _evaluate_sentence(
+    dataset_path: Path,
+    decoder_config_path: Path,
+    dictionary_path: Path,
+    split: str,
+    candidate_limit: int,
+    min_confidence: float,
+    details_output: Optional[Path],
+) -> int:
+    if not isfinite(min_confidence) or not 0 <= min_confidence <= 1:
+        print(
+            "error: --min-confidence must be from 0 to 1",
+            file=sys.stderr,
+        )
+        return 2
+    if (
+        details_output is not None
+        and details_output.resolve() == dataset_path.resolve()
+    ):
+        print(
+            "error: --details-output must not overwrite the dataset",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        dataset = load_dataset(dataset_path)
+        guard = PinyinGuard.from_rime_dictionary(dictionary_path)
+    except (DatasetValidationError, OSError, ValueError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    samples = (
+        dataset.samples
+        if split == "all"
+        else [sample for sample in dataset.samples if sample["split"] == split]
+    )
+    samples = [
+        {
+            **sample,
+            "candidates": sample["candidates"][:candidate_limit],
+        }
+        for sample in samples
+    ]
+    if not samples:
+        print(
+            f"error: {dataset_path}: dataset contains no samples for split '{split}'",
+            file=sys.stderr,
+        )
+        return 2
+    details = [] if details_output is not None else None
+    try:
+        with CommandSentenceDecoder.from_config(
+            decoder_config_path
+        ) as decoder:
+            report = evaluate_sentence_dataset(
+                samples,
+                decoder,
+                guard,
+                split=split,
+                min_confidence=min_confidence,
+                details=details,
+            )
+    except SentenceDecoderConfigurationError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    report["dataset"]["sha256"] = dataset.sha256
+    report["dataset"]["candidate_limit"] = candidate_limit
+    if details_output is not None:
+        assert details is not None
+        try:
+            write_jsonl_atomic(details_output, details)
+        except OSError as error:
+            print(
+                f"error: cannot write details output '{details_output}': {error}",
+                file=sys.stderr,
+            )
+            return 2
+    print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+    return 0
+
+
+def _sha256_path(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as file:
+        while True:
+            chunk = file.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _train_beam_decoder(
+    dataset_path: Path,
+    language_model_path: Path,
+    dictionary_path: Path,
+    output_path: Path,
+) -> int:
+    protected_paths = {
+        dataset_path.resolve(),
+        language_model_path.resolve(),
+        dictionary_path.resolve(),
+    }
+    if output_path.resolve() in protected_paths:
+        print(
+            "error: --output must not overwrite an input artifact",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        dataset = load_dataset(dataset_path)
+        language_model = load_ngram_model(language_model_path)
+        guard = PinyinGuard.from_rime_dictionary(dictionary_path)
+        language_model_sha256 = _sha256_path(language_model_path)
+        dictionary_sha256 = _sha256_path(dictionary_path)
+        config, report = train_beam_decoder_config(
+            dataset.samples,
+            language_model,
+            guard,
+            dataset_sha256=dataset.sha256,
+            language_model_sha256=language_model_sha256,
+            dictionary_sha256=dictionary_sha256,
+        )
+        write_beam_config_atomic(output_path, config)
+        artifact_sha256 = _sha256_path(output_path)
+    except (
+        DatasetValidationError,
+        NGramModelError,
+        BeamDecoderError,
+        OSError,
+        ValueError,
+    ) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    report["dataset_sha256"] = dataset.sha256
+    report["dependencies"] = {
+        "language_model_sha256": language_model_sha256,
+        "dictionary_sha256": dictionary_sha256,
+    }
+    report["artifact"] = {
+        "path": str(output_path),
+        "bytes": output_path.stat().st_size,
+        "sha256": artifact_sha256,
+    }
+    print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+    return 0
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    args = _build_parser().parse_args(argv)
+    if args.command == "validate":
+        return _validate(args.dataset)
+    if args.command == "evaluate":
+        return _evaluate(
+            args.dataset,
+            args.ranker,
+            args.ranker_config,
+            args.split,
+            args.min_confidence,
+            args.details_output,
+            args.candidate_limit,
+        )
+    if args.command == "compare":
+        return _compare(args.reports)
+    if args.command == "capture":
+        return _capture(
+            args.source,
+            args.candidate_config,
+            args.output,
+            args.provenance_output,
+        )
+    if args.command == "train-ngram":
+        return _train_ngram(args.dataset, args.output)
+    if args.command == "evaluate-sentence":
+        return _evaluate_sentence(
+            args.dataset,
+            args.decoder_config,
+            args.rime_dictionary,
+            args.split,
+            args.candidate_limit,
+            args.min_confidence,
+            args.details_output,
+        )
+    if args.command == "train-beam-decoder":
+        return _train_beam_decoder(
+            args.dataset,
+            args.language_model,
+            args.rime_dictionary,
+            args.output,
+        )
+    raise AssertionError("unreachable")

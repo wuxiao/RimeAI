@@ -1,0 +1,48 @@
+# macOS metadata
+._*
+.DS_Store
+Icon?
+
+# Python and local tooling
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.tox/
+.nox/
+.coverage
+coverage/
+htmlcov/
+
+# SwiftPM / Xcode build output
+.build/
+build/
+DerivedData/
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+*.xcarchive
+.swiftpm/
+
+# JavaScript dependencies and build output
+node_modules/
+dist/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Local RimeAI/runtime state
+.rimeai/
+.wrangler/
+python-dist/
+reports/
+
+# Local environment files (keep a checked-in example, if present)
+.env
+.env.*
+!.env.example

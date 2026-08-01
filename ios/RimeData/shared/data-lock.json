@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "librime": {
+    "version": "1.17.0",
+    "revision": "33e78140250125871856cdc5b42ddc6a5fcd3cd4"
+  },
+  "repositories": [
+    {
+      "name": "rime-prelude",
+      "url": "https://github.com/rime/rime-prelude.git",
+      "revision": "082425ea0684bca36474415d4a0e8db9b016487e"
+    },
+    {
+      "name": "rime-essay",
+      "url": "https://github.com/rime/rime-essay.git",
+      "revision": "e9b1a374a6ea015fca5bdd04318924b4483ac35a"
+    },
+    {
+      "name": "rime-luna-pinyin",
+      "url": "https://github.com/rime/rime-luna-pinyin.git",
+      "revision": "56b934b099dfbeab842320f13aa8b461a6ab3e42"
+    },
+    {
+      "name": "rime-stroke",
+      "url": "https://github.com/rime/rime-stroke.git",
+      "revision": "3a4b0f4013e2b4c14b1e80c92b1d4723eb65f39c"
+    }
+  ]
+}

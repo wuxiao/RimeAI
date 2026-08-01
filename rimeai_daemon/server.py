@@ -1,0 +1,566 @@
+"""Versioned Unix Domain Socket server with fail-closed request scheduling."""
+
+import asyncio
+import ctypes
+import json
+import math
+import os
+from pathlib import Path
+import re
+import socket
+import stat
+import struct
+from time import monotonic
+from typing import Any, Dict, Optional, Protocol, Set, Tuple
+
+
+class InferenceEngine(Protocol):
+    artifact_id: str
+
+    def infer(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        ...
+
+
+class DaemonConfigurationError(ValueError):
+    pass
+
+
+def _peer_uid(file_descriptor: int) -> int:
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        getpeereid = libc.getpeereid
+    except AttributeError:
+        if hasattr(socket, "SO_PEERCRED"):
+            peer_socket = socket.socket(fileno=os.dup(file_descriptor))
+            try:
+                credentials = peer_socket.getsockopt(
+                    socket.SOL_SOCKET,
+                    socket.SO_PEERCRED,
+                    struct.calcsize("3i"),
+                )
+            finally:
+                peer_socket.close()
+            _, uid, _ = struct.unpack("3i", credentials)
+            return uid
+        raise DaemonConfigurationError(
+            "this platform cannot verify Unix socket peer identity"
+        )
+    uid = ctypes.c_uint()
+    gid = ctypes.c_uint()
+    result = getpeereid(
+        ctypes.c_int(file_descriptor),
+        ctypes.byref(uid),
+        ctypes.byref(gid),
+    )
+    if result != 0:
+        error_number = ctypes.get_errno()
+        raise OSError(error_number, os.strerror(error_number))
+    return int(uid.value)
+
+
+def _error_response(
+    *,
+    status: str,
+    request_id: Optional[str] = None,
+    reason: Optional[str] = None,
+) -> Dict[str, Any]:
+    response: Dict[str, Any] = {
+        "schema_version": 1,
+        "type": "result",
+        "status": status,
+    }
+    if request_id is not None:
+        response["request_id"] = request_id
+    if reason is not None:
+        response["reason"] = reason
+    return response
+
+
+def _validate_inference_request(message: Any) -> Dict[str, Any]:
+    if not isinstance(message, dict):
+        raise ValueError("message must be an object")
+    required_strings = (
+        "request_id",
+        "composition_id",
+        "app_session_id",
+        "pinyin",
+    )
+    if any(
+        not isinstance(message.get(field), str)
+        or not message[field]
+        or len(message[field]) > 256
+        for field in required_strings
+    ):
+        raise ValueError("request identifiers and pinyin must be bounded strings")
+    revision = message.get("revision")
+    deadline_ms = message.get("deadline_ms")
+    if (
+        not isinstance(revision, int)
+        or isinstance(revision, bool)
+        or revision < 0
+        or not isinstance(deadline_ms, int)
+        or isinstance(deadline_ms, bool)
+        or not 1 <= deadline_ms <= 5000
+    ):
+        raise ValueError("revision or deadline is invalid")
+    if re.fullmatch(r"[a-z]+(?:'[a-z]+)*", message["pinyin"]) is None:
+        raise ValueError("pinyin must contain lowercase ASCII syllables")
+    context_policy = message.get("context_policy")
+    context = message.get("context")
+    if (
+        context_policy not in {"strict", "standard", "smart"}
+        or not isinstance(context, str)
+    ):
+        raise ValueError("context policy is invalid")
+    context_limit = {"strict": 0, "standard": 100, "smart": 400}[
+        context_policy
+    ]
+    if len(context) > context_limit:
+        raise ValueError("context exceeds the selected policy")
+    candidates = message.get("candidates")
+    if (
+        not isinstance(candidates, list)
+        or not 1 <= len(candidates) <= 10
+        or any(
+            not isinstance(candidate, str)
+            or not candidate
+            or len(candidate) > 128
+            for candidate in candidates
+        )
+        or len(candidates) != len(set(candidates))
+    ):
+        raise ValueError("candidates must contain 1 to 10 unique strings")
+    if not isinstance(message.get("allow_sentence"), bool) or not isinstance(
+        message.get("sensitive"), bool
+    ):
+        raise ValueError("request policy flags must be booleans")
+    return {
+        field: message[field]
+        for field in (
+            "request_id",
+            "composition_id",
+            "revision",
+            "app_session_id",
+            "context_policy",
+            "context",
+            "pinyin",
+            "candidates",
+            "deadline_ms",
+            "allow_sentence",
+            "sensitive",
+        )
+    }
+
+
+class RimeAIDaemonServer:
+    def __init__(self, socket_path: Path, engine: InferenceEngine):
+        self.socket_path = socket_path
+        self.engine = engine
+        self._server: Optional[asyncio.AbstractServer] = None
+        self._all_tasks: Set["asyncio.Task[Any]"] = set()
+        self._consecutive_failures = 0
+        self._circuit_open_until = 0.0
+
+    def _record_engine_failure(self) -> None:
+        self._consecutive_failures += 1
+        if self._consecutive_failures >= 3:
+            self._circuit_open_until = monotonic() + 30
+
+    async def start(self) -> None:
+        if len(os.fsencode(self.socket_path)) > 103:
+            raise DaemonConfigurationError(
+                "Unix socket path exceeds the macOS 103-byte limit"
+            )
+        parent = self.socket_path.parent
+        if parent.exists() and parent.is_symlink():
+            raise DaemonConfigurationError(
+                "runtime directory must not be a symbolic link"
+            )
+        parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(parent, 0o700)
+        if self.socket_path.exists() or self.socket_path.is_symlink():
+            mode = self.socket_path.lstat().st_mode
+            if not stat.S_ISSOCK(mode):
+                raise DaemonConfigurationError(
+                    "refusing to replace a non-socket runtime path"
+                )
+            probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            probe.settimeout(0.1)
+            try:
+                probe.connect(str(self.socket_path))
+            except (ConnectionRefusedError, FileNotFoundError):
+                pass
+            except OSError as error:
+                raise DaemonConfigurationError(
+                    f"cannot verify existing runtime socket: {error}"
+                ) from error
+            else:
+                raise DaemonConfigurationError(
+                    "another RimeAI daemon is already running"
+                )
+            finally:
+                probe.close()
+            self.socket_path.unlink()
+        self._server = await asyncio.start_unix_server(
+            self._handle_client,
+            path=str(self.socket_path),
+            limit=1024 * 1024,
+        )
+        os.chmod(self.socket_path, 0o600)
+
+    async def close(self) -> None:
+        if self._server is not None:
+            self._server.close()
+            await self._server.wait_closed()
+            self._server = None
+        for task in list(self._all_tasks):
+            task.cancel()
+        if self._all_tasks:
+            await asyncio.gather(*self._all_tasks, return_exceptions=True)
+        if self.socket_path.exists():
+            mode = self.socket_path.lstat().st_mode
+            if stat.S_ISSOCK(mode):
+                self.socket_path.unlink()
+
+    async def serve_forever(self) -> None:
+        if self._server is None:
+            raise DaemonConfigurationError("daemon server has not started")
+        async with self._server:
+            await self._server.serve_forever()
+
+    async def _write(
+        self,
+        writer: asyncio.StreamWriter,
+        lock: asyncio.Lock,
+        payload: Dict[str, Any],
+    ) -> None:
+        encoded = (
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            + "\n"
+        ).encode("utf-8")
+        async with lock:
+            writer.write(encoded)
+            await writer.drain()
+
+    async def _handle_client(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        peer_socket = writer.get_extra_info("socket")
+        if peer_socket is None:
+            writer.close()
+            await writer.wait_closed()
+            return
+        try:
+            if _peer_uid(peer_socket.fileno()) != os.geteuid():
+                writer.close()
+                await writer.wait_closed()
+                return
+        except (OSError, DaemonConfigurationError):
+            writer.close()
+            await writer.wait_closed()
+            return
+
+        write_lock = asyncio.Lock()
+        hello_complete = False
+        pending_by_key: Dict[Tuple[str, str], "asyncio.Task[Any]"] = {}
+        pending_by_id: Dict[str, "asyncio.Task[Any]"] = {}
+        latest_revision: Dict[Tuple[str, str], int] = {}
+        try:
+            while not reader.at_eof():
+                try:
+                    line = await reader.readline()
+                except (ValueError, asyncio.LimitOverrunError):
+                    break
+                if not line:
+                    break
+                try:
+                    message = json.loads(line)
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    await self._write(
+                        writer,
+                        write_lock,
+                        _error_response(status="protocol_error"),
+                    )
+                    break
+                if (
+                    not isinstance(message, dict)
+                    or message.get("schema_version") != 1
+                ):
+                    await self._write(
+                        writer,
+                        write_lock,
+                        _error_response(status="incompatible_protocol"),
+                    )
+                    break
+                message_type = message.get("type")
+                if not hello_complete:
+                    if (
+                        message_type != "hello"
+                        or not isinstance(message.get("client_id"), str)
+                        or not message["client_id"]
+                        or not isinstance(message.get("capabilities"), list)
+                    ):
+                        await self._write(
+                            writer,
+                            write_lock,
+                            _error_response(status="hello_required"),
+                        )
+                        break
+                    hello_complete = True
+                    await self._write(
+                        writer,
+                        write_lock,
+                        {
+                            "schema_version": 1,
+                            "type": "hello",
+                            "status": "ok",
+                            "protocol_version": 1,
+                            "capabilities": [
+                                "rerank",
+                                "sentence",
+                                "cancel",
+                                "deadline",
+                                "latest-request-wins",
+                                "offline-lock",
+                            ],
+                            "offline_lock": True,
+                            "model_artifact_id": self.engine.artifact_id,
+                            "model_artifacts": getattr(
+                                self.engine,
+                                "artifacts",
+                                [],
+                            ),
+                        },
+                    )
+                    continue
+                if message_type == "cancel":
+                    request_id = message.get("request_id")
+                    task = (
+                        pending_by_id.get(request_id)
+                        if isinstance(request_id, str)
+                        else None
+                    )
+                    if task is not None:
+                        task.cancel()
+                    await self._write(
+                        writer,
+                        write_lock,
+                        {
+                            "schema_version": 1,
+                            "type": "cancelled",
+                            "request_id": request_id,
+                            "status": "ok",
+                        },
+                    )
+                    continue
+                if message_type != "infer":
+                    await self._write(
+                        writer,
+                        write_lock,
+                        _error_response(status="unsupported_message"),
+                    )
+                    continue
+                try:
+                    request = _validate_inference_request(message)
+                except ValueError:
+                    request_id = (
+                        message.get("request_id")
+                        if isinstance(message.get("request_id"), str)
+                        else None
+                    )
+                    await self._write(
+                        writer,
+                        write_lock,
+                        _error_response(
+                            status="invalid_request",
+                            request_id=request_id,
+                        ),
+                    )
+                    continue
+                request_id = request["request_id"]
+                if request["sensitive"]:
+                    await self._write(
+                        writer,
+                        write_lock,
+                        _error_response(
+                            status="privacy_blocked",
+                            request_id=request_id,
+                        ),
+                    )
+                    continue
+                if monotonic() < self._circuit_open_until:
+                    await self._write(
+                        writer,
+                        write_lock,
+                        _error_response(
+                            status="circuit_open",
+                            request_id=request_id,
+                        ),
+                    )
+                    continue
+                key = (
+                    request["app_session_id"],
+                    request["composition_id"],
+                )
+                previous_revision = latest_revision.get(key, -1)
+                if request["revision"] <= previous_revision:
+                    await self._write(
+                        writer,
+                        write_lock,
+                        _error_response(
+                            status="stale",
+                            request_id=request_id,
+                        ),
+                    )
+                    continue
+                latest_revision[key] = request["revision"]
+                previous_task = pending_by_key.get(key)
+                if previous_task is not None:
+                    previous_task.cancel()
+                task = asyncio.create_task(
+                    self._run_inference(
+                        request,
+                        key,
+                        latest_revision,
+                        writer,
+                        write_lock,
+                    )
+                )
+                pending_by_key[key] = task
+                pending_by_id[request_id] = task
+                self._all_tasks.add(task)
+
+                def cleanup(
+                    completed: "asyncio.Task[Any]",
+                    *,
+                    current_key: Tuple[str, str] = key,
+                    current_id: str = request_id,
+                ) -> None:
+                    self._all_tasks.discard(completed)
+                    if pending_by_key.get(current_key) is completed:
+                        pending_by_key.pop(current_key, None)
+                    if pending_by_id.get(current_id) is completed:
+                        pending_by_id.pop(current_id, None)
+
+                task.add_done_callback(cleanup)
+        finally:
+            for task in list(pending_by_id.values()):
+                task.cancel()
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+    async def _run_inference(
+        self,
+        request: Dict[str, Any],
+        key: Tuple[str, str],
+        latest_revision: Dict[Tuple[str, str], int],
+        writer: asyncio.StreamWriter,
+        write_lock: asyncio.Lock,
+    ) -> None:
+        loop = asyncio.get_running_loop()
+        started_at = monotonic()
+        try:
+            future = loop.run_in_executor(None, self.engine.infer, request)
+            result = await asyncio.wait_for(
+                future,
+                timeout=request["deadline_ms"] / 1000,
+            )
+        except asyncio.CancelledError:
+            return
+        except asyncio.TimeoutError:
+            self._record_engine_failure()
+            await self._write(
+                writer,
+                write_lock,
+                _error_response(
+                    status="timeout",
+                    request_id=request["request_id"],
+                ),
+            )
+            return
+        except Exception:
+            self._record_engine_failure()
+            await self._write(
+                writer,
+                write_lock,
+                _error_response(
+                    status="engine_error",
+                    request_id=request["request_id"],
+                ),
+            )
+            return
+        if latest_revision.get(key) != request["revision"]:
+            return
+        confidence = result.get("confidence") if isinstance(result, dict) else None
+        ranked_candidate = (
+            result.get("ranked_candidate")
+            if isinstance(result, dict)
+            else None
+        )
+        sentence_suggestion = (
+            result.get("sentence_suggestion")
+            if isinstance(result, dict)
+            else None
+        )
+        if (
+            not isinstance(result, dict)
+            or not isinstance(ranked_candidate, str)
+            or not isinstance(sentence_suggestion, str)
+            or not isinstance(confidence, (int, float))
+            or isinstance(confidence, bool)
+            or not math.isfinite(confidence)
+            or not 0 <= confidence <= 1
+            or (
+                ranked_candidate
+                and ranked_candidate not in request["candidates"]
+            )
+            or len(ranked_candidate) > 128
+            or "\n" in ranked_candidate
+            or "\r" in ranked_candidate
+            or len(sentence_suggestion) > 30
+            or "\n" in sentence_suggestion
+            or "\r" in sentence_suggestion
+        ):
+            self._record_engine_failure()
+            await self._write(
+                writer,
+                write_lock,
+                _error_response(
+                    status="engine_error",
+                    request_id=request["request_id"],
+                ),
+            )
+            return
+        self._consecutive_failures = 0
+        await self._write(
+            writer,
+            write_lock,
+            {
+                "schema_version": 1,
+                "type": "result",
+                "status": "ok",
+                "request_id": request["request_id"],
+                "composition_id": request["composition_id"],
+                "revision": request["revision"],
+                "app_session_id": request["app_session_id"],
+                "ranked_candidate": ranked_candidate,
+                "sentence_suggestion": (
+                    sentence_suggestion
+                    if request["allow_sentence"]
+                    else ""
+                ),
+                "confidence": float(confidence),
+                "model_artifact_id": self.engine.artifact_id,
+                "elapsed_ms": round((monotonic() - started_at) * 1000, 3),
+            },
+        )
