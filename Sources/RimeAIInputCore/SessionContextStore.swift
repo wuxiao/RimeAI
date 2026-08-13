@@ -1,18 +1,24 @@
 public struct SessionContextStore: Sendable {
     public let maxCharacters: Int
     public private(set) var activeSessionID: String?
+    public private(set) var retainedSessionID: String?
     public private(set) var context = ""
+    private var activeOwnerIDs: Set<String> = []
 
     public init(maxCharacters: Int = 100) {
         precondition(maxCharacters > 0)
         self.maxCharacters = maxCharacters
     }
 
-    public mutating func activate(sessionID: String) {
-        guard activeSessionID != sessionID else {
-            return
+    public mutating func activate(
+        sessionID: String,
+        ownerID: String = "default"
+    ) {
+        if retainedSessionID != sessionID {
+            erase()
+            retainedSessionID = sessionID
         }
-        erase()
+        activeOwnerIDs.insert(ownerID)
         activeSessionID = sessionID
     }
 
@@ -32,6 +38,13 @@ public struct SessionContextStore: Sendable {
         erase()
     }
 
+    public mutating func suspend(ownerID: String = "default") {
+        activeOwnerIDs.remove(ownerID)
+        if activeOwnerIDs.isEmpty {
+            activeSessionID = nil
+        }
+    }
+
     public mutating func deactivate() {
         erase()
     }
@@ -39,5 +52,7 @@ public struct SessionContextStore: Sendable {
     private mutating func erase() {
         context.removeAll(keepingCapacity: false)
         activeSessionID = nil
+        retainedSessionID = nil
+        activeOwnerIDs.removeAll(keepingCapacity: false)
     }
 }

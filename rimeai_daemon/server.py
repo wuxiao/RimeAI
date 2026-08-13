@@ -1,6 +1,7 @@
 """Versioned Unix Domain Socket server with fail-closed request scheduling."""
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import ctypes
 import json
 import math
@@ -157,6 +158,10 @@ class RimeAIDaemonServer:
         self.socket_path = socket_path
         self.engine = engine
         self._server: Optional[asyncio.AbstractServer] = None
+        self._inference_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="rimeai-inference",
+        )
         self._all_tasks: Set["asyncio.Task[Any]"] = set()
         self._consecutive_failures = 0
         self._circuit_open_until = 0.0
@@ -221,6 +226,7 @@ class RimeAIDaemonServer:
             mode = self.socket_path.lstat().st_mode
             if stat.S_ISSOCK(mode):
                 self.socket_path.unlink()
+        self._inference_executor.shutdown(wait=True, cancel_futures=True)
 
     async def serve_forever(self) -> None:
         if self._server is None:
@@ -329,6 +335,8 @@ class RimeAIDaemonServer:
                                 "deadline",
                                 "latest-request-wins",
                                 "offline-lock",
+                                "decision-reasons",
+                                "long-input-reasons",
                             ],
                             "offline_lock": True,
                             "model_artifact_id": self.engine.artifact_id,
@@ -470,7 +478,11 @@ class RimeAIDaemonServer:
         loop = asyncio.get_running_loop()
         started_at = monotonic()
         try:
-            future = loop.run_in_executor(None, self.engine.infer, request)
+            future = loop.run_in_executor(
+                self._inference_executor,
+                self.engine.infer,
+                request,
+            )
             result = await asyncio.wait_for(
                 future,
                 timeout=request["deadline_ms"] / 1000,
@@ -502,6 +514,7 @@ class RimeAIDaemonServer:
         if latest_revision.get(key) != request["revision"]:
             return
         confidence = result.get("confidence") if isinstance(result, dict) else None
+        decision = result.get("decision") if isinstance(result, dict) else None
         ranked_candidate = (
             result.get("ranked_candidate")
             if isinstance(result, dict)
@@ -514,6 +527,16 @@ class RimeAIDaemonServer:
         )
         if (
             not isinstance(result, dict)
+            or decision
+            not in {
+                "ranked_candidate",
+                "sentence_suggestion",
+                "same_top_candidate",
+                "below_confidence",
+                "no_candidate",
+                "sentence_too_long",
+                "sentence_incomplete",
+            }
             or not isinstance(ranked_candidate, str)
             or not isinstance(sentence_suggestion, str)
             or not isinstance(confidence, (int, float))
@@ -530,6 +553,29 @@ class RimeAIDaemonServer:
             or len(sentence_suggestion) > 30
             or "\n" in sentence_suggestion
             or "\r" in sentence_suggestion
+            or (
+                decision == "ranked_candidate"
+                and (not ranked_candidate or sentence_suggestion)
+            )
+            or (
+                decision == "sentence_suggestion"
+                and (
+                    not request["allow_sentence"]
+                    or not sentence_suggestion
+                    or ranked_candidate
+                )
+            )
+            or (
+                decision
+                in {
+                    "same_top_candidate",
+                    "below_confidence",
+                    "no_candidate",
+                    "sentence_too_long",
+                    "sentence_incomplete",
+                }
+                and (ranked_candidate or sentence_suggestion)
+            )
         ):
             self._record_engine_failure()
             await self._write(
@@ -553,6 +599,7 @@ class RimeAIDaemonServer:
                 "composition_id": request["composition_id"],
                 "revision": request["revision"],
                 "app_session_id": request["app_session_id"],
+                "decision": decision,
                 "ranked_candidate": ranked_candidate,
                 "sentence_suggestion": (
                     sentence_suggestion

@@ -17,7 +17,8 @@ if [[ -f "${pid_path}" ]]; then
   if [[ "${daemon_pid}" == <-> ]] \
     && kill -0 "${daemon_pid}" 2>/dev/null; then
     daemon_command=$(ps -p "${daemon_pid}" -o command= 2>/dev/null || true)
-    if [[ "${daemon_command}" == *"rimeai_daemon"* ]] \
+    if [[ ( "${daemon_command}" == *"rimeai_daemon"* \
+      || "${daemon_command}" == *"rimeai-daemon"* ) ]] \
       && [[ "${daemon_command}" == *"${socket_path}"* ]]; then
       kill -TERM "${daemon_pid}"
       for _ in {1..30}; do

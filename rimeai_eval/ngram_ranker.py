@@ -9,7 +9,7 @@ import math
 import os
 from pathlib import Path
 import tempfile
-from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from .candidate_policy import partition_full_length_candidates
 
@@ -203,7 +203,9 @@ def train_ngram_model(
         "validation": len(validation_samples),
     }
 
-    best: Tuple[float, float, float, float, float, NGramRankerModel] | None = None
+    best: Optional[
+        Tuple[float, float, float, float, float, NGramRankerModel]
+    ] = None
     for rank_weight in _RANK_WEIGHTS:
         for frequency_weight in _FREQUENCY_WEIGHTS:
             for language_weight in _LANGUAGE_WEIGHTS:

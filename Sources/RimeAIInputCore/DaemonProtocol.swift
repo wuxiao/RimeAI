@@ -17,6 +17,86 @@ public enum ContextPolicy: String, Codable, Sendable {
     }
 }
 
+public enum SemanticInferenceDecision: String, Codable, Sendable {
+    case rankedCandidate = "ranked_candidate"
+    case sentenceSuggestion = "sentence_suggestion"
+    case sameTopCandidate = "same_top_candidate"
+    case belowConfidence = "below_confidence"
+    case noCandidate = "no_candidate"
+    case sentenceTooLong = "sentence_too_long"
+    case sentenceIncomplete = "sentence_incomplete"
+}
+
+public enum SemanticCandidatePresentation: Equatable, Sendable {
+    case idle
+    case analyzing
+    case candidate(
+        text: String,
+        decision: SemanticInferenceDecision,
+        confidence: Double
+    )
+    case sameTopCandidate
+    case belowConfidence
+    case noCandidate
+    case sentenceTooLong
+    case sentenceIncomplete
+    case inputTooLong
+    case unavailable
+    case failure
+
+    public var title: String {
+        switch self {
+        case .idle:
+            "✦ 本地模型待命"
+        case .analyzing:
+            "✦ 本地模型分析中…"
+        case let .candidate(text, _, _):
+            "✦ \(text)"
+        case .sameTopCandidate:
+            "✦ 本地模型：首选一致"
+        case .belowConfidence:
+            "✦ 本地模型：置信度不足，保留 Rime"
+        case .noCandidate:
+            "✦ 本地模型：没有可用语义候选"
+        case .sentenceTooLong:
+            "✦ 本地模型：整句超过 30 字，请分段输入"
+        case .sentenceIncomplete:
+            "✦ 本地模型：候选未覆盖完整拼音，保留 Rime"
+        case .inputTooLong:
+            "✦ 本地模型：拼音输入过长，保留 Rime"
+        case .unavailable:
+            "✦ 本地模型已停用"
+        case .failure:
+            "✦ 本地模型暂不可用，已回退 Rime"
+        }
+    }
+
+    public var isSelectable: Bool {
+        if case .candidate = self {
+            return true
+        }
+        return false
+    }
+
+    public var prefersCommitOnSpace: Bool {
+        guard case let .candidate(_, decision, confidence) = self else {
+            return false
+        }
+        switch decision {
+        case .rankedCandidate:
+            return confidence >= 0.90
+        case .sentenceSuggestion:
+            return confidence >= 0.97
+        case .sameTopCandidate,
+             .belowConfidence,
+             .noCandidate,
+             .sentenceTooLong,
+             .sentenceIncomplete:
+            return false
+        }
+    }
+}
+
 public struct DaemonHelloRequest: Codable, Sendable {
     public let schemaVersion = 1
     public let type = "hello"
@@ -25,7 +105,14 @@ public struct DaemonHelloRequest: Codable, Sendable {
 
     public init(
         clientID: String,
-        capabilities: [String] = ["rerank", "sentence", "cancel", "deadline"]
+        capabilities: [String] = [
+            "rerank",
+            "sentence",
+            "cancel",
+            "deadline",
+            "decision-reasons",
+            "long-input-reasons",
+        ]
     ) {
         self.clientID = clientID
         self.capabilities = capabilities
@@ -54,6 +141,8 @@ public struct DaemonHelloResponse: Codable, Sendable {
             && type == "hello"
             && status == "ok"
             && protocolVersion == 1
+            && capabilities.contains("decision-reasons")
+            && capabilities.contains("long-input-reasons")
     }
 
     enum CodingKeys: String, CodingKey {
@@ -148,6 +237,9 @@ public struct SemanticInferenceResult: Codable, Sendable {
     public let rankedCandidate: String?
     public let sentenceSuggestion: String?
     public let confidence: Double?
+    public let decision: SemanticInferenceDecision?
+    public let modelArtifactID: String?
+    public let elapsedMilliseconds: Double?
 
     public init(
         schemaVersion: Int = 1,
@@ -159,7 +251,10 @@ public struct SemanticInferenceResult: Codable, Sendable {
         appSessionID: String?,
         rankedCandidate: String?,
         sentenceSuggestion: String?,
-        confidence: Double?
+        confidence: Double?,
+        decision: SemanticInferenceDecision? = nil,
+        modelArtifactID: String? = nil,
+        elapsedMilliseconds: Double? = nil
     ) {
         self.schemaVersion = schemaVersion
         self.type = type
@@ -171,6 +266,9 @@ public struct SemanticInferenceResult: Codable, Sendable {
         self.rankedCandidate = rankedCandidate
         self.sentenceSuggestion = sentenceSuggestion
         self.confidence = confidence
+        self.decision = decision
+        self.modelArtifactID = modelArtifactID
+        self.elapsedMilliseconds = elapsedMilliseconds
     }
 
     public func matches(_ token: CompositionToken) -> Bool {
@@ -189,7 +287,52 @@ public struct SemanticInferenceResult: Codable, Sendable {
         return rankedCandidate ?? ""
     }
 
-    public func isDisplayable(
+    public var resolvedDecision: SemanticInferenceDecision? {
+        if let decision {
+            return decision
+        }
+        if let sentenceSuggestion, !sentenceSuggestion.isEmpty {
+            return .sentenceSuggestion
+        }
+        if let rankedCandidate, !rankedCandidate.isEmpty {
+            return .rankedCandidate
+        }
+        return nil
+    }
+
+    public var candidatePresentation: SemanticCandidatePresentation {
+        guard let confidence,
+              let decision = resolvedDecision
+        else {
+            return .failure
+        }
+        switch decision {
+        case .rankedCandidate:
+            return .candidate(
+                text: rankedCandidate ?? "",
+                decision: decision,
+                confidence: confidence
+            )
+        case .sentenceSuggestion:
+            return .candidate(
+                text: sentenceSuggestion ?? "",
+                decision: decision,
+                confidence: confidence
+            )
+        case .sameTopCandidate:
+            return .sameTopCandidate
+        case .belowConfidence:
+            return .belowConfidence
+        case .noCandidate:
+            return .noCandidate
+        case .sentenceTooLong:
+            return .sentenceTooLong
+        case .sentenceIncomplete:
+            return .sentenceIncomplete
+        }
+    }
+
+    public func isValid(
         for token: CompositionToken,
         candidates: [String]
     ) -> Bool {
@@ -202,8 +345,7 @@ public struct SemanticInferenceResult: Codable, Sendable {
         }
         let rankedCandidate = rankedCandidate ?? ""
         let sentenceSuggestion = sentenceSuggestion ?? ""
-        guard rankedCandidate.isEmpty
-                || candidates.contains(rankedCandidate),
+        guard rankedCandidate.isEmpty || candidates.contains(rankedCandidate),
               rankedCandidate.count <= 128,
               !rankedCandidate.contains("\n"),
               !rankedCandidate.contains("\r"),
@@ -213,7 +355,28 @@ public struct SemanticInferenceResult: Codable, Sendable {
         else {
             return false
         }
-        return !displayCandidate.isEmpty
+        switch resolvedDecision {
+        case .rankedCandidate:
+            return !rankedCandidate.isEmpty && sentenceSuggestion.isEmpty
+        case .sentenceSuggestion:
+            return rankedCandidate.isEmpty && !sentenceSuggestion.isEmpty
+        case .sameTopCandidate,
+             .belowConfidence,
+             .noCandidate,
+             .sentenceTooLong,
+             .sentenceIncomplete:
+            return rankedCandidate.isEmpty && sentenceSuggestion.isEmpty
+        case nil:
+            return false
+        }
+    }
+
+    public func isDisplayable(
+        for token: CompositionToken,
+        candidates: [String]
+    ) -> Bool {
+        isValid(for: token, candidates: candidates)
+            && candidatePresentation.isSelectable
     }
 
     enum CodingKeys: String, CodingKey {
@@ -227,6 +390,9 @@ public struct SemanticInferenceResult: Codable, Sendable {
         case rankedCandidate = "ranked_candidate"
         case sentenceSuggestion = "sentence_suggestion"
         case confidence
+        case decision
+        case modelArtifactID = "model_artifact_id"
+        case elapsedMilliseconds = "elapsed_ms"
     }
 }
 

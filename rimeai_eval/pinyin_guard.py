@@ -56,14 +56,33 @@ class PinyinGuard:
             }
         )
 
-    def matches(self, text: str, pinyin: str) -> bool:
-        return self.segment(text, pinyin) is not None
+    def matches(
+        self,
+        text: str,
+        pinyin: str,
+        *,
+        maximum_characters: int = 30,
+    ) -> bool:
+        return (
+            self.segment(
+                text,
+                pinyin,
+                maximum_characters=maximum_characters,
+            )
+            is not None
+        )
 
-    def segment(self, text: str, pinyin: str) -> Optional[List[str]]:
+    def segment(
+        self,
+        text: str,
+        pinyin: str,
+        *,
+        maximum_characters: int = 30,
+    ) -> Optional[List[str]]:
         normalized = _normalize_pinyin(pinyin)
         if (
             not text
-            or len(text) > 30
+            or len(text) > maximum_characters
             or not _HAN_TEXT.fullmatch(text)
             or not _PINYIN.fullmatch(normalized)
         ):

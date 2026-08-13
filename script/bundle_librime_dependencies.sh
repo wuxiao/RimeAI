@@ -1,5 +1,8 @@
 #!/bin/zsh
 
+# The historical name is retained for callers. librime is now linked from the
+# repository-controlled static XCFramework, so this script verifies and signs;
+# it never copies libraries from Homebrew or another machine-local prefix.
 set -euo pipefail
 
 if [[ $# -lt 1 || $# -gt 2 ]]; then
@@ -7,12 +10,10 @@ if [[ $# -lt 1 || $# -gt 2 ]]; then
   exit 2
 fi
 
-app_bundle=$1
+app_bundle=${1:A}
 signing_identity=${2:--}
-frameworks_dir="${app_bundle}/Contents/Frameworks"
 macos_dir="${app_bundle}/Contents/MacOS"
 app_executable="${macos_dir}/RimeAIInputMethod"
-app_debug_library="${macos_dir}/RimeAIInputMethod.debug.dylib"
 timestamp_argument="--timestamp=none"
 keychain_arguments=()
 
@@ -25,68 +26,65 @@ if [[ -n "${RIMEAI_CODE_SIGN_KEYCHAIN:-}" ]]; then
       "error: signing keychain does not exist: ${RIMEAI_CODE_SIGN_KEYCHAIN}"
     exit 2
   fi
-  keychain_arguments=(
-    "--keychain"
-    "${RIMEAI_CODE_SIGN_KEYCHAIN}"
-  )
+  keychain_arguments=("--keychain" "${RIMEAI_CODE_SIGN_KEYCHAIN}")
 fi
-
 if [[ ! -d "${app_bundle}" || ! -f "${app_executable}" ]]; then
   print -u2 "error: RimeAI input method bundle is incomplete"
   exit 2
 fi
 
-app_patch_target="${app_executable}"
-if [[ -f "${app_debug_library}" ]]; then
-  # Xcode 16 and later put Debug code in this dylib and leave a small runner
-  # executable in the bundle. Release builds link librime into the executable.
-  app_patch_target="${app_debug_library}"
+mach_o_files=()
+while IFS= read -r candidate; do
+  if file -b "${candidate}" | grep -q 'Mach-O'; then
+    mach_o_files+=("${candidate}")
+  fi
+done < <(find "${app_bundle}/Contents" -type f -print | sort)
+if (( ${#mach_o_files} == 0 )); then
+  print -u2 "error: input method bundle contains no Mach-O files"
+  exit 1
 fi
 
-mkdir -p "${frameworks_dir}"
-
-dependency_pairs=(
-  "/opt/homebrew/opt/librime/lib/librime.1.dylib|librime.1.dylib"
-  "/opt/homebrew/opt/glog/lib/libglog.2.dylib|libglog.2.dylib"
-  "/opt/homebrew/opt/yaml-cpp/lib/libyaml-cpp.0.9.dylib|libyaml-cpp.0.9.dylib"
-  "/opt/homebrew/opt/gflags/lib/libgflags.2.3.dylib|libgflags.2.3.dylib"
-  "/opt/homebrew/opt/leveldb/lib/libleveldb.1.dylib|libleveldb.1.dylib"
-  "/opt/homebrew/opt/marisa/lib/libmarisa.0.dylib|libmarisa.0.dylib"
-  "/opt/homebrew/opt/opencc/lib/libopencc.1.4.dylib|libopencc.1.4.dylib"
-  "/opt/homebrew/opt/snappy/lib/libsnappy.1.dylib|libsnappy.1.dylib"
-)
-
-bundled_libraries=()
-for pair in "${dependency_pairs[@]}"; do
-  fields=("${(@s:|:)pair}")
-  source_library=${fields[1]}
-  destination_name=${fields[2]}
-  destination_library="${frameworks_dir}/${destination_name}"
-  if [[ ! -f "${source_library}" ]]; then
-    print -u2 "error: required librime dependency is missing: ${source_library}"
-    exit 2
+bridge_found=false
+for target in "${mach_o_files[@]}"; do
+  linked_libraries=$(otool -L "${target}")
+  if [[ "${linked_libraries}" == *'/opt/homebrew/'* \
+    || "${linked_libraries}" == *'/usr/local/'* ]]; then
+    print -u2 "error: machine-local dependency remains in ${target}"
+    exit 1
   fi
-  /bin/cp -fL "${source_library}" "${destination_library}"
-  chmod 755 "${destination_library}"
-  install_name_tool -id "@rpath/${destination_name}" \
-    "${destination_library}"
-  bundled_libraries+=("${destination_library}")
-done
-
-patch_targets=("${app_patch_target}" "${bundled_libraries[@]}")
-for target in "${patch_targets[@]}"; do
-  for pair in "${dependency_pairs[@]}"; do
-    fields=("${(@s:|:)pair}")
-    source_library=${fields[1]}
-    destination_name=${fields[2]}
-    if otool -L "${target}" | grep -Fq "${source_library}"; then
-      install_name_tool -change "${source_library}" \
-        "@rpath/${destination_name}" "${target}"
+  if [[ "$(lipo -archs "${target}")" != "arm64" ]]; then
+    print -u2 "error: input method Mach-O must be arm64: ${target}"
+    exit 1
+  fi
+  minimum_versions=(
+    "${(@f)$(otool -l "${target}" \
+      | awk '/^[[:space:]]*minos / { print $2 }')}"
+  )
+  if (( ${#minimum_versions} == 0 )); then
+    print -u2 "error: input method Mach-O has no deployment target: ${target}"
+    exit 1
+  fi
+  for minimum_version in "${minimum_versions[@]}"; do
+    if ! awk -v found="${minimum_version}" 'BEGIN {
+      split(found, actual, ".")
+      if ((actual[1] + 0) > 14) exit 1
+      if ((actual[1] + 0) == 14 && (actual[2] + 0) > 0) exit 1
+    }'; then
+      print -u2 \
+        "error: ${target} requires macOS ${minimum_version}, expected 14.0"
+      exit 1
     fi
   done
+  if nm -gU "${target}" 2>/dev/null | grep -q ' _rai_engine_create'; then
+    bridge_found=true
+  fi
 done
+if [[ "${bridge_found}" != true ]]; then
+  print -u2 "error: controlled librime bridge was not linked into the app"
+  exit 1
+fi
 
-for target in "${bundled_libraries[@]}" "${macos_dir}"/*.dylib(N); do
+for target in "${mach_o_files[@]}"; do
   codesign --force --sign "${signing_identity}" "${timestamp_argument}" \
     "${keychain_arguments[@]}" --options runtime "${target}"
 done
@@ -94,9 +92,8 @@ codesign --force --sign "${signing_identity}" "${timestamp_argument}" \
   "${keychain_arguments[@]}" --options runtime "${app_bundle}"
 codesign --verify --deep --strict "${app_bundle}"
 
-for target in "${patch_targets[@]}"; do
-  if otool -L "${target}" | grep -Fq "/opt/homebrew/"; then
-    print -u2 "error: Homebrew dependency remains in ${target}"
-    exit 1
-  fi
-done
+print -r -- "mach_o_count=${#mach_o_files}"
+print -r -- "architecture=arm64"
+print -r -- "minimum_macos=14.0"
+print -r -- "machine_local_dependencies=none"
+print -r -- "controlled_librime=linked"

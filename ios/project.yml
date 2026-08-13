@@ -56,6 +56,9 @@ targets:
       - path: RimeData
         type: folder
         buildPhase: resources
+      - path: SemanticModel
+        type: folder
+        buildPhase: resources
       - path: ../Sources/RimeAIInputCore
         excludes:
           - ProductDataLayout.swift
@@ -92,8 +95,15 @@ targets:
       - path: KeyboardExtension
         excludes:
           - Info.plist
+      - path: ../Sources/RimeAIInputCore
+        excludes:
+          - ProductDataLayout.swift
+          - RimeAISettingsStore.swift
       - path: ../Sources/RimeBridgeC/RimeBridgeC.cc
       - path: RimeData
+        type: folder
+        buildPhase: resources
+      - path: SemanticModel
         type: folder
         buildPhase: resources
     dependencies:

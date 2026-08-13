@@ -5,7 +5,7 @@
 | 项目 | 内容 |
 |---|---|
 | 文档版本 | 1.0 |
-| 文档日期 | 2026-07-29 |
+| 文档日期 | 2026-08-13 |
 | 文档状态 | `ACCEPTED TARGET STATE`，其中交付状态按本章证据表单独标记 |
 | 产品代号 | RimeAI；Phoenix / ASIE 仅作为历史候选名称 |
 | 首发平台 | macOS Apple Silicon |
@@ -34,33 +34,38 @@
 
 ### 0.1 当前交付快照
 
-截至 2026-07-29，本仓库的状态是：
+截至 2026-08-13，本仓库的状态是：
 
 | 能力 | 证据等级 | 状态 |
 |---|---|---|
 | 真实 librime Top-20 候选采集 | `LOCAL EXPERIMENT` | 已实现，参考版本为 librime 1.17.0 |
 | 10,000 条通用/开发冻结集 | `LOCAL EXPERIMENT` | 已完成文档级隔离的 80/10/10 切分 |
 | 专用字符 n-gram 候选排序 | `LOCAL EXPERIMENT` | conditional Top-1 相对提升 5.51%，P95 1.576ms |
+| 24M INT8 ONNX 神经+n-gram 融合排序 | `LOCAL EXPERIMENT` | 0.90 门下 conditional Top-1 94.5501%，CPU P95 42.70ms，已接入 macOS daemon |
 | 拼音约束整句 beam decoder | `LOCAL EXPERIMENT` | 整句准确率相对提升 46.46%，P95 40.524ms |
+| 11–30 字扩展长句 | `LOCAL EXPERIMENT` | 0.97 阈值相对提升 38.4617%，P95 14.71ms |
 | GTE multilingual reranker 306M | `LOCAL EXPERIMENT` | 已否决，不满足质量和延迟 |
 | Qwen2.5-0.5B-Instruct | `LOCAL EXPERIMENT` | 已否决，不满足拼音正确性和实时预算 |
 | macOS InputMethodKit 输入法源码原型 | `CHECKED IMPLEMENTATION` | 已实现 Rime 候选、独立语义位、100ms debounce、取消和隐私控制 |
 | 用户级 Unix Domain Socket daemon | `CHECKED IMPLEMENTATION` | 已实现协议握手、同 UID 检查、超时、取消、熔断与离线网络守卫 |
 | 隐私控制与数据生命周期 | `CHECKED IMPLEMENTATION` | 三档上下文、应用策略、无原文诊断、制品哈希、可恢复清理已实现 |
-| 用户级 daemon 生命周期 | `CHECKED IMPLEMENTATION` | LaunchAgent、AI 开关启停、0600 UDS、无 INET 描述符已验证 |
-| 自动测试 | `CHECKED IMPLEMENTATION` | 本轮为 Python 61 passed、Swift 21 passed |
+| 用户级 daemon 生命周期 | `CHECKED IMPLEMENTATION` | 自包含 ONNX release、LaunchAgent、版本化升级/回滚、0600 UDS、无 INET 描述符已验证 |
+| 受控 macOS librime | `CHECKED IMPLEMENTATION` | 固定源码、静态 arm64 XCFramework、macOS 14、无 Homebrew 运行依赖 |
+| Developer ID Release 制品 | `CHECKED IMPLEMENTATION` | 输入法 ZIP 与 daemon 归档均完成 hardened-runtime 签名、时间戳和哈希验证 |
+| 自动测试 | `CHECKED IMPLEMENTATION` | Python 93 passed、Swift 32 passed、前端 production build passed |
 | Apple Development 签名构建 | `CHECKED IMPLEMENTATION` | codesign 通过；保留为本地开发路径 |
 | Developer ID hardened-runtime 签名 | `CHECKED IMPLEMENTATION` | 主 App 与内嵌 dylib 深度验证通过，并带 Apple 安全时间戳 |
-| debug 安装、升级、卸载 | `CHECKED IMPLEMENTATION` | 用户级可恢复流程通过；Rime 数据默认保留 |
+| 安装、升级、回滚、卸载脚本 | `CHECKED IMPLEMENTATION` | v1→v3、v3→v1、再升级 v5 真实验证；卸载为可恢复移入废纸篓，Rime 数据默认保留 |
 | 真实应用完整输入路径 | `EXTERNAL ACCEPTANCE` | 未完成本轮记录化验证 |
 | 公证与系统输入源信任 | `EXTERNAL ACCEPTANCE` | 未完成；当前 Developer ID bundle 因未公证被 spctl 拒绝 |
 | 公开分发许可证 | `EXTERNAL ACCEPTANCE` | 未完成，当前冻结制品仅供内部验证 |
 
 详细 P0 哈希、硬件与指标见
-[docs/P0_EVIDENCE.md](docs/P0_EVIDENCE.md)。本轮构建仍链接 Homebrew
-`librime`，其 bottle 的最低 macOS 版本高于项目声明的 macOS 14；正式分发必须
-改成受控构建。当前内部 LaunchAgent 依赖本机 Xcode Python；公开包还必须
-改为自包含、签名且可公证的 daemon 运行时。详见
+[docs/P0_EVIDENCE.md](docs/P0_EVIDENCE.md)，神经与扩展长句结果见
+[docs/P3_NEURAL_RANKER_EVIDENCE.md](docs/P3_NEURAL_RANKER_EVIDENCE.md)。macOS
+输入法已改用受控静态 librime，daemon 已改用自包含 INT8 ONNX Runtime；两者
+均有 Developer ID 签名发布制品。公开发布仍受 Apple 公证凭据、干净机器与
+宿主矩阵、系统级抓包、最低硬件以及许可证法律放行约束。详见
 [docs/P1_IMPLEMENTATION_EVIDENCE.md](docs/P1_IMPLEMENTATION_EVIDENCE.md)。
 
 ## 1. 执行摘要
@@ -289,8 +294,10 @@ RimeAI 的差异化顺序是：
 }
 ```
 
-排序器输出候选身份、排序或受约束的首选和置信度。MVP 不直接替换主候选，
-而是在独立语义位显示高置信度结果。
+排序器输出候选身份、排序或受约束的首选和置信度。MVP 不改变已经显示的
+Rime 数字候选，而是在独立语义位显示结果。用户按下 `Space` 时，当前组合中
+仍然有效的高置信度结果可以被主动采用；重排候选阈值为 0.90，整句建议阈值
+为 0.97，未达到阈值时仍提交 Rime 第一候选。
 
 ### 5.3 拼音约束整句建议
 
@@ -307,7 +314,12 @@ RimeAI 的差异化顺序是：
 - 每个中文字符必须能由冻结的 Rime 拼音词典证明与输入拼音兼容。
 - 最多一条，默认不超过 30 个汉字，不含解释或换行。
 - 明确显示语义标记，用户主动选择后才上屏。
+- 超过 30 字或候选未覆盖完整拼音时必须显式弃权，不得展示截断的半句话。
 - 不能把“读起来更自然”当作突破拼音约束的理由。
+
+当前质量门包含 4,000 条 6–10 字冻结数据和 1,600 条 11–30 字扩展冻结数据。
+扩展 test 在 0.97 产品阈值下相对 Rime 首选提升 38.4617%，P95 14.71ms。
+30 字仍是运行时安全上限，不代表支持任意长句、开放式续写或标点自由生成。
 
 ### 5.4 错误检测与有限纠错
 
@@ -330,8 +342,10 @@ RimeAI 的差异化顺序是：
 
 共同规则：
 
-- 按应用会话隔离，切换应用后不复用文本。
-- 光标移动、输入会话变化、关闭 AI 或进入安全输入时清空。
+- 按应用隔离，切换应用后不复用文本。
+- 同一应用内 InputMethodKit 控制器停用、重建或重新连接时，可以续用本进程
+  内尚未清除的短期上下文。
+- 光标移动、切换应用、关闭 AI、进入安全输入或用户清除数据时清空。
 - 不依赖读取完整文档。
 - 默认不读取剪贴板。
 - 应用级可以分别关闭 AI 和上下文。
@@ -423,7 +437,8 @@ P1 不新增持久 AI 学习，先证明即时语义价值。后续持久化必�
 
 - 第一行始终是同步 Rime 候选。
 - 第二行最多一个语义候选，可以是重排首选或整句建议。
-- `Space` 选择 Rime 第一候选；当前原型用 `Tab` 接受语义候选。
+- 当前有效的高置信度语义候选出现时，`Space` 主动采用该候选；其他情况选择
+  Rime 第一候选。`Tab` 可接受当前可选的语义候选。
 - `Esc` 关闭组合；数字键只映射到冻结的 Rime 候选。
 - 语义候选缺失时，`Tab` 不应吞掉应用原本行为。
 
@@ -445,8 +460,10 @@ P1 不新增持久 AI 学习，先证明即时语义价值。后续持久化必�
 
 1. Rime 首屏一旦显示，当前组合的数字位置不再变化。
 2. AI 结果只进入独立语义位。
-3. 用户按数字、空格、方向键、翻页、鼠标选择或继续输入后，旧结果失效。
-4. 应用切换、光标移动、输入会话改变和安全输入命中后，旧结果失效。
+3. 用户按数字、空格、方向键、翻页、鼠标选择或继续输入后，旧结果失效；
+   `Space` 只能消费按键发生时仍通过组合与修订校验的语义结果。
+4. 应用切换、光标移动和安全输入命中后，旧结果失效；同一应用的控制器重建
+   不得把旧结果直接复用到新组合，但可继续使用其进程内短期上下文。
 5. 上屏时重新校验组合 ID、修订号、应用会话和候选身份。
 6. 任何过期、低置信度、协议异常或超时结果都表现为“不展示”。
 
@@ -586,7 +603,14 @@ Top-10 请求。只有性能分析证明序列化是瓶颈时，才迁移到二�
   "type": "hello",
   "protocol_version": 1,
   "client_id": "fun.wwcn.inputmethod.RimeAI",
-  "capabilities": ["rerank", "sentence", "cancel", "deadline"]
+  "capabilities": [
+    "rerank",
+    "sentence",
+    "cancel",
+    "deadline",
+    "decision-reasons",
+    "long-input-reasons"
+  ]
 }
 ```
 
@@ -623,6 +647,7 @@ Top-10 请求。只有性能分析证明序列化是瓶颈时，才迁移到二�
   "composition_id": "uuid",
   "revision": 4,
   "status": "ok",
+  "decision": "ranked_candidate",
   "ranked_candidate": "索引",
   "sentence_suggestion": "",
   "confidence": 0.94
@@ -633,6 +658,8 @@ Top-10 请求。只有性能分析证明序列化是瓶颈时，才迁移到二�
 
 - `ranked_candidate` 为空或属于请求候选。
 - 整句建议不超过 30 字且不包含换行。
+- `sentence_too_long` 和 `sentence_incomplete` 必须返回空候选，客户端以不可选
+  状态解释原因，不得把部分结果当作建议。
 - 置信度有限且位于 `[0, 1]`。
 - 应用会话、组合 ID、修订号和请求 ID 完全匹配。
 - 请求未过期、未取消、未进入安全输入。
@@ -688,8 +715,9 @@ Challenger: LFM2.5-Encoder-230M
 > 中文 BERT 权重初始化，增加拼音音节 token、候选 marker 和 listwise
 > 排序头，一次编码上下文、拼音与 Rime Top-10 并输出十个候选分数。
 
-这里的“首选”是要优先训练和验证的具体 checkpoint 方案，不是已经通过 P0 的
-生产权重。当前真正有本仓库实证支持的运行时仍是 n-gram + beam。
+该 checkpoint 已完成训练。验证集选择的 0.5/0.5 神经+n-gram 融合在同一
+冻结 test 上达到 conditional Top-1 95.6907%，超过 n-gram 的 94.6768%，
+CPU P95 35.79ms；它已成为 macOS 内部 daemon 的首选排序层。
 
 选择 24M 起步而不是预设 100M、300M 或 4B，原因是：
 
@@ -711,16 +739,18 @@ Challenger: LFM2.5-Encoder-230M
 集中在长上下文，而输入法排序通常小于 256 tokens；其 LFM Open License v1.0
 还对年收入达到 1,000 万美元的法律实体限制商业使用。
 
-### 9.4 当前过渡实现
+### 9.4 当前实现
 
-P1 使用已经通过 P0 的：
+macOS 内部运行时使用：
 
+- 已通过冻结门的 `RimeAI-Ranker-S-24M` 与 n-gram 融合排序。
 - 4,876,145 bytes 字符 n-gram 排序器。
 - 冻结 Rime 拼音字典约束的 beam decoder。
 
-它们是为了先验证产品链路和质量门的过渡实现。只有
-`RimeAI-Ranker-S-24M` 完成训练，并在同一冻结集上同时通过准确率、延迟、
-内存、能耗和许可证门，才替换 P1 过渡实现。
+字符 n-gram 仍是融合信号和神经推理失败时的降级层。24M 权重已导出为
+dynamic INT8 ONNX，使用固定 ONNX Runtime 的自包含 Developer ID 签名 daemon
+运行；模型与 runtime 拥有独立制品 ID、逐文件 SHA-256 和版本化回滚边界。
+公证、法律审查和最低硬件门仍属于公开分发验收，不由内部制品替代。
 
 ### 9.5 训练与蒸馏路线
 
@@ -749,8 +779,11 @@ Embedding 可以辅助领域召回，但不能代替 Cross-Encoder 的最终自�
 
 ### 9.7 推理运行时
 
-`RimeAI-Ranker-S-24M` 的生产运行时由导出 spike 决定，候选包括 Core ML 和
-可静态打包的跨平台原生推理后端。验收条件是：
+`RimeAI-Ranker-S-24M` 当前产品候选运行时为预热、串行执行的 CPU ONNX
+Runtime 1.19.2 daemon，模型采用 dynamic INT8 量化。冻结 test 的 0.90 产品门
+conditional Top-1 为 94.5501%，P50/P95 为 15.17/42.70ms，冷启动约
+119.49ms；相对浮点产品门结果没有精度回退。后续 Core ML 仅作为能耗 challenger，
+不再是 macOS 发布前置条件。验收条件是：
 
 - 输入法进程不加载模型。
 - daemon 可预热、取消和卸载模型。
@@ -761,8 +794,8 @@ Embedding 可以辅助领域召回，但不能代替 Cross-Encoder 的最终自�
 MLX-LM、llama.cpp 和通用 LLM 运行时只保留为离线教师、数据实验或历史对照工具，
 不属于最终产品依赖。
 
-当前 P1 继续使用无第三方神经依赖的 n-gram + beam，直至选定的 Cross-Encoder
-达到发布门。
+当前 macOS 以 INT8 Cross-Encoder + n-gram 为首选，n-gram + beam 仍是模型
+加载、校验、推理或置信度失败时的本地降级路径。
 
 ## 10. 排序、融合与置信度
 
@@ -920,7 +953,7 @@ coverage 和 conditional 指标。
 | 类别 | MVP 门槛 |
 |---|---:|
 | Rime Top-10 conditional Top-1 相对提升 | >= 5% |
-| 长输入整句准确率相对提升 | >= 10% |
+| 冻结 6 至 10 字长输入整句准确率相对提升 | >= 10% |
 | 通用、开发、中英文混输子集回退 | 不超过 1 个绝对百分点 |
 | 内部预览语义建议接受率 | >= 20% |
 | 接受后 10 秒撤销或大幅回删 | < 5% |
@@ -1161,9 +1194,9 @@ Qwen2.5-0.5B，并建立长输入拼音约束 decoder。
 - 标准上下文模式。
 - 取消、超时、latest-wins、熔断和纯 Rime 降级。
 
-当前：源码、单元测试、Developer ID hardened-runtime 签名构建、用户级
-LaunchAgent 和可恢复安装/卸载流程已存在并经过本机验证；当前 bundle 尚未
-公证，真实应用中的完整输入路径仍受 macOS 输入源信任策略阻断，不能记为通过。
+当前：源码、单元测试、受控静态 librime、自包含 INT8 ONNX daemon、Developer
+ID hardened-runtime Release 制品、用户级 LaunchAgent 和版本化安装/回滚流程
+已在本机验证。当前 bundle 尚未公证，真实应用完整矩阵不能记为通过。
 
 ### P2: 开发者预览
 
@@ -1177,18 +1210,20 @@ LaunchAgent 和可恢复安装/卸载流程已存在并经过本机验证；当�
 
 ### P3: 专用神经排序器
 
-- 从 `BAAI/bge-small-zh-v1.5` 初始化并训练 `RimeAI-Ranker-S-24M`。
-- 实现拼音音节 token、候选 marker 和单次前向 listwise 排序头。
-- 用 hard negatives 和大模型教师蒸馏。
-- 与当前 n-gram 在同一冻结集比较。
-- 只有同时改善净准确率和产品延迟才替换。
+- [x] 从 `BAAI/bge-small-zh-v1.5` 初始化并训练 `RimeAI-Ranker-S-24M`。
+- [x] 实现拼音音节 token、候选 marker 和 listwise 排序头。
+- [x] 使用真实 Rime Top-10 hard negatives。
+- [ ] 增加教师软标签蒸馏并证明其净收益；当前 checkpoint 只使用金标。
+- [x] 与 n-gram 在同一冻结集比较并同时通过净准确率和产品延迟门。
 
 ### P4: 专用模型产品化
 
-- 固定 Cross-Encoder 权重、量化、runtime、签名和模型清单。
-- 完成领域适配器、模型更新、回滚和数据治理。
-- 把当前 n-gram 保留为低资源或神经模型故障时的本地降级层。
-- 主动续写和改写如需立项，必须使用独立 RFC，不能改变本模型决策。
+- [x] 固定 Cross-Encoder 权重、INT8 ONNX 量化、runtime、签名和模型清单。
+- [x] 完成不可变 release、原子升级、健康检查、失败恢复和一键回滚。
+- [x] 把当前 n-gram 保留为低资源或神经模型故障时的本地降级层。
+- [x] 记录模型来源、runtime、量化参数、逐文件哈希、数据归因和许可证文本。
+- [ ] 领域适配器只有在冻结领域集证明净收益后才进入制品；当前不是 MVP 缺口。
+- [x] 主动续写和改写如需立项，必须使用独立 RFC，不能改变本模型决策。
 
 ### P5: 跨平台
 
@@ -1389,7 +1424,8 @@ Zero Network
 **目标**：以 `BAAI/bge-small-zh-v1.5` 初始化
 `RimeAI-Ranker-S-24M`；一次前向对 Rime Top-10 进行拼音感知排序。
 
-**当前差距**：尚未完成训练和运行时集成，P1 由 n-gram + beam 过渡。
+**当前实现**：24M checkpoint 已训练并量化为 INT8 ONNX，使用固定 ONNX
+Runtime 的自包含 daemon；n-gram + beam 作为融合与故障降级。
 
 ### DR-006: macOS 首发
 
@@ -1424,9 +1460,13 @@ Zero Network
 4. InputMethodKit 在 Safari、Terminal、Xcode、VS Code、Office、Electron
    和远程桌面中的上下文能力与候选位置。
 5. 最低支持 Apple Silicon 设备上的常驻内存、能耗、温度和冷启动。
-6. 自带 librime 的最低 macOS 版本、升级策略和 LGPL 义务。
+6. 自带 librime 的最低 macOS 版本和升级策略。**已回答工程部分：**当前受控
+   arm64 静态制品固定 macOS 14 与 librime 1.17.0；LGPL 义务仍待法律放行。
 7. P0 CC BY-SA 数据和衍生制品的公开分发方案。
-8. `RimeAI-Ranker-S-24M` 能否超过 n-gram 且满足 50ms 目标。
+8. `RimeAI-Ranker-S-24M` 能否超过 n-gram 且满足 50ms 目标。**已回答：**
+   浮点融合 raw conditional Top-1 95.6907%、P95 35.79ms；INT8 ONNX 产品门
+   conditional Top-1 94.5501%、P95 42.70ms。量化、自包含 runtime 与签名已
+   完成，最低设备能耗/温度仍待外部机器矩阵。
 9. 若 24M 未通过，失败主因是否确为容量，以及 230M challenger 能否提供足以
    覆盖许可证、内存和部署成本的净收益。
 10. 应用级 secure input 检测的漏报边界和用户补救机制。
@@ -1449,11 +1489,13 @@ Zero Network
 
 ### P2 公开预览
 
-- [ ] 自带并固定最低部署目标的 librime。
+- [x] 自带并固定最低部署目标的 librime。
 - [x] 修复当前源码中的 Swift 6 并发警告。
 - [x] Developer ID 签名与 hardened runtime。
 - [ ] 公证与 Gatekeeper 放行。
-- [ ] 安装、升级、卸载和干净机器验证。
+- [x] 本机安装、原子升级、健康检查、回滚和可恢复卸载流程。
+- [ ] 干净机器安装、升级和卸载验证。
+- [x] 自包含 INT8 ONNX daemon、模型清单、签名与不可变版本选择器。
 - [ ] Offline Lock 抓包与日志审计。
 - [ ] 模型、数据和第三方许可证放行。
 - [ ] 最低硬件、内存、能耗和温度。

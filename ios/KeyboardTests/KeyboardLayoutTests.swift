@@ -3,6 +3,23 @@ import XCTest
 
 @MainActor
 final class KeyboardLayoutTests: XCTestCase {
+    func testSentenceSuggestionWithoutCommitTargetIsDisabled() {
+        let controller = KeyboardViewController()
+        let button = controller.makeSemanticButton(
+            evaluation: LocalSemanticEvaluation(
+                decision: .sentenceSuggestion,
+                candidate: "请执行这条命令",
+                confidence: 0.93
+            ),
+            candidates: [
+                RimeKeyboardCandidate(text: "明令", comment: nil, index: 0),
+                RimeKeyboardCandidate(text: "命令", comment: nil, index: 1),
+            ]
+        )
+
+        XCTAssertFalse(button.isEnabled)
+    }
+
     func testKeyboardControlsFitIPhoneSEWidth() {
         let controller = KeyboardViewController()
         controller.loadViewIfNeeded()

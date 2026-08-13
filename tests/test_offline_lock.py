@@ -6,6 +6,13 @@ from rimeai_daemon.offline import offline_network_guard
 def test_offline_network_guard_denies_internet_but_allows_unix_sockets():
     with offline_network_guard():
         try:
+            socket.socket()
+        except PermissionError:
+            pass
+        else:
+            raise AssertionError("Offline Lock allowed the default IPv4 socket")
+
+        try:
             socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         except PermissionError:
             pass

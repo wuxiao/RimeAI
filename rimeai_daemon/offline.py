@@ -20,7 +20,11 @@ class _OfflineSocket(_ORIGINAL_SOCKET):
         proto: int = -1,
         fileno=None,
     ):
-        if fileno is None and family in (socket.AF_INET, socket.AF_INET6):
+        # CPython resolves the no-argument sentinel to AF_INET inside the base
+        # initializer. Normalize it before enforcing the guard so
+        # ``socket.socket()`` cannot bypass the explicit AF_INET check.
+        effective_family = socket.AF_INET if family == -1 else family
+        if fileno is None and effective_family in (socket.AF_INET, socket.AF_INET6):
             raise PermissionError(
                 errno.EPERM,
                 "RimeAI Offline Lock denies internet sockets",

@@ -26,6 +26,13 @@ from .ngram_ranker import (
     train_ngram_model,
     write_ngram_model_atomic,
 )
+from .neural_ranker import (
+    HybridSemanticRanker,
+    NeuralRankerError,
+    load_neural_ranker,
+    train_fusion_config,
+    train_neural_ranker,
+)
 from .pinyin_guard import PinyinGuard
 from .reporting import (
     ReportError,
@@ -51,10 +58,16 @@ def _build_parser() -> argparse.ArgumentParser:
     evaluate_parser.add_argument("dataset", type=Path)
     evaluate_parser.add_argument(
         "--ranker",
-        choices=("baseline", "context-repeat", "command"),
+        choices=("baseline", "context-repeat", "command", "neural", "hybrid"),
         default="baseline",
     )
     evaluate_parser.add_argument("--ranker-config", type=Path)
+    evaluate_parser.add_argument("--rime-dictionary", type=Path)
+    evaluate_parser.add_argument("--neural-model", type=Path)
+    evaluate_parser.add_argument("--language-model", type=Path)
+    evaluate_parser.add_argument(
+        "--device", choices=("auto", "cpu", "mps"), default="auto"
+    )
     evaluate_parser.add_argument("--details-output", type=Path)
     evaluate_parser.add_argument(
         "--split",
@@ -93,6 +106,46 @@ def _build_parser() -> argparse.ArgumentParser:
     train_ngram_parser.add_argument("dataset", type=Path)
     train_ngram_parser.add_argument("--output", required=True, type=Path)
 
+    train_neural_parser = subparsers.add_parser(
+        "train-neural-ranker",
+        help="train the 24M pinyin-aware listwise Cross-Encoder",
+    )
+    train_neural_parser.add_argument("dataset", type=Path)
+    train_neural_parser.add_argument("--base-model", required=True, type=Path)
+    train_neural_parser.add_argument("--base-revision", required=True)
+    train_neural_parser.add_argument(
+        "--rime-dictionary", required=True, type=Path
+    )
+    train_neural_parser.add_argument("--output", required=True, type=Path)
+    train_neural_parser.add_argument("--epochs", type=int, default=3)
+    train_neural_parser.add_argument("--batch-size", type=int, default=4)
+    train_neural_parser.add_argument("--learning-rate", type=float, default=2e-5)
+    train_neural_parser.add_argument(
+        "--ambiguous-repetitions", type=int, default=3
+    )
+    train_neural_parser.add_argument("--max-length", type=int, default=128)
+    train_neural_parser.add_argument("--target-precision", type=float, default=0.9)
+    train_neural_parser.add_argument(
+        "--device", choices=("auto", "cpu", "mps"), default="auto"
+    )
+    train_neural_parser.add_argument("--seed", type=int, default=20260729)
+
+    train_fusion_parser = subparsers.add_parser(
+        "train-neural-fusion",
+        help="calibrate validation-only neural and n-gram score fusion",
+    )
+    train_fusion_parser.add_argument("dataset", type=Path)
+    train_fusion_parser.add_argument("--neural-model", required=True, type=Path)
+    train_fusion_parser.add_argument("--language-model", required=True, type=Path)
+    train_fusion_parser.add_argument(
+        "--rime-dictionary", required=True, type=Path
+    )
+    train_fusion_parser.add_argument("--output", required=True, type=Path)
+    train_fusion_parser.add_argument("--target-precision", type=float, default=0.9)
+    train_fusion_parser.add_argument(
+        "--device", choices=("auto", "cpu", "mps"), default="auto"
+    )
+
     sentence_parser = subparsers.add_parser(
         "evaluate-sentence",
         help="evaluate a constrained local sentence decoder",
@@ -125,7 +178,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "train-beam-decoder",
         help="calibrate a pinyin-constrained beam sentence decoder",
     )
-    train_beam_parser.add_argument("dataset", type=Path)
+    train_beam_parser.add_argument("datasets", nargs="+", type=Path)
     train_beam_parser.add_argument(
         "--language-model", required=True, type=Path
     )
@@ -162,6 +215,10 @@ def _evaluate(
     min_confidence: float,
     details_output: Optional[Path],
     candidate_limit: int,
+    dictionary_path: Optional[Path],
+    device: str,
+    neural_model_path: Optional[Path],
+    language_model_path: Optional[Path],
 ) -> int:
     if not isfinite(min_confidence) or not 0 <= min_confidence <= 1:
         print(
@@ -226,7 +283,7 @@ def _evaluate(
             min_confidence,
             details,
         )
-    else:
+    elif ranker_name == "command":
         if ranker_config is None:
             print(
                 "error: --ranker-config is required with --ranker command",
@@ -243,6 +300,70 @@ def _evaluate(
                     details,
                 )
         except RankerConfigurationError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 2
+    elif ranker_name == "neural":
+        if ranker_config is None or dictionary_path is None:
+            print(
+                "error: --ranker-config and --rime-dictionary are required "
+                "with --ranker neural",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            ranker = load_neural_ranker(
+                ranker_config,
+                PinyinGuard.from_rime_dictionary(dictionary_path),
+                device=device,
+            )
+            report = evaluate_dataset(
+                selected_samples,
+                ranker,
+                split,
+                min_confidence,
+                details,
+            )
+        except (NeuralRankerError, OSError, ValueError) as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 2
+    else:
+        if (
+            ranker_config is None
+            or dictionary_path is None
+            or neural_model_path is None
+            or language_model_path is None
+        ):
+            print(
+                "error: --ranker-config, --neural-model, --language-model, "
+                "and --rime-dictionary are required with --ranker hybrid",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            guard = PinyinGuard.from_rime_dictionary(dictionary_path)
+            neural = load_neural_ranker(
+                neural_model_path,
+                guard,
+                device=device,
+            )
+            ranker = HybridSemanticRanker(
+                neural,
+                load_ngram_model(language_model_path),
+                ranker_config,
+            )
+            report = evaluate_dataset(
+                selected_samples,
+                ranker,
+                split,
+                min_confidence,
+                details,
+            )
+        except (
+            NeuralRankerError,
+            NGramModelError,
+            OSError,
+            ValueError,
+        ) as error:
             print(f"error: {error}", file=sys.stderr)
             return 2
 
@@ -316,6 +437,97 @@ def _train_ngram(dataset_path: Path, output_path: Path) -> int:
         "bytes": output_path.stat().st_size,
         "sha256": artifact_sha256,
     }
+    print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+    return 0
+
+
+def _train_neural_ranker(
+    dataset_path: Path,
+    base_model_path: Path,
+    base_revision: str,
+    dictionary_path: Path,
+    output_path: Path,
+    epochs: int,
+    batch_size: int,
+    learning_rate: float,
+    ambiguous_repetitions: int,
+    max_length: int,
+    target_precision: float,
+    device: str,
+    seed: int,
+) -> int:
+    protected = {
+        dataset_path.resolve(),
+        base_model_path.resolve(),
+        dictionary_path.resolve(),
+    }
+    if output_path.resolve() in protected:
+        print("error: --output must not overwrite an input", file=sys.stderr)
+        return 2
+    try:
+        dataset = load_dataset(dataset_path)
+        report = train_neural_ranker(
+            dataset.samples,
+            dataset_sha256=dataset.sha256,
+            base_model_path=base_model_path,
+            base_model_revision=base_revision,
+            dictionary_path=dictionary_path,
+            output_path=output_path,
+            epochs=epochs,
+            batch_size=batch_size,
+            learning_rate=learning_rate,
+            ambiguous_repetitions=ambiguous_repetitions,
+            max_length=max_length,
+            target_precision=target_precision,
+            device=device,
+            seed=seed,
+        )
+    except (
+        DatasetValidationError,
+        NeuralRankerError,
+        OSError,
+        ValueError,
+    ) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+    return 0
+
+
+def _train_neural_fusion(
+    dataset_path: Path,
+    neural_model_path: Path,
+    language_model_path: Path,
+    dictionary_path: Path,
+    output_path: Path,
+    target_precision: float,
+    device: str,
+) -> int:
+    try:
+        dataset = load_dataset(dataset_path)
+        guard = PinyinGuard.from_rime_dictionary(dictionary_path)
+        neural = load_neural_ranker(
+            neural_model_path,
+            guard,
+            device=device,
+        )
+        report = train_fusion_config(
+            dataset.samples,
+            dataset_sha256=dataset.sha256,
+            neural_ranker=neural,
+            ngram_ranker=load_ngram_model(language_model_path),
+            output_path=output_path,
+            target_precision=target_precision,
+        )
+    except (
+        DatasetValidationError,
+        NeuralRankerError,
+        NGramModelError,
+        OSError,
+        ValueError,
+    ) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
     print(json.dumps(report, ensure_ascii=False, sort_keys=True))
     return 0
 
@@ -412,13 +624,13 @@ def _sha256_path(path: Path) -> str:
 
 
 def _train_beam_decoder(
-    dataset_path: Path,
+    dataset_paths: Sequence[Path],
     language_model_path: Path,
     dictionary_path: Path,
     output_path: Path,
 ) -> int:
     protected_paths = {
-        dataset_path.resolve(),
+        *(dataset_path.resolve() for dataset_path in dataset_paths),
         language_model_path.resolve(),
         dictionary_path.resolve(),
     }
@@ -429,16 +641,24 @@ def _train_beam_decoder(
         )
         return 2
     try:
-        dataset = load_dataset(dataset_path)
+        datasets = [load_dataset(dataset_path) for dataset_path in dataset_paths]
+        samples = [sample for dataset in datasets for sample in dataset.samples]
+        dataset_sha256 = (
+            datasets[0].sha256
+            if len(datasets) == 1
+            else hashlib.sha256(
+                b"\0".join(dataset_path.read_bytes() for dataset_path in dataset_paths)
+            ).hexdigest()
+        )
         language_model = load_ngram_model(language_model_path)
         guard = PinyinGuard.from_rime_dictionary(dictionary_path)
         language_model_sha256 = _sha256_path(language_model_path)
         dictionary_sha256 = _sha256_path(dictionary_path)
         config, report = train_beam_decoder_config(
-            dataset.samples,
+            samples,
             language_model,
             guard,
-            dataset_sha256=dataset.sha256,
+            dataset_sha256=dataset_sha256,
             language_model_sha256=language_model_sha256,
             dictionary_sha256=dictionary_sha256,
         )
@@ -453,7 +673,11 @@ def _train_beam_decoder(
     ) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
-    report["dataset_sha256"] = dataset.sha256
+    report["dataset_sha256"] = dataset_sha256
+    report["datasets"] = [
+        {"path": str(path), "sha256": dataset.sha256}
+        for path, dataset in zip(dataset_paths, datasets)
+    ]
     report["dependencies"] = {
         "language_model_sha256": language_model_sha256,
         "dictionary_sha256": dictionary_sha256,
@@ -480,6 +704,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             args.min_confidence,
             args.details_output,
             args.candidate_limit,
+            args.rime_dictionary,
+            args.device,
+            args.neural_model,
+            args.language_model,
         )
     if args.command == "compare":
         return _compare(args.reports)
@@ -492,6 +720,32 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
     if args.command == "train-ngram":
         return _train_ngram(args.dataset, args.output)
+    if args.command == "train-neural-ranker":
+        return _train_neural_ranker(
+            args.dataset,
+            args.base_model,
+            args.base_revision,
+            args.rime_dictionary,
+            args.output,
+            args.epochs,
+            args.batch_size,
+            args.learning_rate,
+            args.ambiguous_repetitions,
+            args.max_length,
+            args.target_precision,
+            args.device,
+            args.seed,
+        )
+    if args.command == "train-neural-fusion":
+        return _train_neural_fusion(
+            args.dataset,
+            args.neural_model,
+            args.language_model,
+            args.rime_dictionary,
+            args.output,
+            args.target_precision,
+            args.device,
+        )
     if args.command == "evaluate-sentence":
         return _evaluate_sentence(
             args.dataset,
@@ -504,7 +758,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
     if args.command == "train-beam-decoder":
         return _train_beam_decoder(
-            args.dataset,
+            args.datasets,
             args.language_model,
             args.rime_dictionary,
             args.output,

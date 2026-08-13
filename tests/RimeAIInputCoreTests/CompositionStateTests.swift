@@ -11,12 +11,14 @@ func mainCandidatesNeverMoveWhenSemanticResultArrives() {
 
     let accepted = state.applySemanticCandidate(
         "事件",
-        token: token
+        token: token,
+        decision: .sentenceSuggestion
     )
 
     #expect(accepted)
     #expect(state.mainCandidates == ["时间", "事件", "实践"])
     #expect(state.semanticCandidate == "事件")
+    #expect(state.semanticCandidateDecision == .sentenceSuggestion)
 }
 
 @Test

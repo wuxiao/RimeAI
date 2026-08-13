@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "artifact": {
+    "path": "rimeai-p0-ngram-v1.bin",
+    "sha256": "16b5664cc016db1e44c0e9d881c121c1d2cf156e8ab440618af2179cb82a405c",
+    "format": "RAINGRM1",
+    "size_bytes": 11761820
+  },
+  "source": {
+    "path": ".rimeai/models/p0-char-ngram-v1.json.gz",
+    "sha256": "36457c630dc8376df8a9aa74cf94faa78eb43febc6779618ae0792b33d879b49",
+    "dataset_sha256": "f0d46219a334d9d408518e387899c57b4881da27e8388d721827ebc86087b35d"
+  },
+  "runtime": "exact P0 character n-gram scoring with read-only hashed count tables",
+  "generator": "scripts/export_compact_ngram.py"
+}

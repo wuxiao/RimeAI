@@ -66,12 +66,16 @@ final class KeyboardViewController: UIInputViewController {
     private var composition = ""
     private var requestRevision = 0
     private var isEngineReady = false
+    private var engineVersion = "unknown"
+    private var semanticRanker: LocalSemanticRanker?
+    private var semanticModelFailure: String?
 
     override func viewDidLoad() {
         super.viewDidLoad()
         configureRootView()
         buildKeyboard()
         updateAppearance()
+        loadSemanticRanker()
         startEngine()
     }
 
@@ -335,6 +339,65 @@ final class KeyboardViewController: UIInputViewController {
         return button
     }
 
+    func makeSemanticButton(
+        evaluation: LocalSemanticEvaluation,
+        candidates: [RimeKeyboardCandidate]
+    ) -> UIButton {
+        let presentation = evaluation.candidatePresentation
+        var configuration = UIButton.Configuration.tinted()
+        configuration.title = presentation.title
+        configuration.baseForegroundColor = .systemIndigo
+        configuration.baseBackgroundColor = .systemIndigo
+        configuration.contentInsets = NSDirectionalEdgeInsets(
+            top: 2,
+            leading: 8,
+            bottom: 2,
+            trailing: 8
+        )
+        let button = UIButton(configuration: configuration)
+        button.accessibilityIdentifier = "local-semantic-candidate-state"
+        button.accessibilityLabel = presentation.title
+        let original = evaluation.candidate.flatMap { candidate in
+            candidates.first(where: { $0.text == candidate })
+        }
+        let isActionable = presentation.isSelectable && original != nil
+        button.isEnabled = isActionable
+        button.alpha = isActionable ? 1 : 0.74
+        if let original, isActionable {
+            button.addAction(
+                UIAction { [weak self] _ in
+                    self?.commit(candidateIndex: original.index)
+                },
+                for: .touchUpInside
+            )
+        }
+        return button
+    }
+
+    private func loadSemanticRanker() {
+        let bundles = [Bundle(for: Self.self), .main]
+        let modelURL = bundles.lazy.compactMap { bundle in
+            bundle.url(
+                forResource: "rimeai-p0-ngram-v1",
+                withExtension: "bin",
+                subdirectory: "SemanticModel"
+            ) ?? bundle.url(
+                forResource: "rimeai-p0-ngram-v1",
+                withExtension: "bin"
+            )
+        }.first
+        guard let modelURL else {
+            semanticModelFailure = "P0 本地模型资源缺失"
+            return
+        }
+        do {
+            semanticRanker = try LocalSemanticRanker(contentsOf: modelURL)
+            semanticModelFailure = nil
+        } catch {
+            semanticModelFailure = error.localizedDescription
+        }
+    }
+
     private func startEngine() {
         engine.start { [weak self] result in
             DispatchQueue.main.async {
@@ -344,8 +407,8 @@ final class KeyboardViewController: UIInputViewController {
                 switch result {
                 case let .success(version):
                     self.isEngineReady = true
-                    self.statusLabel.text =
-                        "librime \(version) · 离线 · Full Access 关闭"
+                    self.engineVersion = version
+                    self.statusLabel.text = self.readinessDescription()
                     self.refreshCandidates()
                 case let .failure(error):
                     self.statusLabel.text =
@@ -392,6 +455,7 @@ final class KeyboardViewController: UIInputViewController {
         removeCandidates()
 
         guard !composition.isEmpty, isEngineReady else {
+            statusLabel.text = readinessDescription()
             return
         }
         let requestedComposition = composition
@@ -405,18 +469,63 @@ final class KeyboardViewController: UIInputViewController {
                 }
                 switch result {
                 case let .success(candidates):
+                    if let ranker = self.semanticRanker {
+                        let context = String(
+                            (self.textDocumentProxy.documentContextBeforeInput ?? "")
+                                .suffix(40)
+                        )
+                        let evaluation = ranker.evaluate(
+                            context: context,
+                            candidates: candidates.map(\.text)
+                        )
+                        self.candidateStack.addArrangedSubview(
+                            self.makeSemanticButton(
+                                evaluation: evaluation,
+                                candidates: candidates
+                            )
+                        )
+                    } else {
+                        let unavailable = LocalSemanticEvaluation(
+                            decision: .noCandidate,
+                            candidate: nil,
+                            confidence: 0
+                        )
+                        let button = self.makeSemanticButton(
+                            evaluation: unavailable,
+                            candidates: candidates
+                        )
+                        button.configuration?.title = "✦ 本地模型不可用"
+                        button.accessibilityLabel = "✦ 本地模型不可用"
+                        self.candidateStack.addArrangedSubview(button)
+                    }
                     for candidate in candidates {
                         self.candidateStack.addArrangedSubview(
                             self.makeCandidateButton(candidate)
                         )
                     }
-                    self.statusLabel.text =
-                        "librime 1.17.0 · \(candidates.count) 个候选 · 离线"
+                    self.statusLabel.text = self.candidateStatusDescription(
+                        count: candidates.count
+                    )
                 case let .failure(error):
                     self.statusLabel.text = error.localizedDescription
                 }
             }
         }
+    }
+
+    private func readinessDescription() -> String {
+        if let semanticModelFailure {
+            return "librime \(engineVersion) · \(semanticModelFailure) · 离线"
+        }
+        guard let semanticRanker else {
+            return "librime \(engineVersion) · P0 本地模型未加载 · 离线"
+        }
+        return "librime \(engineVersion) · \(semanticRanker.artifactID) · 离线"
+    }
+
+    private func candidateStatusDescription(count: Int) -> String {
+        let modelStatus = semanticRanker == nil ? "模型回退" : "P0 模型已评估"
+        return "librime \(engineVersion) · \(count) 个候选 · \(modelStatus) · 离线"
     }
 
     private func commit(candidateIndex: Int) {

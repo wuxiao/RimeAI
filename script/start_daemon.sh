@@ -11,19 +11,39 @@ log_path="${runtime_dir}/rimeai-daemon.log"
 language_model="${project_root}/.rimeai/models/p0-char-ngram-v1.json.gz"
 beam_config="${project_root}/.rimeai/models/p0-beam-sentence-v1.json"
 rime_dictionary="${project_root}/.rimeai/rime/shared/luna_pinyin.dict.yaml"
+neural_model="${project_root}/.rimeai/models/rimeai-ranker-s-24m-v1"
+fusion_config="${project_root}/.rimeai/models/rimeai-ranker-s-24m-fusion-v1.json"
 
-for artifact in "${language_model}" "${beam_config}" "${rime_dictionary}"; do
+for artifact in \
+  "${language_model}" \
+  "${beam_config}" \
+  "${rime_dictionary}" \
+  "${neural_model}/manifest.json" \
+  "${fusion_config}"; do
   if [[ ! -f "${artifact}" ]]; then
     print -u2 "error: required local artifact is missing: ${artifact}"
     exit 2
   fi
 done
 
+expected_artifact_id=$(
+  /usr/bin/python3 - "${fusion_config}" "${beam_config}" <<'PY'
+import hashlib
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as file:
+    ranker_id = json.load(file)["artifact_id"]
+with open(sys.argv[2], "rb") as file:
+    beam_sha256 = hashlib.sha256(file.read()).hexdigest()
+print(f"{ranker_id}:beam-{beam_sha256[:12]}")
+PY
+)
+
 mkdir -p "${runtime_dir}"
 chmod 700 "${runtime_dir}"
 
 socket_is_live() {
-  python3 - "${socket_path}" <<'PY'
+  python3 - "${socket_path}" "${expected_artifact_id}" <<'PY'
 import json
 import socket
 import sys
@@ -53,6 +73,12 @@ try:
         raise OSError("offline lock is not active")
     if "offline-lock" not in response.get("capabilities", []):
         raise OSError("offline lock capability is missing")
+    if "decision-reasons" not in response.get("capabilities", []):
+        raise OSError("structured decision capability is missing")
+    if "long-input-reasons" not in response.get("capabilities", []):
+        raise OSError("long-input decision capability is missing")
+    if response.get("model_artifact_id") != sys.argv[2]:
+        raise OSError("daemon is serving a stale model artifact")
 except OSError:
     raise SystemExit(1)
 finally:
@@ -82,6 +108,9 @@ nohup python3 -m rimeai_daemon \
   --language-model "${language_model}" \
   --beam-config "${beam_config}" \
   --rime-dictionary "${rime_dictionary}" \
+  --neural-model "${neural_model}" \
+  --fusion-config "${fusion_config}" \
+  --neural-device cpu \
   >"${log_path}" 2>&1 &
 daemon_pid=$!
 print -r -- "${daemon_pid}" >"${pid_path}"

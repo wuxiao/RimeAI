@@ -7,9 +7,13 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		087530D11F16D76EF5DC5395 /* THIRD_PARTY_NOTICES.md in Resources */ = {isa = PBXBuildFile; fileRef = 8A44619AD1A71BD066460636 /* THIRD_PARTY_NOTICES.md */; };
 		0C457A120AD470A4EECA20C0 /* DaemonClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F4A1A0E7261041EDB6ACE85 /* DaemonClient.swift */; };
+		10B7AAB685823E067883157D /* ATTRIBUTION.md in Resources */ = {isa = PBXBuildFile; fileRef = 37B5BE0255F1DAF79AED725D /* ATTRIBUTION.md */; };
+		114F25F029111FE6D4BFA31C /* RimeAIMacRuntime.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 95CFC7F5436F8BEE6BD0C409 /* RimeAIMacRuntime.xcframework */; };
 		14F565176E48D74D17E5A6E7 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA06C6FD17EB15DCBCFB88DD /* main.swift */; };
 		2954E26328AC77CD3E15FE88 /* ProductDataLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9854215EBFFE3F1FEE78CAA /* ProductDataLayout.swift */; };
+		30C770D900AE5E65FDB827F1 /* LocalSemanticRanker.swift in Sources */ = {isa = PBXBuildFile; fileRef = FAA511A856592C2E0127E6EC /* LocalSemanticRanker.swift */; };
 		37867F5E01F6BB897EC08273 /* PrivacyCenterWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4E932A06228AC16721C6EC9 /* PrivacyCenterWindowController.swift */; };
 		3FAB221103EA26163D3CB58B /* AppKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6801A4337F1F00500F50D3E9 /* AppKit.framework */; };
 		536F60256C9AF5C0D54D13B3 /* Carbon.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 788C51339ADFFBF98D03FA77 /* Carbon.framework */; };
@@ -18,6 +22,7 @@
 		6FA81738FDCC910412B09D2A /* CompositionState.swift in Sources */ = {isa = PBXBuildFile; fileRef = A894A7809D56255B0BE61F2C /* CompositionState.swift */; };
 		7823D3CD208E19BC401A086D /* CandidatePanelController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6C4A8777A6DDC8C9DC12F750 /* CandidatePanelController.swift */; };
 		88982131C6898013C07F7E1A /* SessionContextStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11EE11C318E49D35E2D79DA2 /* SessionContextStore.swift */; };
+		8D6E89061DC5C46DDBC2AF95 /* ThirdPartyLicenses in Resources */ = {isa = PBXBuildFile; fileRef = 071FD3F1371E8FCA78A6A517 /* ThirdPartyLicenses */; };
 		A0828D044A2781B7A1281F6B /* RimeBridgeC.cc in Sources */ = {isa = PBXBuildFile; fileRef = D630CE241E90D97C4ABB48D4 /* RimeBridgeC.cc */; };
 		BE867BE096BE9BB41E1EE124 /* InfoPlist.strings in Resources */ = {isa = PBXBuildFile; fileRef = FC46CC9FB595D777B12A1AC8 /* InfoPlist.strings */; };
 		C956365AFD9D21697E7329DD /* RimeAISettingsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = EBC90E9224221723AD57AEDD /* RimeAISettingsStore.swift */; };
@@ -30,9 +35,11 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		071FD3F1371E8FCA78A6A517 /* ThirdPartyLicenses */ = {isa = PBXFileReference; lastKnownFileType = folder; name = ThirdPartyLicenses; path = ../ios/ThirdPartyLicenses; sourceTree = SOURCE_ROOT; };
 		11EE11C318E49D35E2D79DA2 /* SessionContextStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionContextStore.swift; sourceTree = "<group>"; };
 		348BD796A393233937883B3E /* RimeEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RimeEngine.swift; sourceTree = "<group>"; };
 		375C5312FEACD6074CE00CFF /* en */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = en; path = en.lproj/InfoPlist.strings; sourceTree = "<group>"; };
+		37B5BE0255F1DAF79AED725D /* ATTRIBUTION.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = ATTRIBUTION.md; sourceTree = "<group>"; };
 		3F4A1A0E7261041EDB6ACE85 /* DaemonClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonClient.swift; sourceTree = "<group>"; };
 		44D3E1D3D74AA5A17483B514 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		5C3A6F75554F3E967B0AEBA8 /* FailureCircuitBreaker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FailureCircuitBreaker.swift; sourceTree = "<group>"; };
@@ -42,8 +49,10 @@
 		6C4A8777A6DDC8C9DC12F750 /* CandidatePanelController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CandidatePanelController.swift; sourceTree = "<group>"; };
 		788C51339ADFFBF98D03FA77 /* Carbon.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Carbon.framework; path = System/Library/Frameworks/Carbon.framework; sourceTree = SDKROOT; };
 		8A363C880D69427459107B11 /* InputMethodKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = InputMethodKit.framework; path = System/Library/Frameworks/InputMethodKit.framework; sourceTree = SDKROOT; };
+		8A44619AD1A71BD066460636 /* THIRD_PARTY_NOTICES.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = THIRD_PARTY_NOTICES.md; sourceTree = "<group>"; };
 		93FAB8018BBF733F09CFF2D2 /* DaemonProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonProtocol.swift; sourceTree = "<group>"; };
 		950DBB495B5E335B83F744D2 /* RimeAI.pdf */ = {isa = PBXFileReference; lastKnownFileType = image.pdf; path = RimeAI.pdf; sourceTree = "<group>"; };
+		95CFC7F5436F8BEE6BD0C409 /* RimeAIMacRuntime.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = RimeAIMacRuntime.xcframework; path = Native/RimeAIMacRuntime.xcframework; sourceTree = "<group>"; };
 		A894A7809D56255B0BE61F2C /* CompositionState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompositionState.swift; sourceTree = "<group>"; };
 		B46791C8427D267B49413A1E /* shared */ = {isa = PBXFileReference; lastKnownFileType = folder; name = shared; path = ../.rimeai/rime/shared; sourceTree = SOURCE_ROOT; };
 		B9854215EBFFE3F1FEE78CAA /* ProductDataLayout.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProductDataLayout.swift; sourceTree = "<group>"; };
@@ -55,6 +64,7 @@
 		D630CE241E90D97C4ABB48D4 /* RimeBridgeC.cc */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = RimeBridgeC.cc; sourceTree = "<group>"; };
 		EBC90E9224221723AD57AEDD /* RimeAISettingsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RimeAISettingsStore.swift; sourceTree = "<group>"; };
 		F3DCA0E166A32B785835C03E /* RimeAIInputMethod-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "RimeAIInputMethod-Bridging-Header.h"; sourceTree = "<group>"; };
+		FAA511A856592C2E0127E6EC /* LocalSemanticRanker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalSemanticRanker.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -62,6 +72,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				114F25F029111FE6D4BFA31C /* RimeAIMacRuntime.xcframework in Frameworks */,
 				3FAB221103EA26163D3CB58B /* AppKit.framework in Frameworks */,
 				536F60256C9AF5C0D54D13B3 /* Carbon.framework in Frameworks */,
 				D823AC40DCF47A452BF04663 /* InputMethodKit.framework in Frameworks */,
@@ -139,14 +150,34 @@
 				788C51339ADFFBF98D03FA77 /* Carbon.framework */,
 				8A363C880D69427459107B11 /* InputMethodKit.framework */,
 				6781753A7983506EE7BD6636 /* Network.framework */,
+				95CFC7F5436F8BEE6BD0C409 /* RimeAIMacRuntime.xcframework */,
 			);
 			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		9534FE8C5BD310C2CC5F550C /* datasets */ = {
+			isa = PBXGroup;
+			children = (
+				37B5BE0255F1DAF79AED725D /* ATTRIBUTION.md */,
+			);
+			path = datasets;
+			sourceTree = "<group>";
+		};
+		9C9F357A87915C602B1F6DEE /* ios */ = {
+			isa = PBXGroup;
+			children = (
+				071FD3F1371E8FCA78A6A517 /* ThirdPartyLicenses */,
+			);
+			path = ios;
 			sourceTree = "<group>";
 		};
 		E0E151AEE7E2F3EC82231AA2 /* RimeAI */ = {
 			isa = PBXGroup;
 			children = (
+				8A44619AD1A71BD066460636 /* THIRD_PARTY_NOTICES.md */,
 				68751B804F2D8054BED157D9 /* .rimeai */,
+				9534FE8C5BD310C2CC5F550C /* datasets */,
+				9C9F357A87915C602B1F6DEE /* ios */,
 				419CCB13DAE25B44367884C7 /* Sources */,
 			);
 			name = RimeAI;
@@ -175,6 +206,7 @@
 				A894A7809D56255B0BE61F2C /* CompositionState.swift */,
 				93FAB8018BBF733F09CFF2D2 /* DaemonProtocol.swift */,
 				5C3A6F75554F3E967B0AEBA8 /* FailureCircuitBreaker.swift */,
+				FAA511A856592C2E0127E6EC /* LocalSemanticRanker.swift */,
 				B9854215EBFFE3F1FEE78CAA /* ProductDataLayout.swift */,
 				EBC90E9224221723AD57AEDD /* RimeAISettingsStore.swift */,
 				11EE11C318E49D35E2D79DA2 /* SessionContextStore.swift */,
@@ -253,8 +285,11 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				10B7AAB685823E067883157D /* ATTRIBUTION.md in Resources */,
 				BE867BE096BE9BB41E1EE124 /* InfoPlist.strings in Resources */,
 				DA99EF8DAC54A7E099D0B213 /* RimeAI.pdf in Resources */,
+				087530D11F16D76EF5DC5395 /* THIRD_PARTY_NOTICES.md in Resources */,
+				8D6E89061DC5C46DDBC2AF95 /* ThirdPartyLicenses in Resources */,
 				DC4C551E7A89FD026CF4344D /* shared in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -271,6 +306,7 @@
 				0C457A120AD470A4EECA20C0 /* DaemonClient.swift in Sources */,
 				E64A47738365183CA504A76F /* DaemonProtocol.swift in Sources */,
 				D675A0AC77107474F5957093 /* FailureCircuitBreaker.swift in Sources */,
+				30C770D900AE5E65FDB827F1 /* LocalSemanticRanker.swift in Sources */,
 				37867F5E01F6BB897EC08273 /* PrivacyCenterWindowController.swift in Sources */,
 				2954E26328AC77CD3E15FE88 /* ProductDataLayout.swift in Sources */,
 				CC66E91C795D2D9A7ADB81D8 /* RimeAIInputController.swift in Sources */,
@@ -306,23 +342,25 @@
 				COMBINE_HIDPI_IMAGES = YES;
 				DEVELOPMENT_TEAM = "";
 				ENABLE_HARDENED_RUNTIME = YES;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\"Native\"",
+				);
 				GENERATE_INFOPLIST_FILE = NO;
 				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
 					"$(SRCROOT)/../Sources/RimeBridgeC/include",
-					/opt/homebrew/include,
 				);
 				INFOPLIST_FILE = RimeAIInputMethod/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				LIBRARY_SEARCH_PATHS = (
-					/opt/homebrew/lib,
-				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				ONLY_ACTIVE_ARCH = YES;
 				OTHER_LDFLAGS = (
-					"-lrime",
+					"$(inherited)",
+					"-Wl,-exported_symbol,_rai_engine_create",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = fun.wwcn.inputmethod.RimeAI;
 				PRODUCT_NAME = RimeAIInputMethod;
@@ -461,23 +499,25 @@
 				COMBINE_HIDPI_IMAGES = YES;
 				DEVELOPMENT_TEAM = "";
 				ENABLE_HARDENED_RUNTIME = YES;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\"Native\"",
+				);
 				GENERATE_INFOPLIST_FILE = NO;
 				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
 					"$(SRCROOT)/../Sources/RimeBridgeC/include",
-					/opt/homebrew/include,
 				);
 				INFOPLIST_FILE = RimeAIInputMethod/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				LIBRARY_SEARCH_PATHS = (
-					/opt/homebrew/lib,
-				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				ONLY_ACTIVE_ARCH = YES;
 				OTHER_LDFLAGS = (
-					"-lrime",
+					"$(inherited)",
+					"-Wl,-exported_symbol,_rai_engine_create",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = fun.wwcn.inputmethod.RimeAI;
 				PRODUCT_NAME = RimeAIInputMethod;

@@ -16,9 +16,15 @@
     <string>__LANGUAGE_MODEL__</string>
     <string>--beam-config</string>
     <string>__BEAM_CONFIG__</string>
-    <string>--rime-dictionary</string>
-    <string>__RIME_DICTIONARY__</string>
-  </array>
+		<string>--rime-dictionary</string>
+		<string>__RIME_DICTIONARY__</string>
+		<string>--neural-model</string>
+		<string>__NEURAL_MODEL__</string>
+		<string>--fusion-config</string>
+		<string>__FUSION_CONFIG__</string>
+		<string>--neural-device</string>
+		<string>cpu</string>
+	</array>
   <key>WorkingDirectory</key>
   <string>__PROJECT_ROOT__</string>
   <key>RunAtLoad</key>

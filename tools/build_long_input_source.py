@@ -9,7 +9,7 @@ from pathlib import Path
 import re
 import sys
 import tempfile
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from pypinyin import Style, lazy_pinyin
 
@@ -29,6 +29,9 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("source", type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--samples", type=int, default=5000)
+    parser.add_argument("--minimum-target-characters", type=int, default=6)
+    parser.add_argument("--preferred-target-characters", type=int, default=10)
+    parser.add_argument("--maximum-target-characters", type=int, default=12)
     return parser.parse_args()
 
 
@@ -60,8 +63,20 @@ def load_source(path: Path) -> List[Dict[str, Any]]:
     return samples
 
 
-def derive_sample(sample: Dict[str, Any]) -> Dict[str, Any] | None:
-    derived = derive_long_target(sample["context"], sample["gold_text"])
+def derive_sample(
+    sample: Dict[str, Any],
+    *,
+    minimum_target_characters: int = 6,
+    preferred_target_characters: int = 10,
+    maximum_target_characters: int = 12,
+) -> Optional[Dict[str, Any]]:
+    derived = derive_long_target(
+        sample["context"],
+        sample["gold_text"],
+        minimum_target_characters=minimum_target_characters,
+        preferred_target_characters=preferred_target_characters,
+        maximum_target_characters=maximum_target_characters,
+    )
     if derived is None:
         return None
     context, gold_text = derived
@@ -75,11 +90,26 @@ def derive_sample(sample: Dict[str, Any]) -> Dict[str, Any] | None:
         or any(not ASCII_PINYIN.fullmatch(part) for part in pinyin_parts)
     ):
         return None
+    derivation_version = (
+        "long-input-v1"
+        if (
+            minimum_target_characters,
+            preferred_target_characters,
+            maximum_target_characters,
+        )
+        == (6, 10, 12)
+        else "long-input-v2"
+    )
+    derivation_salt = derivation_version
+    if derivation_version == "long-input-v2":
+        derivation_salt += (
+            f"\0{minimum_target_characters}\0"
+            f"{preferred_target_characters}\0{maximum_target_characters}"
+        )
     digest = hashlib.sha256(
-        (
-            f"{sample['id']}\0{context}\0{gold_text}\0"
-            "long-input-v1"
-        ).encode("utf-8")
+        f"{sample['id']}\0{context}\0{gold_text}\0{derivation_salt}".encode(
+            "utf-8"
+        )
     ).hexdigest()
     tags = sorted(set(sample.get("tags", [])) | {"long-input"})
     return {
@@ -92,10 +122,20 @@ def derive_sample(sample: Dict[str, Any]) -> Dict[str, Any] | None:
         "gold_text": gold_text,
         "tags": tags,
         "source": sample["source"],
-        "derivation": {
-            "method": "context-suffix-plus-gold-v1",
-            "source_sample_id": sample["id"],
-        },
+        "derivation": (
+            {
+                "method": "context-suffix-plus-gold-v1",
+                "source_sample_id": sample["id"],
+            }
+            if derivation_version == "long-input-v1"
+            else {
+                "method": "context-suffix-plus-gold-v2",
+                "source_sample_id": sample["id"],
+                "minimum_target_characters": minimum_target_characters,
+                "preferred_target_characters": preferred_target_characters,
+                "maximum_target_characters": maximum_target_characters,
+            }
+        ),
     }
 
 
@@ -133,6 +173,19 @@ def main() -> int:
     if arguments.samples < 2 or arguments.samples % 2:
         print("error: --samples must be a positive even number", file=sys.stderr)
         return 2
+    if not (
+        1
+        <= arguments.minimum_target_characters
+        <= arguments.preferred_target_characters
+        <= arguments.maximum_target_characters
+        <= 30
+    ):
+        print(
+            "error: target character bounds must satisfy "
+            "1 <= minimum <= preferred <= maximum <= 30",
+            file=sys.stderr,
+        )
+        return 2
     try:
         source_samples = load_source(arguments.source)
     except (OSError, ValueError) as error:
@@ -140,7 +193,12 @@ def main() -> int:
         return 2
     by_domain: Dict[str, List[Dict[str, Any]]] = {}
     for source_sample in source_samples:
-        derived = derive_sample(source_sample)
+        derived = derive_sample(
+            source_sample,
+            minimum_target_characters=arguments.minimum_target_characters,
+            preferred_target_characters=arguments.preferred_target_characters,
+            maximum_target_characters=arguments.maximum_target_characters,
+        )
         if derived is not None:
             by_domain.setdefault(derived["domain"], []).append(derived)
     per_domain = arguments.samples // 2
@@ -166,6 +224,14 @@ def main() -> int:
         "samples": len(selected),
         "domains": dict(Counter(sample["domain"] for sample in selected)),
         "splits": dict(Counter(sample["split"] for sample in selected)),
+        "target_characters": {
+            "minimum": arguments.minimum_target_characters,
+            "preferred": arguments.preferred_target_characters,
+            "maximum": arguments.maximum_target_characters,
+            "observed": dict(
+                sorted(Counter(len(sample["gold_text"]) for sample in selected).items())
+            ),
+        },
         "sha256": hashlib.sha256(arguments.output.read_bytes()).hexdigest(),
     }
     print(json.dumps(report, ensure_ascii=False, sort_keys=True))

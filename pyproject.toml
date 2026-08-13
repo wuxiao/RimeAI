@@ -10,6 +10,18 @@ dataset = [
     "jieba==0.42.1",
     "pypinyin==0.55.0",
 ]
+neural = [
+    "onnx==1.17.0",
+    "onnxruntime==1.19.2",
+    "safetensors==0.4.3",
+    "torch==2.8.0",
+    "transformers==4.39.3",
+]
+release = [
+    "onnxruntime==1.19.2",
+    "pyinstaller==6.21.0",
+    "tokenizers==0.15.2",
+]
 
 [project.scripts]
 rimeai-eval = "rimeai_eval.cli:main"

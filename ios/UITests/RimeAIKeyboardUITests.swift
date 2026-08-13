@@ -80,6 +80,16 @@ final class RimeAIKeyboardUITests: XCTestCase {
             candidate.waitForExistence(timeout: 5),
             "Expected 你好 candidate after typing nihao"
         )
+        let semanticState = app.buttons["local-semantic-candidate-state"]
+        XCTAssertTrue(
+            semanticState.waitForExistence(timeout: 5),
+            "Expected an explicit local-model decision before the Rime candidates"
+        )
+        XCTAssertTrue(
+            semanticState.label.contains("首选一致"),
+            "The loaded model must expose its keep-Rime decision, got: "
+                + semanticState.label
+        )
         candidate.tap()
 
         let value = field.value as? String

@@ -20,9 +20,13 @@ log_path="${runtime_dir}/rimeai-daemon.log"
 source_language_model="${project_root}/.rimeai/models/p0-char-ngram-v1.json.gz"
 source_beam_config="${project_root}/.rimeai/models/p0-beam-sentence-v1.json"
 source_rime_dictionary="${project_root}/.rimeai/rime/shared/luna_pinyin.dict.yaml"
+source_neural_model="${project_root}/.rimeai/models/rimeai-ranker-s-24m-v1"
+source_fusion_config="${project_root}/.rimeai/models/rimeai-ranker-s-24m-fusion-v1.json"
 language_model="${model_bundle_dir}/p0-char-ngram-v1.json.gz"
 beam_config="${model_bundle_dir}/p0-beam-sentence-v1.json"
 rime_dictionary="${model_bundle_dir}/luna_pinyin.dict.yaml"
+neural_model="${model_bundle_dir}/rimeai-ranker-s-24m-v1"
+fusion_config="${model_bundle_dir}/rimeai-ranker-s-24m-fusion-v1.json"
 python_path=$(command -v python3)
 timestamp=$(date +%Y%m%d-%H%M%S)
 backup_plist="${HOME}/.Trash/${label}.previous-${timestamp}.plist"
@@ -54,12 +58,35 @@ for artifact in \
   "${template}" \
   "${source_language_model}" \
   "${source_beam_config}" \
-  "${source_rime_dictionary}"; do
+  "${source_rime_dictionary}" \
+  "${source_neural_model}/manifest.json" \
+  "${source_fusion_config}"; do
   if [[ ! -f "${artifact}" ]]; then
     print -u2 "error: required daemon artifact is missing: ${artifact}"
     exit 2
   fi
 done
+
+expected_artifact_id=$(
+  /usr/bin/python3 - "${source_fusion_config}" "${source_beam_config}" <<'PY'
+import hashlib
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as file:
+    ranker_id = json.load(file)["artifact_id"]
+with open(sys.argv[2], "rb") as file:
+    beam_sha256 = hashlib.sha256(file.read()).hexdigest()
+print(f"{ranker_id}:beam-{beam_sha256[:12]}")
+PY
+)
+
+if ! PYTHONPATH="${project_root}" "${python_path}" -c \
+  'import torch, transformers, safetensors; from rimeai_daemon.engine import LocalInferenceEngine' \
+  >/dev/null 2>&1; then
+  print -u2 \
+    "error: daemon source is incompatible with ${python_path}; installation was not changed"
+  exit 2
+fi
 
 mkdir -p \
   "${launch_agents_dir}" \
@@ -93,6 +120,9 @@ rsync -a \
 install -m 600 "${source_language_model}" "${language_model}"
 install -m 600 "${source_beam_config}" "${beam_config}"
 install -m 600 "${source_rime_dictionary}" "${rime_dictionary}"
+rsync -a --delete --exclude='._*' \
+  "${source_neural_model}/" "${neural_model}/"
+install -m 600 "${source_fusion_config}" "${fusion_config}"
 
 cp "${template}" "${staged_plist}"
 /usr/libexec/PlistBuddy -c \
@@ -105,6 +135,10 @@ cp "${template}" "${staged_plist}"
   "Set :ProgramArguments:8 ${beam_config}" "${staged_plist}"
 /usr/libexec/PlistBuddy -c \
   "Set :ProgramArguments:10 ${rime_dictionary}" "${staged_plist}"
+/usr/libexec/PlistBuddy -c \
+  "Set :ProgramArguments:12 ${neural_model}" "${staged_plist}"
+/usr/libexec/PlistBuddy -c \
+  "Set :ProgramArguments:14 ${fusion_config}" "${staged_plist}"
 /usr/libexec/PlistBuddy -c \
   "Set :WorkingDirectory ${daemon_bundle_dir}" "${staged_plist}"
 /usr/libexec/PlistBuddy -c \
@@ -130,7 +164,18 @@ if [[ -e "${target_plist}" ]]; then
 fi
 install -m 600 "${staged_plist}" "${target_plist}"
 
-launchctl bootstrap "${domain}" "${target_plist}"
+bootstrap_succeeded=0
+for _ in {1..20}; do
+  if launchctl bootstrap "${domain}" "${target_plist}" 2>/dev/null; then
+    bootstrap_succeeded=1
+    break
+  fi
+  sleep 0.1
+done
+if (( ! bootstrap_succeeded )); then
+  print -u2 "error: could not bootstrap ${label} after launchd retry window"
+  exit 1
+fi
 if (( ! ai_enabled )); then
   print -r -- "launch_agent=${target_plist}"
   print -r -- "daemon_state=disabled_by_saved_preference"
@@ -141,7 +186,7 @@ launchctl kickstart -k "${domain}/${label}"
 
 for _ in {1..50}; do
   if [[ -S "${socket_path}" ]] \
-    && python3 - "${socket_path}" <<'PY' >/dev/null 2>&1
+    && python3 - "${socket_path}" "${expected_artifact_id}" <<'PY' >/dev/null 2>&1
 import json
 import socket
 import sys
@@ -169,6 +214,12 @@ try:
         raise OSError("daemon is not ready")
     if response.get("offline_lock") is not True:
         raise OSError("offline lock is not active")
+    if "decision-reasons" not in response.get("capabilities", []):
+        raise OSError("structured decision capability is missing")
+    if "long-input-reasons" not in response.get("capabilities", []):
+        raise OSError("long-input decision capability is missing")
+    if response.get("model_artifact_id") != sys.argv[2]:
+        raise OSError("daemon is serving a stale model artifact")
 finally:
     probe.close()
 PY

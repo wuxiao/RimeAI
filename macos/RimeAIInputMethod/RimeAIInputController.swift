@@ -5,13 +5,16 @@ import InputMethodKit
 @objc(RimeAIInputController)
 @MainActor
 final class RimeAIInputController: IMKInputController, @unchecked Sendable {
+    private static var contextStore = SessionContextStore(maxCharacters: 100)
+
     private let sessionNonce = UUID().uuidString
     private let candidatePanel: CandidatePanelController
     private var composition = CompositionState(appSessionID: "inactive")
-    private var contextStore = SessionContextStore(maxCharacters: 100)
     private var debounceWorkItem: DispatchWorkItem?
     private var pendingRequestID: String?
     private var pendingRequestStartedAt: TimeInterval?
+    private var semanticPresentation: SemanticCandidatePresentation = .idle
+    private var semanticContextCharacterCount = 0
     private weak var activeClientObject: AnyObject?
     private var currentBundleIdentifier: String?
     private var settingsObservers: [NSObjectProtocol] = []
@@ -55,10 +58,10 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
 
     override nonisolated func deactivateServer(_ sender: Any!) {
         MainActor.assumeIsolated {
-            invalidateInference()
+            invalidateInference(clearPresentation: true)
             candidatePanel.hide()
             composition.reset()
-            contextStore.deactivate()
+            Self.contextStore.suspend(ownerID: sessionNonce)
             activeClientObject = nil
         }
         super.deactivateServer(sender)
@@ -93,8 +96,9 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
             composition.switchApplicationSession(
                 to: applicationSessionID(for: client)
             )
-            contextStore.activate(
-                sessionID: applicationSessionID(for: client)
+            Self.contextStore.activate(
+                sessionID: client.bundleIdentifier() ?? "unknown-client",
+                ownerID: sessionNonce
             )
         }
 
@@ -131,10 +135,21 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
             guard !composition.mainCandidates.isEmpty else {
                 return false
             }
-            selectMainCandidate(index: 0, client: client)
+            if semanticPresentation.prefersCommitOnSpace,
+               let semanticCandidate = composition.semanticCandidate
+            {
+                selectSemanticCandidate(
+                    semanticCandidate,
+                    client: client,
+                    acceptedViaSpace: true
+                )
+            } else {
+                selectMainCandidate(index: 0, client: client)
+            }
             return true
         case 123, 124, 125, 126, 116, 121:
             invalidateCurrentResult()
+            clearContextForCurrentApplication()
             return false
         default:
             break
@@ -229,11 +244,14 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
             ?? "unknown-client"
         currentBundleIdentifier = bundleIdentifier
         let sessionID = applicationSessionID(for: client)
+        Self.contextStore.activate(
+            sessionID: bundleIdentifier,
+            ownerID: sessionNonce
+        )
         if composition.appSessionID != sessionID {
-            invalidateInference()
+            invalidateInference(clearPresentation: true)
             candidatePanel.hide()
             composition.switchApplicationSession(to: sessionID)
-            contextStore.activate(sessionID: sessionID)
         }
     }
 
@@ -270,8 +288,9 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
             selectionRange: NSRange(location: pinyin.utf16.count, length: 0),
             replacementRange: notFoundRange
         )
-        renderCandidatePanel(client: client)
+        semanticPresentation = .analyzing
         scheduleInference(token: token, client: client)
+        renderCandidatePanel(client: client)
     }
 
     private func deleteBackward(client: any IMKTextInput) -> Bool {
@@ -296,30 +315,34 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
               settings.isAIAllowed(for: currentBundleIdentifier),
               !composition.isSecureInput
         else {
+            semanticPresentation = .unavailable
             settings.record(.privacyBlocked)
+            return
+        }
+        guard composition.pinyin.count <= 256 else {
+            semanticPresentation = .inputTooLong
+            semanticContextCharacterCount = 0
             return
         }
         let requestID = UUID().uuidString
         let contextPolicy = settings.contextPolicy(
             for: currentBundleIdentifier
         )
+        let context = inferenceContext(
+            policy: contextPolicy,
+            client: client
+        )
+        semanticContextCharacterCount = context.count
         let request = SemanticInferenceRequest(
             requestID: requestID,
             token: token,
             contextPolicy: contextPolicy,
-            context: inferenceContext(
-                policy: contextPolicy,
-                token: token,
-                client: client
-            ),
+            context: context,
             pinyin: composition.pinyin,
             candidates: composition.mainCandidates,
             deadlineMilliseconds: 400,
             allowSentence: composition.pinyin.count >= 8
         )
-        settings.record(.requestStarted)
-        pendingRequestID = requestID
-        pendingRequestStartedAt = ProcessInfo.processInfo.systemUptime
         let workItem = DispatchWorkItem { [weak self] in
             MainActor.assumeIsolated {
                 guard let self,
@@ -348,6 +371,9 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
         requestID: String,
         token: CompositionToken
     ) {
+        pendingRequestID = requestID
+        pendingRequestStartedAt = ProcessInfo.processInfo.systemUptime
+        settings.record(.requestStarted)
         DaemonClient.shared.infer(request) { [weak self] result in
             Task { @MainActor [weak self] in
                 self?.applyInferenceResult(
@@ -365,7 +391,7 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
         token: CompositionToken
     ) {
         guard pendingRequestID == requestID else {
-            settings.record(.resultRejected)
+            settings.record(.staleResult)
             return
         }
         pendingRequestID = nil
@@ -383,41 +409,106 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
         pendingRequestStartedAt = nil
         guard let result else {
             settings.record(.daemonFailure)
+            semanticPresentation = .failure
+            refreshCandidatePanelIfActive()
             return
         }
-        guard result.isDisplayable(
-            for: token,
-            candidates: composition.mainCandidates
-        )
-        else {
+        guard result.status == "ok" else {
             if result.status == "timeout" {
                 settings.record(.timeout)
             } else if result.status == "circuit_open" {
                 settings.record(.circuitOpen)
             } else {
-                settings.record(.resultRejected)
+                settings.record(.daemonFailure)
             }
+            semanticPresentation = .failure
+            refreshCandidatePanelIfActive()
+            return
+        }
+        guard result.matches(token) else {
+            settings.record(.staleResult)
+            semanticPresentation = .idle
+            refreshCandidatePanelIfActive()
+            return
+        }
+        guard result.isValid(
+            for: token,
+            candidates: composition.mainCandidates
+        ) else {
+            settings.record(.invalidResult)
+            semanticPresentation = .failure
+            refreshCandidatePanelIfActive()
+            return
+        }
+        semanticPresentation = result.candidatePresentation
+        switch result.candidatePresentation {
+        case .sameTopCandidate:
+            settings.record(.sameTopCandidate)
+            refreshCandidatePanelIfActive()
+            return
+        case .belowConfidence:
+            settings.record(.belowConfidence)
+            refreshCandidatePanelIfActive()
+            return
+        case .noCandidate:
+            settings.record(.noCandidate)
+            refreshCandidatePanelIfActive()
+            return
+        case .sentenceTooLong:
+            settings.record(.sentenceTooLong)
+            refreshCandidatePanelIfActive()
+            return
+        case .sentenceIncomplete:
+            settings.record(.sentenceIncomplete)
+            refreshCandidatePanelIfActive()
+            return
+        case .idle, .analyzing, .unavailable, .failure:
+            settings.record(.invalidResult)
+            semanticPresentation = .failure
+            refreshCandidatePanelIfActive()
+            return
+        case .candidate:
+            break
+        case .inputTooLong:
+            settings.record(.invalidResult)
+            semanticPresentation = .failure
+            refreshCandidatePanelIfActive()
             return
         }
         let candidate = result.displayCandidate
+        guard let decision = result.resolvedDecision else {
+            settings.record(.invalidResult)
+            semanticPresentation = .failure
+            refreshCandidatePanelIfActive()
+            return
+        }
         guard !candidate.isEmpty,
-              candidate.count <= 30,
               !candidate.contains("\n"),
-              composition.applySemanticCandidate(candidate, token: token)
+              composition.applySemanticCandidate(
+                  candidate,
+                  token: token,
+                  decision: decision
+              )
         else {
-            settings.record(.resultRejected)
+            settings.record(.invalidResult)
+            semanticPresentation = .failure
+            refreshCandidatePanelIfActive()
             return
         }
         settings.record(.resultShown)
-        if let client = activeClientObject as? any IMKTextInput {
-            renderCandidatePanel(client: client)
+        if decision == .sentenceSuggestion {
+            settings.record(.sentenceSuggestionShown)
+        } else {
+            settings.record(.rankedCandidateShown)
         }
+        refreshCandidatePanelIfActive()
     }
 
     private func renderCandidatePanel(client: any IMKTextInput) {
         candidatePanel.update(
             mainCandidates: composition.mainCandidates,
-            semanticCandidate: composition.semanticCandidate,
+            semanticPresentation: semanticPresentation,
+            contextCharacterCount: semanticContextCharacterCount,
             onMainSelection: { [weak self] index in
                 guard let self,
                       let client = self.activeClientObject
@@ -455,43 +546,80 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
     private func selectMainCandidate(
         index: Int,
         client: any IMKTextInput,
-        acceptedViaSemanticCandidate: Bool = false
+        acceptedViaSemanticCandidate: Bool = false,
+        acceptedViaSpace: Bool = false
     ) {
         guard composition.mainCandidates.indices.contains(index) else {
             return
         }
         let pinyin = composition.pinyin
         let fallback = composition.mainCandidates[index]
+        let semanticDecision = acceptedViaSemanticCandidate
+            ? composition.semanticCandidateDecision
+            : nil
         composition.beginSelection()
         invalidateInference()
         let committed = RimeEngine.shared.commitCandidate(
             pinyin: pinyin,
             index: index
         ) ?? fallback
-        settings.record(
-            acceptedViaSemanticCandidate
-                ? .semanticAccepted
-                : .mainAccepted
-        )
+        if acceptedViaSemanticCandidate {
+            recordSemanticAcceptance(
+                decision: semanticDecision,
+                acceptedViaSpace: acceptedViaSpace
+            )
+        } else {
+            settings.record(.mainAccepted)
+        }
         commitText(committed, client: client)
     }
 
     private func selectSemanticCandidate(
         _ candidate: String,
-        client: any IMKTextInput
+        client: any IMKTextInput,
+        acceptedViaSpace: Bool = false
     ) {
         if let index = composition.mainCandidates.firstIndex(of: candidate) {
             selectMainCandidate(
                 index: index,
                 client: client,
-                acceptedViaSemanticCandidate: true
+                acceptedViaSemanticCandidate: true,
+                acceptedViaSpace: acceptedViaSpace
             )
             return
         }
+        let decision = composition.semanticCandidateDecision
         composition.beginSelection()
         invalidateInference()
-        settings.record(.semanticAccepted)
+        recordSemanticAcceptance(
+            decision: decision,
+            acceptedViaSpace: acceptedViaSpace
+        )
         commitText(candidate, client: client)
+    }
+
+    private func recordSemanticAcceptance(
+        decision: SemanticInferenceDecision?,
+        acceptedViaSpace: Bool
+    ) {
+        settings.record(.semanticAccepted)
+        if acceptedViaSpace {
+            settings.record(.semanticSpaceAccepted)
+        }
+        if decision == .sentenceSuggestion {
+            settings.record(.semanticSentenceAccepted)
+        } else {
+            settings.record(.semanticRankedAccepted)
+        }
+    }
+
+    private func refreshCandidatePanelIfActive() {
+        guard let client = activeClientObject as? any IMKTextInput,
+              !composition.pinyin.isEmpty
+        else {
+            return
+        }
+        renderCandidatePanel(client: client)
     }
 
     private func commitText(
@@ -499,7 +627,14 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
         client: any IMKTextInput
     ) {
         client.insertText(text, replacementRange: notFoundRange)
-        contextStore.appendCommittedText(text)
+        if let currentBundleIdentifier,
+           settings.isAIAllowed(for: currentBundleIdentifier),
+           settings.contextPolicy(for: currentBundleIdentifier) != .strict
+        {
+            Self.contextStore.appendCommittedText(text)
+        } else {
+            Self.contextStore.deactivate()
+        }
         resetComposition(client: client, preserveContext: true)
     }
 
@@ -507,7 +642,7 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
         client: any IMKTextInput,
         preserveContext: Bool = true
     ) {
-        invalidateInference()
+        invalidateInference(clearPresentation: true)
         composition.reset()
         client.setMarkedText(
             "",
@@ -516,14 +651,14 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
         )
         candidatePanel.hide()
         if !preserveContext {
-            contextStore.deactivate()
+            Self.contextStore.deactivate()
         }
     }
 
     private func enterSecureInput(client: any IMKTextInput) {
-        invalidateInference()
+        invalidateInference(clearPresentation: true)
         composition.enterSecureInput()
-        contextStore.enterSecureInput()
+        Self.contextStore.enterSecureInput()
         client.setMarkedText(
             "",
             selectionRange: NSRange(location: 0, length: 0),
@@ -535,7 +670,7 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
 
     private func invalidateCurrentResult() {
         composition.beginSelection()
-        invalidateInference()
+        invalidateInference(clearPresentation: true)
         if let client = activeClientObject as? any IMKTextInput,
            !composition.pinyin.isEmpty
         {
@@ -543,7 +678,7 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
         }
     }
 
-    private func invalidateInference() {
+    private func invalidateInference(clearPresentation: Bool = false) {
         debounceWorkItem?.cancel()
         debounceWorkItem = nil
         if let pendingRequestID {
@@ -552,24 +687,31 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
             self.pendingRequestID = nil
         }
         pendingRequestStartedAt = nil
+        if clearPresentation {
+            semanticPresentation = .idle
+            semanticContextCharacterCount = 0
+        }
     }
 
     private func inferenceContext(
         policy: ContextPolicy,
-        token: CompositionToken,
         client: any IMKTextInput
     ) -> String {
         switch policy {
         case .strict:
             return ""
         case .standard:
-            return contextStore.context(for: token.appSessionID)
+            return Self.contextStore.context(
+                for: currentBundleIdentifier ?? "unknown-client"
+            )
         case .smart:
             let cursorContext = cursorPrecedingContext(client: client)
             if !cursorContext.isEmpty {
                 return cursorContext
             }
-            return contextStore.context(for: token.appSessionID)
+            return Self.contextStore.context(
+                for: currentBundleIdentifier ?? "unknown-client"
+            )
         }
     }
 
@@ -617,17 +759,29 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
         guard let currentBundleIdentifier else {
             return
         }
-        if !settings.isAIAllowed(for: currentBundleIdentifier) {
+        if !settings.isAIAllowed(for: currentBundleIdentifier)
+            || settings.contextPolicy(for: currentBundleIdentifier) == .strict
+        {
             invalidateCurrentResult()
+            Self.contextStore.deactivate()
+        }
+        if !settings.isAIAllowed(for: currentBundleIdentifier) {
             DaemonClient.shared.disconnect()
         }
     }
 
     private func clearEphemeralData() {
         invalidateCurrentResult()
-        contextStore.deactivate()
-        if !composition.appSessionID.isEmpty {
-            contextStore.activate(sessionID: composition.appSessionID)
+        clearContextForCurrentApplication()
+    }
+
+    private func clearContextForCurrentApplication() {
+        Self.contextStore.deactivate()
+        if activeClientObject != nil, let currentBundleIdentifier {
+            Self.contextStore.activate(
+                sessionID: currentBundleIdentifier,
+                ownerID: sessionNonce
+            )
         }
     }
 

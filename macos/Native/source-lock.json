@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "artifact": "RimeAIMacRuntime.xcframework",
+  "deployment_target": "macOS 14.0",
+  "architecture": "arm64",
+  "librime": {
+    "version": "1.17.0",
+    "revision": "33e78140250125871856cdc5b42ddc6a5fcd3cd4",
+    "logging": false,
+    "external_plugins": false,
+    "timestamp": false,
+    "shared_libraries": false
+  },
+  "boost": {
+    "version": "1.91.0",
+    "url": "https://archives.boost.io/release/1.91.0/source/boost_1_91_0.tar.bz2",
+    "archive_sha256": "de5e6b0e4913395c6bdfa90537febd9028ea4c0735d2cdb0cd9b45d5f51264f5",
+    "libraries": [
+      "regex"
+    ]
+  },
+  "librime_submodules": {
+    "leveldb": "99b3c03b3284f5886f9ef9a4ef703d57373e61be",
+    "marisa-trie": "3e87d53b78e15f2f43783d5e376561a8c9722051",
+    "opencc": "556ed22496d650bd0b13b6c163be9814637970ae",
+    "yaml-cpp": "2f86d13775d119edbb69af52e5f566fd65c6953b"
+  }
+}

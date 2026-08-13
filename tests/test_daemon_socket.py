@@ -1,11 +1,14 @@
 import asyncio
 import json
-import math
 from pathlib import Path
 import stat
 import tempfile
+import threading
 import time
 
+import pytest
+
+from rimeai_daemon.__main__ import _probe_running_daemon
 from rimeai_daemon.server import RimeAIDaemonServer
 from rimeai_daemon.server import DaemonConfigurationError
 from rimeai_daemon.server import _validate_inference_request
@@ -18,6 +21,7 @@ class FakeEngine:
         if request["pinyin"] == "slow":
             time.sleep(0.1)
         return {
+            "decision": "ranked_candidate",
             "ranked_candidate": request["candidates"][-1],
             "sentence_suggestion": "",
             "confidence": 0.9,
@@ -29,10 +33,48 @@ class InvalidEngine:
 
     def infer(self, request):
         return {
-            "ranked_candidate": "not-an-input-candidate",
-            "sentence_suggestion": "contains\nnewline",
-            "confidence": math.nan,
+            "decision": "sentence_suggestion",
+            "ranked_candidate": request["candidates"][-1],
+            "sentence_suggestion": "请执行这条命令",
+            "confidence": 0.93,
         }
+
+
+class LongInputAbstentionEngine:
+    artifact_id = "long-input-abstention-v1"
+
+    def infer(self, request):
+        return {
+            "decision": request["context"],
+            "ranked_candidate": "",
+            "sentence_suggestion": "",
+            "confidence": 0.0,
+        }
+
+
+class ConcurrencyTrackingEngine:
+    artifact_id = "serial-engine-v1"
+
+    def __init__(self):
+        self.active = 0
+        self.maximum_active = 0
+        self.lock = threading.Lock()
+
+    def infer(self, request):
+        with self.lock:
+            self.active += 1
+            self.maximum_active = max(self.maximum_active, self.active)
+        try:
+            time.sleep(0.05)
+            return {
+                "decision": "same_top_candidate",
+                "ranked_candidate": "",
+                "sentence_suggestion": "",
+                "confidence": 1.0,
+            }
+        finally:
+            with self.lock:
+                self.active -= 1
 
 
 async def _read_json(reader):
@@ -62,6 +104,8 @@ async def _hello(reader, writer):
     response = await _read_json(reader)
     assert response["type"] == "hello"
     assert response["status"] == "ok"
+    assert "decision-reasons" in response["capabilities"]
+    assert "long-input-reasons" in response["capabilities"]
 
 
 def test_daemon_socket_permissions_handshake_and_inference():
@@ -96,7 +140,83 @@ def test_daemon_socket_permissions_handshake_and_inference():
             assert response["request_id"] == "request-1"
             assert response["status"] == "ok"
             assert response["ranked_candidate"] == "命令"
+            assert response["decision"] == "ranked_candidate"
             assert response["model_artifact_id"] == "fixture-engine-v1"
+            writer.close()
+            await writer.wait_closed()
+        finally:
+            await server.close()
+
+    with tempfile.TemporaryDirectory(prefix="rai-", dir="/tmp") as directory:
+        asyncio.run(scenario(Path(directory)))
+
+
+def test_release_health_probe_validates_artifact_and_offline_lock():
+    async def scenario(runtime_root: Path):
+        socket_path = runtime_root / "runtime" / "rimeai.sock"
+        server = RimeAIDaemonServer(socket_path, FakeEngine())
+        await server.start()
+        try:
+            response = await asyncio.to_thread(
+                _probe_running_daemon,
+                socket_path,
+                expected_artifact_id="fixture-engine-v1",
+                timeout_ms=500,
+            )
+            assert response["status"] == "ok"
+            assert response["offline_lock"] is True
+
+            with pytest.raises(ValueError, match="unexpected model artifact"):
+                await asyncio.to_thread(
+                    _probe_running_daemon,
+                    socket_path,
+                    expected_artifact_id="stale-engine",
+                    timeout_ms=500,
+                )
+        finally:
+            await server.close()
+
+    with tempfile.TemporaryDirectory(prefix="rai-", dir="/tmp") as directory:
+        asyncio.run(scenario(Path(directory)))
+
+
+def test_daemon_emits_long_input_abstentions_without_partial_text():
+    async def scenario(runtime_root: Path):
+        socket_path = runtime_root / "runtime" / "rimeai.sock"
+        server = RimeAIDaemonServer(
+            socket_path, LongInputAbstentionEngine()
+        )
+        await server.start()
+        try:
+            reader, writer = await asyncio.open_unix_connection(socket_path)
+            await _hello(reader, writer)
+            for revision, decision in enumerate(
+                ("sentence_too_long", "sentence_incomplete"), start=1
+            ):
+                await _write_json(
+                    writer,
+                    {
+                        "schema_version": 1,
+                        "type": "infer",
+                        "request_id": f"long-input-{revision}",
+                        "composition_id": f"composition-{revision}",
+                        "revision": revision,
+                        "app_session_id": "app-1",
+                        "context_policy": "standard",
+                        "context": decision,
+                        "pinyin": "shifou",
+                        "candidates": ["是否", "是", "时"],
+                        "deadline_ms": 400,
+                        "allow_sentence": True,
+                        "sensitive": False,
+                    },
+                )
+                response = await _read_json(reader)
+                assert response["status"] == "ok"
+                assert response["decision"] == decision
+                assert response["ranked_candidate"] == ""
+                assert response["sentence_suggestion"] == ""
+                assert response["confidence"] == 0.0
             writer.close()
             await writer.wait_closed()
         finally:
@@ -203,6 +323,57 @@ def test_deadline_and_sensitive_policy_fail_closed():
             )
             privacy_response = await _read_json(reader)
             assert privacy_response["status"] == "privacy_blocked"
+            writer.close()
+            await writer.wait_closed()
+        finally:
+            await server.close()
+
+    with tempfile.TemporaryDirectory(prefix="rai-", dir="/tmp") as directory:
+        asyncio.run(scenario(Path(directory)))
+
+
+def test_native_inference_remains_serial_after_a_request_times_out():
+    async def scenario(runtime_root: Path):
+        socket_path = runtime_root / "runtime" / "rimeai.sock"
+        engine = ConcurrencyTrackingEngine()
+        server = RimeAIDaemonServer(socket_path, engine)
+        await server.start()
+        try:
+            reader, writer = await asyncio.open_unix_connection(socket_path)
+            await _hello(reader, writer)
+            base = {
+                "schema_version": 1,
+                "type": "infer",
+                "revision": 1,
+                "app_session_id": "app-serial",
+                "context_policy": "strict",
+                "context": "",
+                "pinyin": "mingling",
+                "candidates": ["明令", "命令"],
+                "allow_sentence": False,
+                "sensitive": False,
+            }
+            await _write_json(
+                writer,
+                {
+                    **base,
+                    "request_id": "times-out",
+                    "composition_id": "composition-timeout",
+                    "deadline_ms": 10,
+                },
+            )
+            assert (await _read_json(reader))["status"] == "timeout"
+            await _write_json(
+                writer,
+                {
+                    **base,
+                    "request_id": "after-timeout",
+                    "composition_id": "composition-after",
+                    "deadline_ms": 400,
+                },
+            )
+            assert (await _read_json(reader))["status"] == "ok"
+            assert engine.maximum_active == 1
             writer.close()
             await writer.wait_closed()
         finally:

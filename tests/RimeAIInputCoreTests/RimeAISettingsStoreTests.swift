@@ -46,15 +46,21 @@ struct RimeAISettingsStoreTests {
         store.record(.requestStarted)
         store.record(.requestStarted)
         store.record(.privacyBlocked)
+        store.record(.sameTopCandidate)
+        store.record(.belowConfidence)
 
         #expect(store.diagnosticCount(.requestStarted) == 2)
         #expect(store.diagnosticCount(.privacyBlocked) == 1)
+        #expect(store.diagnosticCount(.sameTopCandidate) == 1)
+        #expect(store.diagnosticCount(.belowConfidence) == 1)
         let persisted = defaults.dictionary(
             forKey: RimeAISettingsStore.Keys.diagnostics
         )
         #expect(persisted?.keys.sorted() == [
+            "below_confidence",
             "privacy_blocked",
             "request_started",
+            "same_top_candidate",
         ])
 
         store.resetDiagnostics()

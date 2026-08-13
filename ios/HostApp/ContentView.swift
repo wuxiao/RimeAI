@@ -31,7 +31,7 @@ struct ContentView: View {
                 Text(
                     "这是 iOS 内部工程预览。键盘扩展保持离线，"
                         + "已接入 librime 1.17.0 拼音候选；"
-                        + "语义模型尚未接入。"
+                        + "冻结 P0 轻量语义排序器已接入，神经排序器仍待验证。"
                 )
                 .foregroundStyle(.secondary)
             }
@@ -61,9 +61,9 @@ struct ContentView: View {
             )
             StatusRow(
                 title: "AI 语义候选",
-                detail: "等待移动端质量与内存门",
-                systemImage: "clock.fill",
-                tint: .orange
+                detail: "P0 轻量排序已接入；神经模型与真机仍待验",
+                systemImage: "checkmark.circle.fill",
+                tint: .green
             )
         }
     }

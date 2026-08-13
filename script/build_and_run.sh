@@ -25,6 +25,8 @@ esac
 if [[ ! -f "${project_root}/.rimeai/rime/shared/data-lock.json" ]]; then
   "${project_root}/scripts/bootstrap_rime_data.sh" >/dev/null
 fi
+"${project_root}/scripts/verify_macos_librime.sh" \
+  "${macos_dir}/Native/RimeAIMacRuntime.xcframework" >/dev/null
 
 dot_clean -m "${macos_dir}" "${project_root}/Sources" \
   "${project_root}/.rimeai/rime/shared" >/dev/null 2>&1 || true
@@ -53,7 +55,7 @@ COPYFILE_DISABLE=1 xcodebuild \
   -configuration Debug \
   -derivedDataPath "${derived_data}" \
   "${signing_arguments[@]}" \
-  build
+  clean build
 
 "${project_root}/script/bundle_librime_dependencies.sh" \
   "${app_bundle}" "${signing_identity:--}"

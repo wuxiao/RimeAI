@@ -1,5 +1,10 @@
 # RimeAI iOS internal TestFlight handoff
 
+> 2026-08-08 后续说明：本文是 2026-08-01 发布快照，保留当时“语义模型未
+> 接入”的历史结论。当前源码已加入精确复现冻结 P0 字符 n-gram 的过渡排序器
+> 与独立模型状态位；24M 神经排序器和真机验收仍未完成。当前边界以
+> `ios/README.md` 和 `docs/P1_IMPLEMENTATION_EVIDENCE.md` 为准。
+
 Snapshot: 2026-08-01, Asia/Shanghai
 
 Conclusion: **已进入内部 TestFlight，等待真机验收**

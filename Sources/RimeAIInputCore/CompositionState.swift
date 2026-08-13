@@ -23,6 +23,7 @@ public struct CompositionState: Sendable {
     public private(set) var pinyin = ""
     public private(set) var mainCandidates: [String] = []
     public private(set) var semanticCandidate: String?
+    public private(set) var semanticCandidateDecision: SemanticInferenceDecision?
     public private(set) var isSelecting = false
     public private(set) var isSecureInput = false
 
@@ -42,6 +43,7 @@ public struct CompositionState: Sendable {
         self.pinyin = pinyin
         mainCandidates = candidates
         semanticCandidate = nil
+        semanticCandidateDecision = nil
         isSelecting = false
         isSecureInput = false
         return token
@@ -50,7 +52,8 @@ public struct CompositionState: Sendable {
     @discardableResult
     public mutating func applySemanticCandidate(
         _ candidate: String,
-        token: CompositionToken
+        token: CompositionToken,
+        decision: SemanticInferenceDecision = .rankedCandidate
     ) -> Bool {
         guard !candidate.isEmpty,
               !isSelecting,
@@ -60,6 +63,7 @@ public struct CompositionState: Sendable {
             return false
         }
         semanticCandidate = candidate
+        semanticCandidateDecision = decision
         return true
     }
 
@@ -67,6 +71,7 @@ public struct CompositionState: Sendable {
         revision &+= 1
         isSelecting = true
         semanticCandidate = nil
+        semanticCandidateDecision = nil
     }
 
     public mutating func reset() {
@@ -75,6 +80,7 @@ public struct CompositionState: Sendable {
         pinyin = ""
         mainCandidates = []
         semanticCandidate = nil
+        semanticCandidateDecision = nil
         isSelecting = false
     }
 

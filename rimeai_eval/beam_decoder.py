@@ -6,10 +6,13 @@ import math
 import os
 from pathlib import Path
 import tempfile
-from typing import Any, Dict, List, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .ngram_ranker import NGramRankerModel, ORDERS
 from .pinyin_guard import PinyinGuard
+
+MAX_SENTENCE_CHARACTERS = 30
+MAX_CANDIDATE_CHARACTERS = 128
 
 
 class BeamDecoderError(ValueError):
@@ -43,6 +46,7 @@ class BeamSuggestion:
     text: str
     confidence: float
     margin: float
+    reason: str = "suggestion"
 
 
 class BeamSentenceDecoder:
@@ -113,6 +117,23 @@ class BeamSentenceDecoder:
             prefix += character
         return score
 
+    def _first_complete_candidate(
+        self,
+        *,
+        pinyin: str,
+        candidates: Sequence[str],
+        maximum_characters: int,
+    ) -> Optional[Tuple[str, List[str]]]:
+        for candidate in candidates[:10]:
+            syllables = self.guard.segment(
+                candidate,
+                pinyin,
+                maximum_characters=maximum_characters,
+            )
+            if syllables is not None and len(syllables) == len(candidate):
+                return candidate, syllables
+        return None
+
     def raw_decode(
         self,
         *,
@@ -122,12 +143,20 @@ class BeamSentenceDecoder:
     ) -> Tuple[str, float]:
         if not candidates:
             return "", 0.0
-        baseline = candidates[0]
-        syllables = self.guard.segment(baseline, pinyin)
-        if syllables is None or len(syllables) != len(baseline):
-            return baseline, 0.0
+        complete = self._first_complete_candidate(
+            pinyin=pinyin,
+            candidates=candidates,
+            maximum_characters=MAX_SENTENCE_CHARACTERS,
+        )
+        if complete is None:
+            return candidates[0], 0.0
+        baseline, syllables = complete
         candidate_segments = [
-            self.guard.segment(candidate, pinyin)
+            self.guard.segment(
+                candidate,
+                pinyin,
+                maximum_characters=MAX_SENTENCE_CHARACTERS,
+            )
             for candidate in candidates[:10]
         ]
         beam: List[Tuple[str, float]] = [("", 0.0)]
@@ -174,18 +203,25 @@ class BeamSentenceDecoder:
         candidates: Sequence[str],
     ) -> BeamSuggestion:
         if not candidates:
-            return BeamSuggestion("", 0.0, 0.0)
+            return BeamSuggestion("", 0.0, 0.0, "no_candidate")
+        complete = self._first_complete_candidate(
+            pinyin=pinyin,
+            candidates=candidates,
+            maximum_characters=MAX_CANDIDATE_CHARACTERS,
+        )
+        if complete is None:
+            return BeamSuggestion("", 0.0, 0.0, "incomplete_candidate")
+        if len(complete[0]) > MAX_SENTENCE_CHARACTERS:
+            return BeamSuggestion("", 0.0, 0.0, "too_long")
         text, margin = self.raw_decode(
             context=context,
             pinyin=pinyin,
             candidates=candidates,
         )
-        if (
-            not text
-            or text == candidates[0]
-            or margin < self.config.threshold
-        ):
-            return BeamSuggestion("", 0.0, margin)
+        if not text or text == candidates[0]:
+            return BeamSuggestion("", 0.0, margin, "no_change")
+        if margin < self.config.threshold:
+            return BeamSuggestion("", 0.0, margin, "below_threshold")
         confidence = 1.0 / (
             1.0
             + math.exp(
@@ -195,7 +231,7 @@ class BeamSentenceDecoder:
                 )
             )
         )
-        return BeamSuggestion(text, confidence, margin)
+        return BeamSuggestion(text, confidence, margin, "suggestion")
 
 
 def train_beam_decoder_config(

@@ -63,7 +63,8 @@ final class CandidatePanelController: NSObject {
 
     func update(
         mainCandidates: [String],
-        semanticCandidate: String?,
+        semanticPresentation: SemanticCandidatePresentation,
+        contextCharacterCount: Int,
         onMainSelection: @escaping (Int) -> Void,
         onSemanticSelection: @escaping () -> Void
     ) {
@@ -88,15 +89,24 @@ final class CandidatePanelController: NSObject {
             mainCandidatesStack.addArrangedSubview(button)
         }
 
-        if let semanticCandidate, !semanticCandidate.isEmpty {
-            semanticButton.title = "✦ \(semanticCandidate)"
-            semanticButton.isEnabled = true
-            semanticButton.alphaValue = 1
-        } else {
-            semanticButton.title = "✦ 本地语义候选"
-            semanticButton.isEnabled = false
-            semanticButton.alphaValue = 0.28
+        var semanticTitle = semanticPresentation.title
+        if contextCharacterCount > 0 {
+            semanticTitle += " · 上下文 \(contextCharacterCount) 字"
         }
+        if semanticPresentation.prefersCommitOnSpace {
+            semanticTitle += " · Space 采用"
+        }
+        semanticButton.title = semanticTitle
+        semanticButton.setAccessibilityLabel(semanticTitle)
+        semanticButton.isEnabled = semanticPresentation.isSelectable
+        semanticButton.alphaValue = semanticPresentation.isSelectable ? 1 : 0.68
+        semanticButton.toolTip = semanticPresentation.isSelectable
+            ? (
+                semanticPresentation.prefersCommitOnSpace
+                    ? "高置信候选：Space 或 Tab 接受"
+                    : "Tab 接受本地语义候选"
+            )
+            : semanticTitle
 
         let contentWidth = min(
             960,

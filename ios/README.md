@@ -39,10 +39,16 @@ acceptance.
 - There is no network client, shared App Group, login, push, in-app purchase, or
   background mode.
 - The host app provides setup instructions and a local keyboard test field.
-- Native librime candidates are available. The RimeAI semantic ranking model is
-  not integrated on iOS.
+- Native librime candidates are available. A read-only compact artifact exactly
+  reproduces the approved P0 character n-gram candidate scorer on iOS. Its
+  source and artifact hashes are locked in `SemanticModel/artifact-lock.json`.
+- The semantic state occupies a separate candidate slot and explicitly reports
+  a promoted candidate, same-top result, low confidence, no candidate, or model
+  fallback. It never reorders the stable native candidate buttons in place.
+- The planned `RimeAI-Ranker-S-24M` neural ranker is not integrated on iOS.
 - The Simulator integration and system-keyboard UI tests exercise `nihao` →
-  `你好`. They do not replace physical-device memory, lifecycle, and host-app
+  `你好`, assert the visible local-model state, and load an approved ranking
+  fixture. They do not replace physical-device memory, lifecycle, and host-app
   compatibility evidence.
 
 Do not describe this feasibility build as completed iOS product support.

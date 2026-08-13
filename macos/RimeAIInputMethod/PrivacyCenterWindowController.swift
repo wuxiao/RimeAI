@@ -448,8 +448,32 @@ final class PrivacyCenterWindowController: NSObject {
         guard !diagnostics.isEmpty else {
             return "尚无诊断计数（不会保存原始输入文本）"
         }
-        return diagnostics.keys.sorted().map {
-            "\($0)：\(diagnostics[$0, default: 0])"
+        let names: [String: String] = [
+            "request_started": "实际发出",
+            "request_cancelled": "已取消",
+            "result_shown": "候选已显示",
+            "ranked_candidate_shown": "排序候选已显示",
+            "sentence_suggestion_shown": "整句建议已显示",
+            "same_top_candidate": "模型同意 Rime 首选",
+            "below_confidence": "低置信度回退",
+            "no_candidate": "无可用语义候选",
+            "sentence_too_long": "整句超过 30 字",
+            "sentence_incomplete": "整句候选未覆盖完整拼音",
+            "semantic_accepted": "语义候选已采纳",
+            "semantic_ranked_accepted": "排序候选已采纳",
+            "semantic_sentence_accepted": "整句建议已采纳",
+            "semantic_space_accepted": "Space 已采纳语义候选",
+            "main_accepted": "Rime 主候选已采纳",
+            "stale_result": "过期结果已丢弃",
+            "invalid_result": "无效结果已拦截",
+            "privacy_blocked": "隐私策略已拦截",
+            "timeout": "推理超时",
+            "circuit_open": "熔断回退",
+            "daemon_failure": "daemon 失败",
+        ]
+        return diagnostics.keys.sorted().map { key in
+            let name = names[key] ?? key
+            return "\(name)：\(diagnostics[key, default: 0])"
         }.joined(separator: " · ")
     }
 

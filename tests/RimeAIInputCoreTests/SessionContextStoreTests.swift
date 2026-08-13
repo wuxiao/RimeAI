@@ -52,3 +52,43 @@ func contextIsAvailableOnlyToTheActiveSession() {
     #expect(store.context(for: "app-1") == "当前应用上下文")
     #expect(store.context(for: "app-2").isEmpty)
 }
+
+@Test
+func suspendedContextCanResumeOnlyForTheSameApplication() {
+    var store = SessionContextStore(maxCharacters: 100)
+    store.activate(sessionID: "com.example.editor")
+    store.appendCommittedText("数据库迁移需要索引")
+
+    store.suspend()
+    #expect(store.context(for: "com.example.editor").isEmpty)
+
+    store.activate(sessionID: "com.example.editor")
+    #expect(
+        store.context(for: "com.example.editor")
+            == "数据库迁移需要索引"
+    )
+
+    store.suspend()
+    store.activate(sessionID: "com.example.mail")
+    #expect(store.context(for: "com.example.mail").isEmpty)
+}
+
+@Test
+func deactivatingOneControllerDoesNotSuspendAnotherControllerInSameApp() {
+    var store = SessionContextStore(maxCharacters: 100)
+    store.activate(
+        sessionID: "com.example.editor",
+        ownerID: "controller-a"
+    )
+    store.appendCommittedText("仍在使用的上下文")
+    store.activate(
+        sessionID: "com.example.editor",
+        ownerID: "controller-b"
+    )
+
+    store.suspend(ownerID: "controller-a")
+
+    #expect(
+        store.context(for: "com.example.editor") == "仍在使用的上下文"
+    )
+}

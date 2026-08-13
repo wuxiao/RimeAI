@@ -33,7 +33,7 @@ def _guard(tmp_path: Path) -> PinyinGuard:
     dictionary = tmp_path / "fixture.dict.yaml"
     dictionary.write_text(
         "---\nname: fixture\n...\n"
-        "命\tming\n明\tming\n令\tling\n",
+        "命\tming\n明\tming\n令\tling\n是\tshi\n时\tshi\n",
         encoding="utf-8",
     )
     return PinyinGuard.from_rime_dictionary(dictionary)
@@ -92,6 +92,58 @@ def test_beam_decoder_generates_only_a_dictionary_pinyin_path(
     assert result.text == "命令"
     assert _guard(tmp_path).matches(result.text, "mingling")
     assert 0 <= result.confidence <= 1
+
+
+def test_beam_decoder_uses_a_full_input_candidate_when_first_is_partial(
+    tmp_path: Path,
+):
+    decoder = BeamSentenceDecoder(
+        _language_model(),
+        _guard(tmp_path),
+        BeamDecoderConfig(
+            threshold=0.0,
+            beam_width=16,
+            characters_per_syllable=20,
+            language_model_sha256="a" * 64,
+            dictionary_sha256="b" * 64,
+            dataset_sha256="c" * 64,
+        ),
+    )
+
+    result = decoder.suggest(
+        context="请执行这条",
+        pinyin="mingling",
+        candidates=["明", "明令", "命令"],
+    )
+
+    assert result.text == "命令"
+    assert result.reason == "suggestion"
+
+
+def test_beam_decoder_reports_inputs_beyond_the_validated_sentence_limit(
+    tmp_path: Path,
+):
+    decoder = BeamSentenceDecoder(
+        _language_model(),
+        _guard(tmp_path),
+        BeamDecoderConfig(
+            threshold=0.0,
+            beam_width=16,
+            characters_per_syllable=20,
+            language_model_sha256="a" * 64,
+            dictionary_sha256="b" * 64,
+            dataset_sha256="c" * 64,
+        ),
+    )
+
+    result = decoder.suggest(
+        context="长句测试",
+        pinyin="shi" * 31,
+        candidates=["是" * 31, "时" * 31],
+    )
+
+    assert result.text == ""
+    assert result.reason == "too_long"
 
 
 def test_threshold_training_uses_validation_and_never_test_labels(

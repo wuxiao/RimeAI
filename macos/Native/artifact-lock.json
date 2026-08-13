@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "artifact": "RimeAIMacRuntime.xcframework",
+  "deployment_target": "macOS 14.0",
+  "architecture": "arm64",
+  "source_lock_sha256": "38ac17c6e11b4a7262e747fd5bbb0e52e221c3870f75e47a5dea23c37897f618",
+  "info_plist_sha256": "687c6bca5ccfc9abc95631558606bb0a7fdebf4cf84fcba05118dd082fedf18a",
+  "library": {
+    "path": "macos-arm64/libRimeAIMacRuntime.a",
+    "size_bytes": 8853944,
+    "sha256": "6a0ac2766cdce32c027954479f752d1d4622afd3d2463f066fc316d418c716db"
+  },
+  "librime": {
+    "version": "1.17.0",
+    "revision": "33e78140250125871856cdc5b42ddc6a5fcd3cd4"
+  }
+}

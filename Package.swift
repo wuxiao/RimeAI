@@ -21,16 +21,13 @@ let package = Package(
         .target(
             name: "RimeAIInputCore"
         ),
-        .systemLibrary(
-            name: "CLibRime",
-            pkgConfig: "rime",
-            providers: [
-                .brew(["librime"]),
-            ]
+        .binaryTarget(
+            name: "RimeAIMacRuntime",
+            path: "macos/Native/RimeAIMacRuntime.xcframework"
         ),
         .target(
             name: "RimeBridgeC",
-            dependencies: ["CLibRime"],
+            dependencies: ["RimeAIMacRuntime"],
             publicHeadersPath: "include",
             cxxSettings: [
                 .unsafeFlags(["-std=c++17"]),
