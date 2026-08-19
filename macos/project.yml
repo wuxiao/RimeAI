@@ -37,6 +37,7 @@ targets:
       - sdk: Carbon.framework
       - sdk: InputMethodKit.framework
       - sdk: Network.framework
+      - sdk: libsqlite3.tbd
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: fun.wwcn.inputmethod.RimeAI
@@ -54,6 +55,7 @@ targets:
         DEVELOPMENT_TEAM: ""
         CODE_SIGN_IDENTITY: "-"
         ENABLE_HARDENED_RUNTIME: true
+        ENABLE_DEBUG_DYLIB: false
         GENERATE_INFOPLIST_FILE: false
         MACOSX_DEPLOYMENT_TARGET: "14.0"
         ONLY_ACTIVE_ARCH: true

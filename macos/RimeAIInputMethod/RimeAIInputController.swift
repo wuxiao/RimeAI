@@ -9,11 +9,23 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
 
     private let sessionNonce = UUID().uuidString
     private let candidatePanel: CandidatePanelController
+    private let mixedCompositionResolver = MixedCompositionResolver()
     private var composition = CompositionState(appSessionID: "inactive")
+    private var mixedCompositionSuggestion: MixedCompositionSuggestion?
+    private var historyEnglishTokens = Set<String>()
+    private var historyEnglishTokensLoaded = false
+    private var historyEnglishTokensLoading = false
+    private var historyEnglishTokensGeneration: UInt64 = 0
     private var debounceWorkItem: DispatchWorkItem?
     private var pendingRequestID: String?
     private var pendingRequestStartedAt: TimeInterval?
+    private var pendingCloudRequestID: String?
+    private var pendingCloudBuildCancellation: CloudCandidateBuildCancellation?
+    private var cloudDeadlineAt: TimeInterval?
     private var semanticPresentation: SemanticCandidatePresentation = .idle
+    private var semanticHistorySource: HistoryCommitSource = .localSemantic
+    private var semanticCloudCandidate: CloudCandidate?
+    private var cloudSuggestionApplied = false
     private var semanticContextCharacterCount = 0
     private weak var activeClientObject: AnyObject?
     private var currentBundleIdentifier: String?
@@ -53,6 +65,9 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
             }
             activeClientObject = sender as AnyObject
             activateSession(for: client)
+            if IsSecureEventInputEnabled() {
+                enterSecureInput(client: client)
+            }
         }
     }
 
@@ -123,7 +138,11 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
             guard !composition.pinyin.isEmpty else {
                 return false
             }
-            commitText(composition.pinyin, client: client)
+            commitText(
+                composition.pinyin,
+                source: .rawPinyin,
+                client: client
+            )
             return true
         case 48:
             guard let semanticCandidate = composition.semanticCandidate else {
@@ -132,21 +151,27 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
             selectSemanticCandidate(semanticCandidate, client: client)
             return true
         case 49:
-            guard !composition.mainCandidates.isEmpty else {
-                return false
-            }
-            if semanticPresentation.prefersCommitOnSpace,
-               let semanticCandidate = composition.semanticCandidate
-            {
-                selectSemanticCandidate(
-                    semanticCandidate,
-                    client: client,
-                    acceptedViaSpace: true
-                )
-            } else {
+            if !composition.mainCandidates.isEmpty {
                 selectMainCandidate(index: 0, client: client)
+                return true
             }
-            return true
+            if let semanticCandidate = composition.semanticCandidate {
+                selectSemanticCandidate(semanticCandidate, client: client)
+                return true
+            }
+            guard composition.pinyin.isEmpty else {
+                commitText(
+                    composition.pinyin,
+                    source: .rawPinyin,
+                    client: client
+                )
+                return true
+            }
+            if let literal = transformedLiteral(" ") {
+                client.insertText(literal, replacementRange: notFoundRange)
+                return true
+            }
+            return false
         case 123, 124, 125, 126, 116, 121:
             invalidateCurrentResult()
             clearContextForCurrentApplication()
@@ -171,7 +196,9 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
         {
             return false
         }
-        if let character = acceptedPinyinCharacter(from: characters) {
+        if let character = acceptedCompositionCharacter(
+            from: event.characters ?? characters
+        ) {
             compositionInput(
                 composition.pinyin + String(character),
                 client: client
@@ -179,8 +206,16 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
             return true
         }
 
+        let literal = transformedLiteral(event.characters ?? characters)
         if !composition.pinyin.isEmpty {
             selectMainCandidate(index: 0, client: client)
+            if let literal {
+                client.insertText(literal, replacementRange: notFoundRange)
+                return true
+            }
+        } else if let literal {
+            client.insertText(literal, replacementRange: notFoundRange)
+            return true
         }
         return false
     }
@@ -198,7 +233,11 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
         if !composition.mainCandidates.isEmpty {
             selectMainCandidate(index: 0, client: client)
         } else if !composition.pinyin.isEmpty {
-            commitText(composition.pinyin, client: client)
+            commitText(
+                composition.pinyin,
+                source: .rawPinyin,
+                client: client
+            )
         }
     }
 
@@ -224,15 +263,92 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
     }
 
     override nonisolated func menu() -> NSMenu! {
+        makeInputMethodMenu()
+    }
+
+    private nonisolated func makeInputMethodMenu() -> NSMenu {
+        let preferences = RimeAISettingsStore.shared.inputPreferences
         let menu = NSMenu(title: "RimeAI")
-        let privacyItem = NSMenuItem(
-            title: "RimeAI 隐私控制中心…",
+        menu.addItem(preferenceMenuItem(
+            title: "简体中文",
+            action: #selector(useSimplifiedChinese(_:)),
+            selected: preferences.characterSet == .simplified
+        ))
+        menu.addItem(preferenceMenuItem(
+            title: "繁体中文",
+            action: #selector(useTraditionalChinese(_:)),
+            selected: preferences.characterSet == .traditional
+        ))
+        menu.addItem(.separator())
+        menu.addItem(preferenceMenuItem(
+            title: "半角字符",
+            action: #selector(useHalfWidth(_:)),
+            selected: preferences.characterWidth == .half
+        ))
+        menu.addItem(preferenceMenuItem(
+            title: "全角字符",
+            action: #selector(useFullWidth(_:)),
+            selected: preferences.characterWidth == .full
+        ))
+        menu.addItem(.separator())
+        menu.addItem(preferenceMenuItem(
+            title: "中文标点（，。）",
+            action: #selector(useChinesePunctuation(_:)),
+            selected: preferences.punctuationStyle == .chinese
+        ))
+        menu.addItem(preferenceMenuItem(
+            title: "西文标点（,.）",
+            action: #selector(useWesternPunctuation(_:)),
+            selected: preferences.punctuationStyle == .western
+        ))
+        menu.addItem(.separator())
+        let settingsItem = NSMenuItem(
+            title: "RimeAI 设置…",
             action: #selector(showPrivacyCenter(_:)),
             keyEquivalent: ","
         )
-        privacyItem.target = self
-        menu.addItem(privacyItem)
+        settingsItem.target = self
+        menu.addItem(settingsItem)
         return menu
+    }
+
+    private nonisolated func preferenceMenuItem(
+        title: String,
+        action: Selector,
+        selected: Bool
+    ) -> NSMenuItem {
+        let item = NSMenuItem(
+            title: title,
+            action: action,
+            keyEquivalent: ""
+        )
+        item.target = self
+        item.state = selected ? .on : .off
+        return item
+    }
+
+    @objc private func useSimplifiedChinese(_ sender: Any?) {
+        settings.characterSet = .simplified
+    }
+
+    @objc private func useTraditionalChinese(_ sender: Any?) {
+        settings.characterSet = .traditional
+    }
+
+    @objc private func useHalfWidth(_ sender: Any?) {
+        settings.characterWidth = .half
+    }
+
+    @objc private func useFullWidth(_ sender: Any?) {
+        settings.characterWidth = .full
+    }
+
+    @objc private func useChinesePunctuation(_ sender: Any?) {
+        settings.punctuationStyle = .chinese
+    }
+
+    @objc private func useWesternPunctuation(_ sender: Any?) {
+        settings.punctuationStyle = .western
     }
 
     @objc private func showPrivacyCenter(_ sender: Any?) {
@@ -243,6 +359,7 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
         let bundleIdentifier = client.bundleIdentifier()
             ?? "unknown-client"
         currentBundleIdentifier = bundleIdentifier
+        prewarmHistoryEnglishTokens(for: bundleIdentifier)
         let sessionID = applicationSessionID(for: client)
         Self.contextStore.activate(
             sessionID: bundleIdentifier,
@@ -264,15 +381,20 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
     }
 
     private func compositionInput(
-        _ pinyin: String,
+        _ rawInput: String,
         client: any IMKTextInput
     ) {
         invalidateInference()
+        mixedCompositionSuggestion = nil
+        let rimeInput = rawInput.lowercased()
         let candidates = RimeEngine.shared.candidates(
-            for: pinyin,
+            for: rimeInput,
             limit: 10
         )
-        guard !candidates.isEmpty else {
+        let mixedSuggestion = resolveMixedComposition(
+            rawInput: rawInput
+        )
+        guard !candidates.isEmpty || mixedSuggestion != nil else {
             if composition.pinyin.isEmpty {
                 return
             }
@@ -280,17 +402,102 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
             return
         }
         let token = composition.replaceInput(
-            pinyin: pinyin,
+            pinyin: rawInput,
             candidates: candidates
         )
+        semanticHistorySource = .localSemantic
+        semanticCloudCandidate = nil
+        cloudSuggestionApplied = false
         client.setMarkedText(
-            pinyin,
-            selectionRange: NSRange(location: pinyin.utf16.count, length: 0),
+            rawInput,
+            selectionRange: NSRange(
+                location: rawInput.utf16.count,
+                length: 0
+            ),
             replacementRange: notFoundRange
         )
+        if let mixedSuggestion,
+           composition.applySemanticCandidate(
+               mixedSuggestion.text,
+               token: token,
+               decision: .mixedComposition
+           )
+        {
+            mixedCompositionSuggestion = mixedSuggestion
+            semanticPresentation = .candidate(
+                text: mixedSuggestion.text,
+                decision: .mixedComposition,
+                confidence: mixedSuggestion.confidence
+            )
+            semanticContextCharacterCount = 0
+            settings.record(.resultShown)
+            settings.record(.mixedCompositionShown)
+            renderCandidatePanel(client: client)
+            return
+        }
         semanticPresentation = .analyzing
         scheduleInference(token: token, client: client)
         renderCandidatePanel(client: client)
+    }
+
+    private func resolveMixedComposition(
+        rawInput: String
+    ) -> MixedCompositionSuggestion? {
+        guard let currentBundleIdentifier,
+              settings.isAIAllowed(for: currentBundleIdentifier)
+        else {
+            return nil
+        }
+        var personalized = Set<String>()
+        if settings.contextPolicy(for: currentBundleIdentifier) != .strict {
+            personalized = settings.personalEnglishTokens
+            if historyEnglishTokensLoaded {
+                personalized.formUnion(historyEnglishTokens)
+            }
+        }
+        return mixedCompositionResolver.resolve(
+            rawInput: rawInput,
+            personalizedEnglishTokens: personalized
+        ) { pinyin, limit in
+            RimeEngine.shared.candidates(for: pinyin, limit: limit)
+        }
+    }
+
+    private func prewarmHistoryEnglishTokens(
+        for bundleIdentifier: String
+    ) {
+        guard settings.contextPolicy(for: bundleIdentifier) != .strict,
+              !historyEnglishTokensLoaded,
+              !historyEnglishTokensLoading
+        else {
+            return
+        }
+        historyEnglishTokensLoading = true
+        let generation = historyEnglishTokensGeneration
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let recentText = try? RimeAIHistoryService.shared.recentText(
+                maxCharacters: 4_000
+            )
+            let tokens = recentText.map {
+                MixedCompositionResolver.personalizedEnglishTokens(from: $0)
+            } ?? []
+            let boundedTokens = Set(tokens.sorted {
+                if $0.count != $1.count {
+                    return $0.count > $1.count
+                }
+                return $0 < $1
+            }.prefix(256))
+            DispatchQueue.main.async { [weak self] in
+                guard let self,
+                      self.historyEnglishTokensGeneration == generation
+                else {
+                    return
+                }
+                self.historyEnglishTokens = boundedTokens
+                self.historyEnglishTokensLoaded = true
+                self.historyEnglishTokensLoading = false
+            }
+        }
     }
 
     private func deleteBackward(client: any IMKTextInput) -> Bool {
@@ -312,8 +519,8 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
         client: any IMKTextInput
     ) {
         guard let currentBundleIdentifier,
-              settings.isAIAllowed(for: currentBundleIdentifier),
-              !composition.isSecureInput
+              !composition.isSecureInput,
+              !IsSecureEventInputEnabled()
         else {
             semanticPresentation = .unavailable
             settings.record(.privacyBlocked)
@@ -324,39 +531,71 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
             semanticContextCharacterCount = 0
             return
         }
-        let requestID = UUID().uuidString
-        let contextPolicy = settings.contextPolicy(
+        let localAllowed = settings.isAIAllowed(
             for: currentBundleIdentifier
         )
-        let context = inferenceContext(
-            policy: contextPolicy,
-            client: client
-        )
-        semanticContextCharacterCount = context.count
-        let request = SemanticInferenceRequest(
-            requestID: requestID,
-            token: token,
-            contextPolicy: contextPolicy,
-            context: context,
-            pinyin: composition.pinyin,
-            candidates: composition.mainCandidates,
-            deadlineMilliseconds: 400,
-            allowSentence: composition.pinyin.count >= 8
-        )
+        let cloudAllowed = settings.cloudConfigured
+        guard localAllowed || cloudAllowed else {
+            semanticPresentation = .unavailable
+            return
+        }
+        if !localAllowed, cloudAllowed {
+            semanticPresentation = .cloudAnalyzing
+        }
+        let pinyin = composition.pinyin.lowercased()
+        let localRequest: SemanticInferenceRequest?
+        if localAllowed {
+            let requestID = UUID().uuidString
+            let contextPolicy = settings.contextPolicy(
+                for: currentBundleIdentifier
+            )
+            let context = inferenceContext(
+                policy: contextPolicy,
+                client: client
+            )
+            semanticContextCharacterCount = context.count
+            localRequest = SemanticInferenceRequest(
+                requestID: requestID,
+                token: token,
+                contextPolicy: contextPolicy,
+                context: context,
+                pinyin: pinyin,
+                candidates: composition.mainCandidates,
+                deadlineMilliseconds: 400,
+                allowSentence: LocalSentenceSuggestionPolicy.allows(
+                    pinyin: pinyin,
+                    characterSet: settings.characterSet
+                )
+            )
+        } else {
+            localRequest = nil
+            semanticContextCharacterCount = 0
+        }
         let workItem = DispatchWorkItem { [weak self] in
             MainActor.assumeIsolated {
                 guard let self,
                       self.composition.token == token,
                       !self.composition.isSelecting,
-                      !self.composition.isSecureInput
+                      !self.composition.isSecureInput,
+                      !IsSecureEventInputEnabled()
                 else {
                     return
                 }
-                self.sendInference(
-                    request,
-                    requestID: requestID,
-                    token: token
-                )
+                if let localRequest {
+                    self.sendInference(
+                        localRequest,
+                        requestID: localRequest.requestID,
+                        token: token
+                    )
+                }
+                if cloudAllowed {
+                    self.buildAndSendCloudInference(
+                        pinyin: pinyin,
+                        bundleIdentifier: currentBundleIdentifier,
+                        token: token,
+                        localRequestWasScheduled: localRequest != nil
+                    )
+                }
             }
         }
         debounceWorkItem = workItem
@@ -385,6 +624,246 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
         }
     }
 
+    private func buildAndSendCloudInference(
+        pinyin: String,
+        bundleIdentifier: String,
+        token: CompositionToken,
+        localRequestWasScheduled: Bool
+    ) {
+        let requestID = UUID().uuidString
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        let deadlineAt = startedAt + 4.0
+        let modelID = settings.cloudModelID
+        let clientSessionID = sessionNonce
+        let buildCancellation = CloudCandidateBuildCancellation()
+        pendingCloudBuildCancellation?.cancel()
+        pendingCloudBuildCancellation = buildCancellation
+        pendingCloudRequestID = requestID
+        cloudDeadlineAt = deadlineAt
+        settings.record(.cloudRequestStarted)
+        DispatchQueue.global(qos: .userInitiated).async {
+            let apiKey = try? FileCloudCredentialStore.shared.loadAPIKey()
+            guard let apiKey,
+                  !apiKey.isEmpty,
+                  apiKey.utf8.count <= 512
+            else {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self,
+                          self.pendingCloudRequestID == requestID
+                    else {
+                        return
+                    }
+                    self.pendingCloudRequestID = nil
+                    self.pendingCloudBuildCancellation = nil
+                    self.cloudDeadlineAt = nil
+                    self.settings.record(.cloudTransportFailure)
+                    self.applyCloudFallback(
+                        localRequestWasScheduled: localRequestWasScheduled,
+                        decision: nil
+                    )
+                    CloudBrokerClient.shared.disconnect()
+                }
+                return
+            }
+            let pool = RimeCloudCandidatePoolBuilder.build(
+                for: pinyin,
+                cancellation: buildCancellation
+            )
+            let historyService = RimeAIHistoryService.shared
+            let historySnapshot = try? historyService.contextSnapshot(
+                    query: pinyin,
+                    maxRecentCharacters: 600,
+                    maximumSnippetCount: 8
+                )
+            let remainingMilliseconds = max(
+                1,
+                min(
+                    800,
+                    Int(
+                        (
+                            deadlineAt
+                                - ProcessInfo.processInfo.systemUptime
+                        ) * 1_000
+                    )
+                )
+            )
+            let request = CloudInferenceRequest(
+                requestID: requestID,
+                token: token,
+                bundleIdentifier: bundleIdentifier,
+                clientSessionID: clientSessionID,
+                modelID: modelID,
+                deadlineMilliseconds: remainingMilliseconds,
+                pinyin: pinyin,
+                candidates: pool.candidates,
+                candidatePoolHash: pool.hash,
+                recentContext: historySnapshot?.recentText ?? "",
+                historySnippets: historySnapshot?.relevantSnippets ?? [],
+                historyGeneration: historySnapshot?.generation ?? 0
+            )
+            DispatchQueue.main.async { [weak self] in
+                guard let self,
+                      self.pendingCloudRequestID == requestID,
+                      self.pendingCloudBuildCancellation === buildCancellation,
+                      self.composition.token == token,
+                      !self.composition.isSelecting,
+                      !self.composition.isSecureInput,
+                      !IsSecureEventInputEnabled(),
+                      ProcessInfo.processInfo.systemUptime <= deadlineAt,
+                      request.isValid
+                else {
+                    if let self,
+                       self.pendingCloudRequestID == requestID
+                    {
+                        self.pendingCloudRequestID = nil
+                        if self.pendingCloudBuildCancellation
+                            === buildCancellation
+                        {
+                            self.pendingCloudBuildCancellation = nil
+                        }
+                        self.cloudDeadlineAt = nil
+                        self.settings.record(.cloudTimeout)
+                        if self.composition.token == token,
+                           !self.composition.isSelecting,
+                           !self.composition.isSecureInput,
+                           !IsSecureEventInputEnabled()
+                        {
+                            self.applyCloudFallback(
+                                localRequestWasScheduled:
+                                    localRequestWasScheduled,
+                                decision: nil
+                            )
+                        }
+                    }
+                    return
+                }
+                self.pendingCloudBuildCancellation = nil
+                CloudBrokerClient.shared.infer(
+                    request,
+                    apiKey: apiKey
+                ) { [weak self] result in
+                    Task { @MainActor [weak self] in
+                        self?.applyCloudInferenceResult(
+                            result,
+                            request: request,
+                            token: token,
+                            deadlineAt: deadlineAt,
+                            localRequestWasScheduled: localRequestWasScheduled
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private func applyCloudInferenceResult(
+        _ result: CloudInferenceResponse?,
+        request: CloudInferenceRequest,
+        token: CompositionToken,
+        deadlineAt: TimeInterval,
+        localRequestWasScheduled: Bool
+    ) {
+        guard pendingCloudRequestID == request.requestID else {
+            return
+        }
+        pendingCloudRequestID = nil
+        cloudDeadlineAt = nil
+        guard !IsSecureEventInputEnabled() else {
+            enterSecureInputIfPossible()
+            return
+        }
+        guard composition.token == token,
+              !composition.isSelecting,
+              !composition.isSecureInput
+        else {
+            settings.record(.staleResult)
+            return
+        }
+        guard (try? RimeAIHistoryService.shared.statistics().generation)
+            == request.historyGeneration
+        else {
+            settings.record(.staleResult)
+            return
+        }
+        guard ProcessInfo.processInfo.systemUptime <= deadlineAt else {
+            settings.record(.cloudTimeout)
+            applyCloudFallback(
+                localRequestWasScheduled: localRequestWasScheduled,
+                decision: nil
+            )
+            return
+        }
+        guard let result else {
+            settings.record(.cloudTransportFailure)
+            applyCloudFallback(
+                localRequestWasScheduled: localRequestWasScheduled,
+                decision: nil
+            )
+            return
+        }
+        guard result.isValid(for: request) else {
+            settings.record(.cloudInvalidResult)
+            applyCloudFallback(
+                localRequestWasScheduled: localRequestWasScheduled,
+                decision: nil
+            )
+            return
+        }
+        guard let candidate = result.selectedCandidate(for: request),
+              let confidence = result.confidence
+        else {
+            applyCloudFallback(
+                localRequestWasScheduled: localRequestWasScheduled,
+                decision: result.decision
+            )
+            return
+        }
+        guard composition.applySemanticCandidate(
+            candidate.text,
+            token: token,
+            decision: .rankedCandidate
+        ) else {
+            settings.record(.cloudInvalidResult)
+            return
+        }
+        semanticHistorySource = candidate.source == .rimeFuzzy
+            ? .cloudFuzzy
+            : .cloudExact
+        semanticCloudCandidate = candidate
+        cloudSuggestionApplied = true
+        semanticPresentation = .candidate(
+            text: candidate.text,
+            decision: .rankedCandidate,
+            confidence: confidence
+        )
+        semanticContextCharacterCount = request.recentContext.count
+            + request.historySnippets.reduce(0) { $0 + $1.text.count }
+        settings.record(.cloudSuggestionShown)
+        if candidate.source == .rimeFuzzy {
+            settings.record(.cloudCorrectionShown)
+        }
+        refreshCandidatePanelIfActive()
+    }
+
+    private func applyCloudFallback(
+        localRequestWasScheduled: Bool,
+        decision: CloudInferenceDecision?
+    ) {
+        guard !cloudSuggestionApplied else {
+            return
+        }
+        let resolved = CloudSemanticPresentationResolver.resolveFallback(
+            current: semanticPresentation,
+            localRequestWasScheduled: localRequestWasScheduled,
+            cloudDecision: decision
+        )
+        guard resolved != semanticPresentation else {
+            return
+        }
+        semanticPresentation = resolved
+        refreshCandidatePanelIfActive()
+    }
+
     private func applyInferenceResult(
         _ result: SemanticInferenceResult?,
         requestID: String,
@@ -407,6 +886,14 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
             )
         }
         pendingRequestStartedAt = nil
+        guard !IsSecureEventInputEnabled() else {
+            enterSecureInputIfPossible()
+            return
+        }
+        if cloudSuggestionApplied {
+            // A valid cloud decision owns the single explicit suggestion slot.
+            return
+        }
         guard let result else {
             settings.record(.daemonFailure)
             semanticPresentation = .failure
@@ -440,10 +927,17 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
             refreshCandidatePanelIfActive()
             return
         }
-        semanticPresentation = result.candidatePresentation
-        switch result.candidatePresentation {
+        let candidatePresentation = result.candidatePresentation(
+            characterSet: settings.characterSet
+        )
+        semanticPresentation = candidatePresentation
+        switch candidatePresentation {
         case .sameTopCandidate:
             settings.record(.sameTopCandidate)
+            refreshCandidatePanelIfActive()
+            return
+        case .insufficientCandidates:
+            settings.record(.insufficientCandidates)
             refreshCandidatePanelIfActive()
             return
         case .belowConfidence:
@@ -462,7 +956,18 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
             settings.record(.sentenceIncomplete)
             refreshCandidatePanelIfActive()
             return
-        case .idle, .analyzing, .unavailable, .failure:
+        case .scriptMismatch:
+            settings.record(.sentenceScriptMismatch)
+            refreshCandidatePanelIfActive()
+            return
+        case .idle,
+             .analyzing,
+             .cloudAnalyzing,
+             .cloudSameTopCandidate,
+             .cloudBelowConfidence,
+             .cloudFailure,
+             .unavailable,
+             .failure:
             settings.record(.invalidResult)
             semanticPresentation = .failure
             refreshCandidatePanelIfActive()
@@ -495,6 +1000,8 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
             refreshCandidatePanelIfActive()
             return
         }
+        semanticHistorySource = .localSemantic
+        semanticCloudCandidate = nil
         settings.record(.resultShown)
         if decision == .sentenceSuggestion {
             settings.record(.sentenceSuggestionShown)
@@ -508,6 +1015,7 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
         candidatePanel.update(
             mainCandidates: composition.mainCandidates,
             semanticPresentation: semanticPresentation,
+            suggestionSource: semanticHistorySource,
             contextCharacterCount: semanticContextCharacterCount,
             onMainSelection: { [weak self] index in
                 guard let self,
@@ -546,13 +1054,18 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
     private func selectMainCandidate(
         index: Int,
         client: any IMKTextInput,
-        acceptedViaSemanticCandidate: Bool = false,
-        acceptedViaSpace: Bool = false
+        acceptedViaSemanticCandidate: Bool = false
     ) {
+        guard !composition.isSecureInput,
+              !IsSecureEventInputEnabled()
+        else {
+            enterSecureInput(client: client)
+            return
+        }
         guard composition.mainCandidates.indices.contains(index) else {
             return
         }
-        let pinyin = composition.pinyin
+        let pinyin = composition.pinyin.lowercased()
         let fallback = composition.mainCandidates[index]
         let semanticDecision = acceptedViaSemanticCandidate
             ? composition.semanticCandidateDecision
@@ -564,50 +1077,95 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
             index: index
         ) ?? fallback
         if acceptedViaSemanticCandidate {
-            recordSemanticAcceptance(
-                decision: semanticDecision,
-                acceptedViaSpace: acceptedViaSpace
-            )
+            recordSemanticAcceptance(decision: semanticDecision)
         } else {
             settings.record(.mainAccepted)
         }
-        commitText(committed, client: client)
+        let historySource = acceptedViaSemanticCandidate
+            ? semanticHistorySource
+            : .rimeMain
+        commitText(
+            committed,
+            source: historySource,
+            client: client
+        )
     }
 
     private func selectSemanticCandidate(
         _ candidate: String,
-        client: any IMKTextInput,
-        acceptedViaSpace: Bool = false
+        client: any IMKTextInput
     ) {
-        if let index = composition.mainCandidates.firstIndex(of: candidate) {
-            selectMainCandidate(
-                index: index,
-                client: client,
-                acceptedViaSemanticCandidate: true,
-                acceptedViaSpace: acceptedViaSpace
-            )
+        guard !composition.isSecureInput,
+              !IsSecureEventInputEnabled()
+        else {
+            enterSecureInput(client: client)
             return
         }
         let decision = composition.semanticCandidateDecision
+        if decision != .mixedComposition,
+           let index = composition.mainCandidates.firstIndex(of: candidate)
+        {
+            selectMainCandidate(
+                index: index,
+                client: client,
+                acceptedViaSemanticCandidate: true
+            )
+            return
+        }
+        let cloudCandidate = semanticCloudCandidate?.text == candidate
+            ? semanticCloudCandidate
+            : nil
+        let acceptedMixedSuggestion = decision == .mixedComposition
+            ? mixedCompositionSuggestion
+            : nil
         composition.beginSelection()
         invalidateInference()
-        recordSemanticAcceptance(
-            decision: decision,
-            acceptedViaSpace: acceptedViaSpace
+        recordSemanticAcceptance(decision: decision)
+        if let acceptedMixedSuggestion {
+            let tokens = Set(
+                acceptedMixedSuggestion.segments
+                    .filter { $0.kind == .ascii }
+                    .map { $0.rawText.lowercased() }
+            )
+            settings.learnPersonalEnglishTokens(tokens)
+        }
+        let committedCandidate: String
+        if let cloudCandidate,
+           let rimeIndex = cloudCandidate.rimeIndex
+        {
+            let committed = RimeEngine.shared.commitCandidate(
+                pinyin: cloudCandidate.alignedPinyin,
+                index: rimeIndex
+            )
+            committedCandidate = committed == candidate
+                ? committed ?? candidate
+                : candidate
+        } else {
+            committedCandidate = candidate
+        }
+        commitText(
+            committedCandidate,
+            source: semanticHistorySource,
+            client: client
         )
-        commitText(candidate, client: client)
     }
 
     private func recordSemanticAcceptance(
-        decision: SemanticInferenceDecision?,
-        acceptedViaSpace: Bool
+        decision: SemanticInferenceDecision?
     ) {
         settings.record(.semanticAccepted)
-        if acceptedViaSpace {
-            settings.record(.semanticSpaceAccepted)
+        if semanticHistorySource == .cloudExact
+            || semanticHistorySource == .cloudFuzzy
+        {
+            settings.record(.cloudSuggestionAccepted)
+        }
+        if semanticHistorySource == .cloudFuzzy {
+            settings.record(.cloudCorrectionAccepted)
         }
         if decision == .sentenceSuggestion {
             settings.record(.semanticSentenceAccepted)
+        } else if decision == .mixedComposition {
+            settings.record(.mixedCompositionAccepted)
         } else {
             settings.record(.semanticRankedAccepted)
         }
@@ -624,8 +1182,23 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
 
     private func commitText(
         _ text: String,
+        source: HistoryCommitSource,
         client: any IMKTextInput
     ) {
+        guard !composition.isSecureInput,
+              !IsSecureEventInputEnabled()
+        else {
+            enterSecureInput(client: client)
+            return
+        }
+        let pinyin = composition.pinyin
+        let bundleIdentifier = currentBundleIdentifier
+            ?? client.bundleIdentifier()
+            ?? "unknown-client"
+        let historyWasAllowedBeforeCommit = settings.shouldCaptureCloudHistory(
+            isSecureInput: composition.isSecureInput
+                || IsSecureEventInputEnabled()
+        )
         client.insertText(text, replacementRange: notFoundRange)
         if let currentBundleIdentifier,
            settings.isAIAllowed(for: currentBundleIdentifier),
@@ -634,6 +1207,28 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
             Self.contextStore.appendCommittedText(text)
         } else {
             Self.contextStore.deactivate()
+        }
+        let shouldCaptureHistory = historyWasAllowedBeforeCommit
+            && settings.shouldCaptureCloudHistory(
+                isSecureInput: composition.isSecureInput
+                    || IsSecureEventInputEnabled()
+            )
+        if shouldCaptureHistory {
+            RimeAIHistoryService.shared.appendAsync(
+                HistoryCommit(
+                    bundleIdentifier: bundleIdentifier,
+                    pinyin: pinyin,
+                    committedText: text,
+                    source: source
+                )
+            ) { [settings] result in
+                switch result {
+                case .success:
+                    settings.record(.historyRecorded)
+                case .failure:
+                    settings.record(.historyWriteFailed)
+                }
+            }
         }
         resetComposition(client: client, preserveContext: true)
     }
@@ -644,6 +1239,7 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
     ) {
         invalidateInference(clearPresentation: true)
         composition.reset()
+        mixedCompositionSuggestion = nil
         client.setMarkedText(
             "",
             selectionRange: NSRange(location: 0, length: 0),
@@ -668,6 +1264,16 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
         settings.record(.privacyBlocked)
     }
 
+    private func enterSecureInputIfPossible() {
+        guard let client = activeClientObject as? any IMKTextInput else {
+            invalidateInference(clearPresentation: true)
+            composition.enterSecureInput()
+            Self.contextStore.enterSecureInput()
+            return
+        }
+        enterSecureInput(client: client)
+    }
+
     private func invalidateCurrentResult() {
         composition.beginSelection()
         invalidateInference(clearPresentation: true)
@@ -686,10 +1292,21 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
             settings.record(.requestCancelled)
             self.pendingRequestID = nil
         }
+        if let pendingCloudRequestID {
+            CloudBrokerClient.shared.cancel(requestID: pendingCloudRequestID)
+            self.pendingCloudRequestID = nil
+        }
+        pendingCloudBuildCancellation?.cancel()
+        pendingCloudBuildCancellation = nil
+        cloudDeadlineAt = nil
         pendingRequestStartedAt = nil
         if clearPresentation {
             semanticPresentation = .idle
             semanticContextCharacterCount = 0
+            semanticHistorySource = .localSemantic
+            semanticCloudCandidate = nil
+            cloudSuggestionApplied = false
+            mixedCompositionSuggestion = nil
         }
     }
 
@@ -756,6 +1373,12 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
     }
 
     private func applyChangedSettings() {
+        RimeEngine.shared.apply(settings.inputPreferences)
+        if let client = activeClientObject as? any IMKTextInput,
+           !composition.pinyin.isEmpty
+        {
+            compositionInput(composition.pinyin, client: client)
+        }
         guard let currentBundleIdentifier else {
             return
         }
@@ -768,9 +1391,26 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
         if !settings.isAIAllowed(for: currentBundleIdentifier) {
             DaemonClient.shared.disconnect()
         }
+        if !settings.cloudConfigured {
+            if pendingCloudRequestID != nil {
+                invalidateCurrentResult()
+            }
+            CloudBrokerClient.shared.disconnect()
+        }
+    }
+
+    private func transformedLiteral(_ literal: String) -> String? {
+        RimeAIInputTextTransformer.transformedLiteral(
+            literal,
+            preferences: settings.inputPreferences
+        )
     }
 
     private func clearEphemeralData() {
+        historyEnglishTokensGeneration &+= 1
+        historyEnglishTokens = []
+        historyEnglishTokensLoaded = false
+        historyEnglishTokensLoading = false
         invalidateCurrentResult()
         clearContextForCurrentApplication()
     }
@@ -789,11 +1429,11 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
         NSRange(location: NSNotFound, length: NSNotFound)
     }
 
-    private func acceptedPinyinCharacter(
+    private func acceptedCompositionCharacter(
         from characters: String
     ) -> Character? {
         guard characters.count == 1,
-              let character = characters.lowercased().first,
+              let character = characters.first,
               character == "'" || character.isASCII && character.isLetter
         else {
             return nil

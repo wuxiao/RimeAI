@@ -1,13 +1,14 @@
 # RimeAI
 
-RimeAI 是基于 Rime 的本地语义输入引擎。当前仓库已经完成 P0
-离线验证，并实现 P1/P2-internal 的 macOS 输入法、用户级 daemon、隐私
+RimeAI 是基于 Rime 的本地优先语义输入引擎。当前仓库已经完成 P0
+离线验证，并实现 P1/P2-internal 的 macOS 输入法、用户级本地 daemon、隐私
 控制中心和可恢复安装生命周期。原型已通过自动测试、Apple Development
 签名构建、Developer ID hardened-runtime 签名、用户级安装及 LaunchAgent
 运行验证；TextEdit 真实输入路径已验证。macOS 输入法已改为受控静态 librime，
 daemon 已改为 Developer ID 签名、自包含的 INT8 ONNX Runtime，并以经过冻结集
 验证的 24M 神经排序器与 n-gram 融合作为主排序层。公证、完整宿主矩阵和公开
-分发法律审查仍未放行。
+分发法律审查仍未放行。macOS 另有用户主动配置 API Key 后才启用的阿里云
+Qwen 增强路径；它与始终无 INET socket 的本地 daemon 是两个独立进程。
 
 仓库另含一个独立的 iOS 内部可行性工程，用于验证宿主 App、离线自定义键盘
 扩展和 TestFlight 发布链路。该工程已接入受控构建的原生 librime 1.17.0、
@@ -36,15 +37,19 @@ daemon 已改为 Developer ID 签名、自包含的 INT8 ONNX Runtime，并以�
 | 长输入性能门 | 11–30 字 P95 14.71ms；超长或不完整拼音显式弃权 |
 | GTE 306M 重排实验 | 已否决：质量与延迟均不达标 |
 | Qwen2.5 0.5B 整句实验 | 已否决：难例无修复且远超延迟预算 |
-| macOS 输入法、daemon、隐私控制中心 | 已实现并通过本机运行验证；输入法无 Homebrew 运行依赖 |
+| macOS 输入法、daemon、设置中心 | 已实现简/繁、全/半角、中文/西文标点与 AI 隐私设置；输入法无 Homebrew 运行依赖 |
 | iOS 离线 librime 候选键盘 | 模拟器引擎与系统键盘 UI 测试通过；真机待验 |
-| 本地语义结论展示 | macOS 显式展示分析中、上下文用量、首选一致、低置信度、长输入拒答、回退或可选候选 |
+| 本地语义结论展示 | macOS 显式展示分析中、上下文用量、首选一致、完整候选不足、低置信度、长输入拒答、回退或可选候选 |
+| 无空格中英混输 | 连续键流按拼音/ASCII 分段；大写缩写、内置技术词和本地学到的英文词原样保留，纯拼音串保留原链路，Tab 接受独立混输建议；大小写真实 librime 样例已覆盖 |
 | iOS 过渡语义排序 | 冻结 P0 字符 n-gram 已以只读紧凑制品接入；24M 神经排序器未接入 |
 | 用户级后台生命周期 | LaunchAgent、按需启停、崩溃重启与 0600 UDS 已验证 |
 | 安装、升级、回滚、卸载 | 自包含 release 的 v1→v3、v3→v1、再升级 v5 已验证；公证/干净机器待验 |
 | Offline Lock | daemon 进程无 INET socket；公开版仍需系统级抓包矩阵 |
+| 可选 Qwen 云增强 | candidate-ID-only broker、Top-50/错拼扩候选、800ms 门、cloud.env 文件 API Key（0600）已接入；真实云冻结集尚待跑 |
+| 长期记忆 | 配置 API Key 后跨应用明文保存 RimeAI 上屏记录，600 字 recent + 最多 8 条 FTS/HNSW 片段；可导出、永久清除 |
 | Release 制品 | 输入法 ZIP 5.0MB；daemon 归档约 69MB、安装约 120MB；均有 SHA-256 与 Developer ID 签名 |
-| 自动化测试 | Python 93 passed；Swift 32 passed；前端 production build passed |
+| 语音听写协议层 | 独立工作流；消息校验、客户端状态机、服务端核心、UDS 传输层、Coordinator 与真实 socket 全栈回环 31 项测试通过；helper 含 Apple Speech 引擎源码并经真实 launchd 生命周期验证（识别路径待 TCC 真机验证）；UI 接线未实现 |
+| 自动化测试 | 云增强新增测试与既有本地测试通过；最新可复现命令见 `docs/CLOUD_INPUT_IMPLEMENTATION.md` |
 | 公开分发许可证放行 | 未完成；当前模型制品仅供内部 P0/P1 |
 
 完整证据与放行边界见 [P0_EVIDENCE.md](docs/P0_EVIDENCE.md)。P0 文件中的
@@ -58,12 +63,15 @@ daemon 已改为 Developer ID 签名、自包含的 INT8 ONNX Runtime，并以�
   单独 n-gram 并满足 50ms P95 门，已经接入 macOS daemon。
 - 当前 macOS 实现：INT8 ONNX 24M 融合候选排序 + 拼音约束 beam decoder；字符 n-gram
   保留为融合信号和神经运行时故障回退。daemon
-  对重排、首选一致、低置信度、无候选、超长和不完整候选返回显式决策。
+  对重排、首选一致、完整候选不足、低置信度、无候选、超长和不完整候选返回
+  显式决策。简体拼音从 2 个字符起进入受字典约束的整句解码，当前运行时整句
+  展示门槛为 0.60。
 - 当前 iOS 过渡实现：从同一冻结 P0 模型确定性导出的 11.2MiB 只读紧凑
   n-gram 制品；只处理 Rime 候选排序，不包含整句 beam decoder。
-- 离线教师：`Qwen3-Reranker-0.6B`，不进入产品运行时。
-- `LFM2.5-Encoder-230M` 仅作为 P0 challenger；通用自回归大模型不进入输入法
-  运行时。
+- 离线教师：`Qwen3-Reranker-0.6B`，不进入本地运行时。
+- 可选云运行时只允许固定的 `glm-5.3`（`https://newapi.wwcn.fun/v1`），
+  通过候选 ID 合同工作，不能自由生成上屏文本。
+- `LFM2.5-Encoder-230M` 仅作为 P0 challenger。
 
 ## 架构
 
@@ -76,22 +84,39 @@ licensed source text
         │                                  └── long-input evaluation
         │
         ├── 24M pinyin-aware Cross-Encoder + char n-gram ──> candidate ranking
+        ├── frozen Rime dictionary + beam search ──> pinyin-safe sentence suggestion
         │
-        └── frozen Rime dictionary + beam search ──> pinyin-safe sentence suggestion
+        └── optional cloud.env credential (0600)
+             └── separate Qwen broker + plaintext history/FTS/HNSW
+                  └── choose one existing exact/fuzzy candidate ID
 ```
 
 关键产品边界：
 
 - Rime 始终提供同步候选和故障兜底。
-- 候选排序只处理 Rime Top-10，结果不能改变已显示的数字候选。
-- 当前有效的高置信度语义候选出现时，用户按 `Space` 可采用它；其他情况仍
-  提交 Rime 第一候选，`Tab` 保留为语义候选的显式选择键。
+- 本地候选排序只处理可见 Rime Top-10，结果不能改变已显示的数字候选；云端
+  内部池最多 50 条，但也只能占用一个显式建议位。
+- 当前有效的语义候选出现时，用户按 `Tab` 显式采用；`Space` 始终提交 Rime
+  第一候选，数字候选的位置不会因异步结果变化。
+- 完整候选少于 2 个时不执行重排，并明确显示“完整候选不足”；不得把未比较
+  伪装为模型同意 Rime 首选。
+- 模型实际比较后仍选择 Rime 第一项时，第二行明确显示具体文本，例如
+  `AI 建议：飞机（与 Rime 首选一致）`；该行只解释模型结论，不重复创建可选项。
 - 长输入解码的每个字符必须由同一冻结 Rime 词典证明与原拼音一致；超过
   30 字或只覆盖部分拼音时显式拒答，不展示截断句。
+- 当前运行时整句展示门槛为 0.60，仍保留 validation 选择的 beam margin 门禁；
+  冻结 409 条 test 明细按外层 0.60 重算后整句准确率为 45.97%，相对 Rime
+  首选提升 48.03%。真实接受率和撤销率仍需内部预览验证，因此不继续降低
+  beam margin 门禁。
+- 本地生成的整句必须与当前简繁设置一致；简体模式不会展示或提交繁体整句。
 - 当前整句质量证据覆盖 6 至 30 个汉字；30 字仍是硬上限，不能外推为任意
   长度的续写或开放式生成。
 - 命令进程超时、崩溃、协议异常或低置信度时回退 Rime。
 - 聚合报告默认不包含上下文、拼音、候选或标准答案。
+- 未配置 API Key 时不写长期历史、不启动云 broker；配置后会跨应用明文保存
+  RimeAI 上屏文本并上传受限上下文。macOS Secure Event Input 会阻止历史写入
+  与云请求。移除 Key 会停用云端但保留历史，历史必须单独永久清除。
+- 本地 daemon 的 Offline Lock 是永久不变量，不代表独立云 broker 不联网。
 
 ## 仓库组成
 
@@ -256,11 +281,15 @@ scripts/build_python_package.sh /tmp/rimeai-python-dist
 
 ## macOS 内部预览
 
-构建并打开隐私控制中心：
+构建并打开设置中心：
 
 ```bash
 script/build_and_run.sh --settings
 ```
+
+常规输入设置也会显示在 macOS 菜单栏的 RimeAI 输入法菜单中。默认值为
+`简体中文 + 半角字符 + 中文标点`；简繁转换所需的 OpenCC 配置和字典随输入法
+离线打包。
 
 安装输入法和用户级 daemon：
 
@@ -329,6 +358,8 @@ scripts/notarize_macos_input_method.sh \
 ## 数据、协议与许可证
 
 - [P0_FORMATS.md](docs/P0_FORMATS.md)：候选与整句进程协议。
+- [VOICE_INPUT_DESIGN.md](docs/VOICE_INPUT_DESIGN.md)：语音听写独立
+  工作流的设计与协议草案（`ACCEPTED TARGET STATE`，未实现）。
 - [P0_EVIDENCE.md](docs/P0_EVIDENCE.md)：冻结哈希、指标和放行决定。
 - [P1_IMPLEMENTATION_EVIDENCE.md](docs/P1_IMPLEMENTATION_EVIDENCE.md)：
   输入法、daemon、隐私和安装生命周期证据。

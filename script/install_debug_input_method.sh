@@ -28,6 +28,7 @@ fi
 ditto "${source_app}" "${target_app}"
 codesign --verify --deep --strict "${target_app}"
 "${project_root}/script/install_daemon_launch_agent.sh"
+"${project_root}/script/install_cloud_broker_launch_agent.sh"
 # Do not launch the bundle during installation. Starting an input-method server
 # is itself an activation signal to Text Input Sources and creates an enabled
 # container before the user clicks Add in Keyboard Settings.

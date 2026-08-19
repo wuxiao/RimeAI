@@ -8,7 +8,21 @@ final class PrivacyCenterWindowController: NSObject {
     static let shared = PrivacyCenterWindowController()
 
     private let settings = RimeAISettingsStore.shared
+    private let credentialStore = FileCloudCredentialStore.shared
+    private let historyService = RimeAIHistoryService.shared
     private let window: NSWindow
+    private let characterSetPopup = NSPopUpButton(
+        frame: .zero,
+        pullsDown: false
+    )
+    private let characterWidthPopup = NSPopUpButton(
+        frame: .zero,
+        pullsDown: false
+    )
+    private let punctuationPopup = NSPopUpButton(
+        frame: .zero,
+        pullsDown: false
+    )
     private let aiToggle = NSButton(checkboxWithTitle: "", target: nil, action: nil)
     private let offlineToggle = NSButton(
         checkboxWithTitle: "",
@@ -16,6 +30,13 @@ final class PrivacyCenterWindowController: NSObject {
         action: nil
     )
     private let contextPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let cloudModelPopup = NSPopUpButton(
+        frame: .zero,
+        pullsDown: false
+    )
+    private let apiKeyField = NSSecureTextField()
+    private let cloudStatusLabel = NSTextField(labelWithString: "")
+    private let historyStatusLabel = NSTextField(labelWithString: "")
     private let disabledAIField = NSTextField()
     private let disabledContextField = NSTextField()
     private let daemonStatusLabel = NSTextField(labelWithString: "")
@@ -24,7 +45,9 @@ final class PrivacyCenterWindowController: NSObject {
     private let diagnosticsLabel = NSTextField(labelWithString: "")
     private let dataSizeLabel = NSTextField(labelWithString: "")
     private var daemonObserver: NSObjectProtocol?
+    private var cloudObserver: NSObjectProtocol?
     private var settingsObserver: NSObjectProtocol?
+    private var diagnosticsObserver: NSObjectProtocol?
 
     private override init() {
         window = NSWindow(
@@ -34,7 +57,8 @@ final class PrivacyCenterWindowController: NSObject {
             defer: false
         )
         super.init()
-        window.title = "RimeAI 隐私控制中心"
+        reconcileCloudConfiguration()
+        window.title = "RimeAI 设置"
         window.isReleasedWhenClosed = false
         window.minSize = NSSize(width: 680, height: 620)
         configureInterface()
@@ -47,53 +71,117 @@ final class PrivacyCenterWindowController: NSObject {
         if settings.aiEnabled {
             DaemonClient.shared.connect()
         }
+        if settings.cloudConfigured {
+            CloudBrokerClient.shared.connect()
+        }
         window.center()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
 
     private func configureInterface() {
-        // The developer preview ships without any network-backed feature.
-        // Keep the persisted snapshot aligned with the process-wide guard.
+        // The local daemon remains offline even when the separate cloud broker
+        // is enabled with a user-provided credential.
         settings.offlineLockEnabled = true
 
         let contentView = NSView()
         window.contentView = contentView
+
+        let scrollView = NSScrollView()
+        scrollView.hasVerticalScroller = true
+        scrollView.drawsBackground = false
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(scrollView)
+        NSLayoutConstraint.activate([
+            scrollView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
+            scrollView.topAnchor.constraint(equalTo: contentView.topAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
+        ])
+
+        let documentView = NSView()
+        documentView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.documentView = documentView
+        documentView.widthAnchor.constraint(
+            equalTo: scrollView.contentView.widthAnchor
+        ).isActive = true
 
         let stack = NSStackView()
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 12
         stack.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(stack)
+        documentView.addSubview(stack)
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(
-                equalTo: contentView.leadingAnchor,
+                equalTo: documentView.leadingAnchor,
                 constant: 24
             ),
             stack.trailingAnchor.constraint(
-                equalTo: contentView.trailingAnchor,
+                equalTo: documentView.trailingAnchor,
                 constant: -24
             ),
             stack.topAnchor.constraint(
-                equalTo: contentView.topAnchor,
+                equalTo: documentView.topAnchor,
                 constant: 22
             ),
             stack.bottomAnchor.constraint(
-                lessThanOrEqualTo: contentView.bottomAnchor,
+                equalTo: documentView.bottomAnchor,
                 constant: -22
             ),
         ])
 
         let title = label(
-            "本地输入与隐私边界",
+            "RimeAI 设置",
             font: .systemFont(ofSize: 22, weight: .semibold)
         )
         stack.addArrangedSubview(title)
+        stack.addArrangedSubview(sectionTitle("常规输入"))
+        stack.addArrangedSubview(
+            label(
+                "默认使用简体中文、半角字符和中文标点。也可以从菜单栏的"
+                    + "输入法菜单直接切换这些选项。",
+                secondary: true
+            )
+        )
+
+        let characterSetRow = NSStackView()
+        characterSetRow.orientation = .horizontal
+        characterSetRow.spacing = 10
+        characterSetRow.addArrangedSubview(label("汉字输出"))
+        characterSetPopup.addItems(withTitles: ["简体中文", "繁体中文"])
+        characterSetPopup.target = self
+        characterSetPopup.action = #selector(characterSetChanged(_:))
+        characterSetRow.addArrangedSubview(characterSetPopup)
+        stack.addArrangedSubview(characterSetRow)
+
+        let characterWidthRow = NSStackView()
+        characterWidthRow.orientation = .horizontal
+        characterWidthRow.spacing = 10
+        characterWidthRow.addArrangedSubview(label("字符宽度"))
+        characterWidthPopup.addItems(withTitles: ["半角", "全角"])
+        characterWidthPopup.target = self
+        characterWidthPopup.action = #selector(characterWidthChanged(_:))
+        characterWidthRow.addArrangedSubview(characterWidthPopup)
+        stack.addArrangedSubview(characterWidthRow)
+
+        let punctuationRow = NSStackView()
+        punctuationRow.orientation = .horizontal
+        punctuationRow.spacing = 10
+        punctuationRow.addArrangedSubview(label("标点样式"))
+        punctuationPopup.addItems(withTitles: ["中文（，。）", "西文（,.）"])
+        punctuationPopup.target = self
+        punctuationPopup.action = #selector(punctuationChanged(_:))
+        punctuationRow.addArrangedSubview(punctuationPopup)
+        stack.addArrangedSubview(punctuationRow)
+
+        stack.addArrangedSubview(separator())
+        stack.addArrangedSubview(sectionTitle("AI 与隐私"))
         stack.addArrangedSubview(
             label(
                 "Rime 同步生成候选；语义模型只通过当前用户私有的 Unix "
-                    + "Domain Socket 运行。默认不记录原始按键、上下文或完整句子。",
+                    + "Domain Socket 运行。配置云端 API Key 后，另一个独立进程"
+                    + "才可访问固定的云端端点。",
                 secondary: true
             )
         )
@@ -104,7 +192,7 @@ final class PrivacyCenterWindowController: NSObject {
         stack.addArrangedSubview(aiToggle)
 
         offlineToggle.title =
-            "Offline Lock（开发者预览强制开启：daemon 禁止 IPv4 / IPv6 socket）"
+            "本地 daemon 网络隔离（始终开启：禁止 IPv4 / IPv6 socket）"
         offlineToggle.isEnabled = false
         stack.addArrangedSubview(offlineToggle)
 
@@ -125,10 +213,80 @@ final class PrivacyCenterWindowController: NSObject {
         stack.addArrangedSubview(contextRow)
 
         stack.addArrangedSubview(separator())
+        stack.addArrangedSubview(sectionTitle("云端模型增强与长期记忆"))
+        stack.addArrangedSubview(
+            label(
+                "保存 API Key 即启用：RimeAI 会跨应用、以明文长期保存每次"
+                    + "上屏文本、拼音、应用标识和时间，并把最近文本、检索片段、"
+                    + "当前拼音及候选发送到阿里云。只有 macOS Secure Event Input "
+                    + "会自动阻止记录与上传；本地下方的应用策略不限制云端历史。",
+                secondary: true
+            )
+        )
+        configureWrapping(cloudStatusLabel)
+        stack.addArrangedSubview(cloudStatusLabel)
+
+        let modelRow = NSStackView()
+        modelRow.orientation = .horizontal
+        modelRow.spacing = 10
+        modelRow.addArrangedSubview(label("排序模型"))
+        cloudModelPopup.addItems(
+            withTitles: RimeAICloudConfiguration.rankingModelIDs
+        )
+        cloudModelPopup.target = self
+        cloudModelPopup.action = #selector(cloudModelChanged(_:))
+        modelRow.addArrangedSubview(cloudModelPopup)
+        stack.addArrangedSubview(modelRow)
+
+        apiKeyField.placeholderString = "GLM 云端 API Key（保存至 ~/.config/rimeai/cloud.env）"
+        apiKeyField.translatesAutoresizingMaskIntoConstraints = false
+        stack.addArrangedSubview(apiKeyField)
+        apiKeyField.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        let cloudButtons = NSStackView()
+        cloudButtons.orientation = .horizontal
+        cloudButtons.spacing = 8
+        cloudButtons.addArrangedSubview(
+            NSButton(
+                title: "保存 API Key 并启用",
+                target: self,
+                action: #selector(saveAPIKey(_:))
+            )
+        )
+        cloudButtons.addArrangedSubview(
+            NSButton(
+                title: "移除 API Key（保留历史）",
+                target: self,
+                action: #selector(removeAPIKey(_:))
+            )
+        )
+        stack.addArrangedSubview(cloudButtons)
+
+        configureWrapping(historyStatusLabel)
+        stack.addArrangedSubview(historyStatusLabel)
+        let historyButtons = NSStackView()
+        historyButtons.orientation = .horizontal
+        historyButtons.spacing = 8
+        historyButtons.addArrangedSubview(
+            NSButton(
+                title: "导出明文历史…",
+                target: self,
+                action: #selector(exportHistory(_:))
+            )
+        )
+        historyButtons.addArrangedSubview(
+            NSButton(
+                title: "永久清除全部历史…",
+                target: self,
+                action: #selector(clearHistory(_:))
+            )
+        )
+        stack.addArrangedSubview(historyButtons)
+
+        stack.addArrangedSubview(separator())
         stack.addArrangedSubview(sectionTitle("应用级策略"))
         stack.addArrangedSubview(
             label(
-                "完全禁用 AI 的 Bundle ID（逗号分隔，精确匹配）",
+                "仅禁用本地 AI 的 Bundle ID（逗号分隔，精确匹配）",
                 secondary: true
             )
         )
@@ -141,7 +299,7 @@ final class PrivacyCenterWindowController: NSObject {
         ).isActive = true
         stack.addArrangedSubview(
             label(
-                "仅禁用上下文的 Bundle ID（AI 退化为严格模式）",
+                "仅禁用本地上下文的 Bundle ID（本地 AI 退化为严格模式）",
                 secondary: true
             )
         )
@@ -208,9 +366,8 @@ final class PrivacyCenterWindowController: NSObject {
         stack.addArrangedSubview(dataButtons)
         stack.addArrangedSubview(
             label(
-                "清除操作会将 AI 模型、daemon 与 LaunchAgent 移到废纸篓，"
-                    + "但不修改 Rime 用户词典；当前预览版没有云端同步、"
-                    + "遥测、在线模型下载或持久个性化学习。",
+                "清除操作会移除 API Key，并将历史、AI 模型、daemon 与 "
+                    + "LaunchAgent 移到废纸篓，但不修改 Rime 用户词典。",
                 secondary: true
             )
         )
@@ -235,11 +392,50 @@ final class PrivacyCenterWindowController: NSObject {
                 self?.refresh()
             }
         }
+        cloudObserver = NotificationCenter.default.addObserver(
+            forName: .rimeAICloudBrokerStatusDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            MainActor.assumeIsolated {
+                guard let self,
+                      self.settings.cloudConfigured,
+                      let status = notification.userInfo?["status"] as? String
+                else {
+                    return
+                }
+                self.cloudStatusLabel.stringValue =
+                    "云增强：\(status) · "
+                    + RimeAICloudConfiguration.endpoint.absoluteString
+            }
+        }
+        diagnosticsObserver = NotificationCenter.default.addObserver(
+            forName: .rimeAIDiagnosticsDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.diagnosticsLabel.stringValue =
+                    self?.diagnosticsDescription() ?? ""
+            }
+        }
     }
 
     private func refresh() {
+        characterSetPopup.selectItem(
+            at: settings.characterSet == .simplified ? 0 : 1
+        )
+        characterWidthPopup.selectItem(
+            at: settings.characterWidth == .half ? 0 : 1
+        )
+        punctuationPopup.selectItem(
+            at: settings.punctuationStyle == .chinese ? 0 : 1
+        )
         aiToggle.state = settings.aiEnabled ? .on : .off
         offlineToggle.state = settings.offlineLockEnabled ? .on : .off
+        cloudModelPopup.selectItem(
+            withTitle: settings.cloudModelID
+        )
         contextPopup.selectItem(
             at: [
                 ContextPolicy.strict: 0,
@@ -253,6 +449,26 @@ final class PrivacyCenterWindowController: NSObject {
             settings.disabledContextApplications.joined(separator: ", ")
         diagnosticsLabel.stringValue = diagnosticsDescription()
         dataSizeLabel.stringValue = dataSizeDescription()
+        let hasCredential = try? credentialStore.containsAPIKey()
+        if settings.cloudConfigured, hasCredential == true {
+            cloudStatusLabel.stringValue =
+                "云增强：已启用 · \(RimeAICloudConfiguration.provider) · "
+                + RimeAICloudConfiguration.endpoint.absoluteString
+        } else if settings.cloudConfigured, hasCredential == nil {
+            cloudStatusLabel.stringValue =
+                "云增强：已启用 · 凭据文件暂时不可读，将在输入时重试"
+        } else {
+            cloudStatusLabel.stringValue =
+                "云增强：未启用 · 未配置的输入不会保存到长期历史或上传"
+        }
+        if let statistics = try? historyService.statistics() {
+            historyStatusLabel.stringValue =
+                "明文历史：\(statistics.recordCount) 条 · 代次 "
+                + "\(statistics.generation) · 待生成向量 "
+                + "\(statistics.pendingEmbeddingJobs) 条"
+        } else {
+            historyStatusLabel.stringValue = "明文历史：存储不可用"
+        }
         if !settings.aiEnabled {
             daemonStatusLabel.stringValue =
                 "Daemon：已停用 · 重新开启 AI 后按需加载"
@@ -270,6 +486,27 @@ final class PrivacyCenterWindowController: NSObject {
         }
     }
 
+    @objc private func characterSetChanged(_ sender: NSPopUpButton) {
+        settings.characterSet = sender.indexOfSelectedItem == 0
+            ? .simplified
+            : .traditional
+        RimeEngine.shared.apply(settings.inputPreferences)
+    }
+
+    @objc private func characterWidthChanged(_ sender: NSPopUpButton) {
+        settings.characterWidth = sender.indexOfSelectedItem == 0
+            ? .half
+            : .full
+        RimeEngine.shared.apply(settings.inputPreferences)
+    }
+
+    @objc private func punctuationChanged(_ sender: NSPopUpButton) {
+        settings.punctuationStyle = sender.indexOfSelectedItem == 0
+            ? .chinese
+            : .western
+        RimeEngine.shared.apply(settings.inputPreferences)
+    }
+
     @objc private func contextChanged(_ sender: NSPopUpButton) {
         settings.contextPolicy = [
             ContextPolicy.strict,
@@ -277,6 +514,113 @@ final class PrivacyCenterWindowController: NSObject {
             ContextPolicy.smart,
         ][max(0, min(sender.indexOfSelectedItem, 2))]
         settings.clearEphemeralData()
+    }
+
+    @objc private func cloudModelChanged(_ sender: NSPopUpButton) {
+        guard let modelID = sender.selectedItem?.title else {
+            return
+        }
+        settings.cloudModelID = modelID
+    }
+
+    @objc private func saveAPIKey(_ sender: Any?) {
+        do {
+            try credentialStore.saveAPIKey(apiKeyField.stringValue)
+            settings.cloudModelID = cloudModelPopup.selectedItem?.title
+                ?? RimeAICloudConfiguration.defaultRankingModelID
+            settings.cloudConfigured = true
+            apiKeyField.stringValue = ""
+            setManagedCloudBrokerEnabled(true)
+            refresh()
+        } catch {
+            presentError(
+                error,
+                message: "未能保存 API Key",
+                information: "API Key 必须非空、不超过 512 字节且不含换行，"
+                    + "保存到 ~/.config/rimeai/cloud.env（权限 0600）。"
+            )
+        }
+    }
+
+    @objc private func removeAPIKey(_ sender: Any?) {
+        let alert = NSAlert()
+        alert.messageText = "移除 API Key 并停用云增强？"
+        alert.informativeText =
+            "长期明文历史会保留，且可继续导出或手动清除。"
+        alert.addButton(withTitle: "移除并停用")
+        alert.addButton(withTitle: "取消")
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn, let self else {
+                return
+            }
+            // Disable first so no new cloud request or history write can race
+            // with credential removal.
+            self.settings.cloudConfigured = false
+            CloudBrokerClient.shared.disconnect()
+            self.setManagedCloudBrokerEnabled(false)
+            do {
+                try self.credentialStore.deleteAPIKey()
+                self.apiKeyField.stringValue = ""
+                self.refresh()
+            } catch {
+                self.presentError(
+                    error,
+                    message: "未能移除 API Key",
+                    information: "云增强已停用，但凭据文件可能仍然存在。"
+                )
+            }
+        }
+    }
+
+    @objc private func exportHistory(_ sender: Any?) {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "RimeAI-history.jsonl"
+        panel.allowedContentTypes = [
+            UTType(filenameExtension: "jsonl") ?? .json,
+        ]
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard response == .OK, let url = panel.url, let self else {
+                return
+            }
+            do {
+                try self.historyService.exportJSONL(to: url)
+            } catch {
+                self.presentError(
+                    error,
+                    message: "未能导出历史",
+                    information: "目标文件没有被完整写入。"
+                )
+            }
+        }
+    }
+
+    @objc private func clearHistory(_ sender: Any?) {
+        let alert = NSAlert()
+        alert.messageText = "永久清除全部明文历史？"
+        alert.informativeText =
+            "将删除所有跨应用上屏记录、待处理向量和本地检索索引。"
+                + "此操作无法撤销，但不会移除 API Key。"
+        alert.addButton(withTitle: "永久清除")
+        alert.addButton(withTitle: "取消")
+        alert.alertStyle = .critical
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn, let self else {
+                return
+            }
+            // Cancel local and cloud work before advancing the history
+            // generation so a cleared snapshot cannot later be displayed.
+            self.settings.clearEphemeralData()
+            do {
+                _ = try self.historyService.clearAll()
+                self.refresh()
+            } catch {
+                self.presentError(
+                    error,
+                    message: "未能完整清除历史",
+                    information: "请保留当前数据并重试。"
+                )
+            }
+        }
     }
 
     @objc private func saveApplicationPolicies(_ sender: Any?) {
@@ -340,18 +684,26 @@ final class PrivacyCenterWindowController: NSObject {
 
     private func disableAIAndTrashManagedData() {
         DaemonClient.shared.disconnect()
+        CloudBrokerClient.shared.disconnect()
+        settings.cloudConfigured = false
+        settings.aiEnabled = false
         let layout = RimeAIProductDataLayout(
             homeDirectory: FileManager.default.homeDirectoryForCurrentUser
         )
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else {
+                return
+            }
             let result = Result {
+                try self.credentialStore.deleteAPIKey()
+                _ = try self.historyService.clearAll()
+                self.historyService.discardOpenStore()
                 try Self.stopManagedDaemon(layout: layout)
+                try Self.stopManagedCloudBroker(layout: layout)
                 try Self.trashManagedData(layout: layout)
             }
-            DispatchQueue.main.async {
-                guard let self else {
-                    return
-                }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
                 switch result {
                 case .success:
                     self.settings.resetAllProductData()
@@ -415,6 +767,47 @@ final class PrivacyCenterWindowController: NSObject {
         }
     }
 
+    private func setManagedCloudBrokerEnabled(_ enabled: Bool) {
+        let layout = RimeAIProductDataLayout(
+            homeDirectory: FileManager.default.homeDirectoryForCurrentUser
+        )
+        cloudStatusLabel.stringValue = enabled
+            ? "云增强：正在启动"
+            : "云增强：正在停止"
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let result = Result {
+                if enabled {
+                    try Self.startManagedCloudBroker(layout: layout)
+                } else {
+                    try Self.suspendManagedCloudBroker(layout: layout)
+                }
+            }
+            DispatchQueue.main.async {
+                guard let self else {
+                    return
+                }
+                switch result {
+                case .success:
+                    if enabled {
+                        CloudBrokerClient.shared.connect()
+                    } else {
+                        self.refresh()
+                    }
+                case let .failure(error):
+                    self.presentError(
+                        error,
+                        message: enabled
+                            ? "未能启动云端 broker"
+                            : "未能完整停止云端 broker",
+                        information: enabled
+                            ? "API Key 与长期历史仍已保存；请重新安装服务组件后重试。"
+                            : "云增强已在设置中停用，重新登录后 broker 不会再次启动。"
+                    )
+                }
+            }
+        }
+    }
+
     private func applyDaemonStatus(_ notification: Notification) {
         guard settings.aiEnabled else {
             daemonStatusLabel.stringValue =
@@ -455,6 +848,8 @@ final class PrivacyCenterWindowController: NSObject {
             "ranked_candidate_shown": "排序候选已显示",
             "sentence_suggestion_shown": "整句建议已显示",
             "same_top_candidate": "模型同意 Rime 首选",
+            "insufficient_candidates": "完整候选不足，未执行重排",
+            "sentence_script_mismatch": "整句字形与当前简繁设置不符",
             "below_confidence": "低置信度回退",
             "no_candidate": "无可用语义候选",
             "sentence_too_long": "整句超过 30 字",
@@ -462,7 +857,6 @@ final class PrivacyCenterWindowController: NSObject {
             "semantic_accepted": "语义候选已采纳",
             "semantic_ranked_accepted": "排序候选已采纳",
             "semantic_sentence_accepted": "整句建议已采纳",
-            "semantic_space_accepted": "Space 已采纳语义候选",
             "main_accepted": "Rime 主候选已采纳",
             "stale_result": "过期结果已丢弃",
             "invalid_result": "无效结果已拦截",
@@ -470,6 +864,16 @@ final class PrivacyCenterWindowController: NSObject {
             "timeout": "推理超时",
             "circuit_open": "熔断回退",
             "daemon_failure": "daemon 失败",
+            "history_recorded": "长期历史已记录",
+            "history_write_failed": "长期历史写入失败",
+            "cloud_request_started": "云请求已发出",
+            "cloud_suggestion_shown": "云端建议已显示",
+            "cloud_suggestion_accepted": "云端建议已采纳",
+            "cloud_correction_shown": "云端纠错已显示",
+            "cloud_correction_accepted": "云端纠错已采纳",
+            "cloud_timeout": "云请求超时",
+            "cloud_invalid_result": "云端无效结果已拦截",
+            "cloud_transport_failure": "Qwen 连接失败",
         ]
         return diagnostics.keys.sorted().map { key in
             let name = names[key] ?? key
@@ -542,6 +946,140 @@ final class PrivacyCenterWindowController: NSObject {
             ]
         )
         try stopAdHocDaemon(layout: layout)
+    }
+
+    nonisolated private static func stopManagedCloudBroker(
+        layout: RimeAIProductDataLayout
+    ) throws {
+        _ = try runProcess(
+            executable: "/bin/launchctl",
+            arguments: [
+                "bootout",
+                "gui/\(getuid())/fun.wwcn.rimeai.cloud-broker",
+            ]
+        )
+        if FileManager.default.fileExists(
+            atPath: layout.cloudBrokerEnabledMarker.path
+        ) {
+            try FileManager.default.removeItem(
+                at: layout.cloudBrokerEnabledMarker
+            )
+        }
+    }
+
+    nonisolated private static func suspendManagedCloudBroker(
+        layout: RimeAIProductDataLayout
+    ) throws {
+        if FileManager.default.fileExists(
+            atPath: layout.cloudBrokerEnabledMarker.path
+        ) {
+            try FileManager.default.removeItem(
+                at: layout.cloudBrokerEnabledMarker
+            )
+        }
+        _ = try runProcess(
+            executable: "/bin/launchctl",
+            arguments: [
+                "kill",
+                "SIGTERM",
+                "gui/\(getuid())/fun.wwcn.rimeai.cloud-broker",
+            ]
+        )
+    }
+
+    nonisolated private static func startManagedCloudBroker(
+        layout: RimeAIProductDataLayout
+    ) throws {
+        let fileManager = FileManager.default
+        guard fileManager.fileExists(
+            atPath: layout.cloudBrokerLaunchAgentPlist.path
+        ) else {
+            throw lifecycleError(
+                "cloud broker LaunchAgent is missing; reinstall RimeAI",
+                code: 20
+            )
+        }
+        try fileManager.createDirectory(
+            at: layout.controlDirectory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        guard fileManager.createFile(
+            atPath: layout.cloudBrokerEnabledMarker.path,
+            contents: Data(),
+            attributes: [.posixPermissions: 0o600]
+        ) else {
+            throw lifecycleError(
+                "could not create the cloud broker enable marker",
+                code: 21
+            )
+        }
+        do {
+            let domain = "gui/\(getuid())"
+            let label = "fun.wwcn.rimeai.cloud-broker"
+            let printStatus = try runProcess(
+                executable: "/bin/launchctl",
+                arguments: ["print", "\(domain)/\(label)"]
+            )
+            if printStatus != 0 {
+                let bootstrapStatus = try runProcess(
+                    executable: "/bin/launchctl",
+                    arguments: [
+                        "bootstrap",
+                        domain,
+                        layout.cloudBrokerLaunchAgentPlist.path,
+                    ]
+                )
+                guard bootstrapStatus == 0 else {
+                    throw lifecycleError(
+                        "launchctl could not bootstrap the cloud broker",
+                        code: Int(bootstrapStatus)
+                    )
+                }
+            }
+            let kickstartStatus = try runProcess(
+                executable: "/bin/launchctl",
+                arguments: ["kickstart", "\(domain)/\(label)"]
+            )
+            guard kickstartStatus == 0 else {
+                throw lifecycleError(
+                    "launchctl could not start the cloud broker",
+                    code: Int(kickstartStatus)
+                )
+            }
+            let socket = layout.runtimeDirectory
+                .appendingPathComponent("rimeai-cloud.sock")
+            for _ in 0..<40 {
+                let attributes = try? fileManager.attributesOfItem(
+                    atPath: socket.path
+                )
+                if attributes?[.type] as? FileAttributeType == .typeSocket {
+                    return
+                }
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+            throw lifecycleError(
+                "cloud broker did not create its private socket",
+                code: 22
+            )
+        } catch {
+            _ = try? runProcess(
+                executable: "/bin/launchctl",
+                arguments: [
+                    "kill",
+                    "SIGTERM",
+                    "gui/\(getuid())/fun.wwcn.rimeai.cloud-broker",
+                ]
+            )
+            if fileManager.fileExists(
+                atPath: layout.cloudBrokerEnabledMarker.path
+            ) {
+                try? fileManager.removeItem(
+                    at: layout.cloudBrokerEnabledMarker
+                )
+            }
+            throw error
+        }
     }
 
     nonisolated private static func suspendManagedDaemon(
@@ -742,6 +1280,23 @@ final class PrivacyCenterWindowController: NSObject {
                 $0.trimmingCharacters(in: .whitespacesAndNewlines)
             }
             .filter { !$0.isEmpty }
+    }
+
+    private func reconcileCloudConfiguration() {
+        settings.reconcileCloudConfiguration(
+            hasCredential: try? credentialStore.containsAPIKey()
+        )
+    }
+
+    private func presentError(
+        _ error: Error,
+        message: String,
+        information: String
+    ) {
+        let alert = NSAlert(error: error)
+        alert.messageText = message
+        alert.informativeText = information
+        alert.beginSheetModal(for: window)
     }
 
     private func sectionTitle(_ value: String) -> NSTextField {

@@ -54,6 +54,26 @@ func localSemanticDecisionMakesAbstentionObservable() throws {
 }
 
 @Test
+func localSemanticDecisionDoesNotReportAgreementWithoutAComparison() throws {
+    let ranker = LocalSemanticRanker(
+        rankWeight: 0.1,
+        frequencyWeight: 0,
+        languageWeight: 0,
+        candidateFrequencies: [:],
+        ngramCounts: [2: [:], 3: [:], 4: [:], 5: [:]],
+        prefixCounts: [2: [:], 3: [:], 4: [:], 5: [:]]
+    )
+
+    let result = ranker.evaluate(
+        context: "",
+        candidates: ["附近服务为", "放进去", "风景区"]
+    )
+
+    #expect(result.decision == .insufficientCandidates)
+    #expect(result.confidence == 0)
+}
+
+@Test
 func compactIOSArtifactMatchesApprovedPythonRankerFixtures() throws {
     let repositoryRoot = URL(fileURLWithPath: #filePath)
         .deletingLastPathComponent()

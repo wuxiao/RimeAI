@@ -96,9 +96,19 @@ class PinyinGuard:
             next_paths = {}
             for prefix, parts in paths.items():
                 for variant in sorted(variants):
-                    combined = prefix + variant
-                    if normalized.startswith(combined):
-                        next_paths.setdefault(combined, parts + [variant])
+                    # Match Rime's abbreviated pinyin: a syllable may be
+                    # typed in full or reduced to its first letter.
+                    forms = (
+                        (variant,) if len(variant) == 1
+                        else (variant, variant[0])
+                    )
+                    for form in forms:
+                        combined = prefix + form
+                        if normalized.startswith(combined):
+                            next_paths.setdefault(
+                                combined,
+                                parts + [variant],
+                            )
             if not next_paths:
                 return None
             paths = next_paths

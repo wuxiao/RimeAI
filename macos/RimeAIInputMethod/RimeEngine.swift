@@ -3,6 +3,7 @@ import Foundation
 private enum RimeEngineError: Error {
     case missingSharedData
     case initialization(String)
+    case optionConfiguration(String)
     case candidateLookup(String)
     case candidateCommit(String)
 }
@@ -63,6 +64,18 @@ final class RimeEngine: @unchecked Sendable {
         }
     }
 
+    func apply(_ preferences: RimeAIInputPreferences) {
+        queue.async { [self] in
+            do {
+                let engine = try ensureEngine()
+                try configure(engine, preferences: preferences)
+            } catch {
+                // Candidate lookup remains fail-safe. A later request can still
+                // use the last successfully applied Rime session options.
+            }
+        }
+    }
+
     func candidates(for pinyin: String, limit: Int = 10) -> [String] {
         queue.sync {
             do {
@@ -74,7 +87,7 @@ final class RimeEngine: @unchecked Sendable {
                     rai_engine_candidates(
                         engine,
                         input,
-                        min(max(limit, 1), 10),
+                        min(max(limit, 1), 50),
                         collectRimeCandidate,
                         context,
                         &error,
@@ -161,11 +174,75 @@ final class RimeEngine: @unchecked Sendable {
                     rimeErrorMessage(error)
                 )
             }
+            do {
+                try configure(
+                    created,
+                    preferences: RimeAISettingsStore.shared.inputPreferences
+                )
+            } catch {
+                rai_engine_destroy(created)
+                throw error
+            }
             engine = created
             return created
         } catch {
             initializationFailure = error
             throw error
+        }
+    }
+
+    private func configure(
+        _ engine: OpaquePointer,
+        preferences: RimeAIInputPreferences
+    ) throws {
+        let characterOptions = [
+            "zh_hant",
+            "zh_hans",
+            "zh_hant_hk",
+            "zh_hant_tw",
+        ]
+        let selectedCharacterOption = preferences.characterSet == .simplified
+            ? "zh_hans"
+            : "zh_hant"
+        for option in characterOptions where option != selectedCharacterOption {
+            try setOption(option, enabled: false, engine: engine)
+        }
+        try setOption(
+            selectedCharacterOption,
+            enabled: true,
+            engine: engine
+        )
+        try setOption(
+            "full_shape",
+            enabled: preferences.characterWidth == .full,
+            engine: engine
+        )
+        try setOption(
+            "ascii_punct",
+            enabled: preferences.punctuationStyle == .western,
+            engine: engine
+        )
+    }
+
+    private func setOption(
+        _ option: String,
+        enabled: Bool,
+        engine: OpaquePointer
+    ) throws {
+        var error = [CChar](repeating: 0, count: 512)
+        let status = option.withCString { name in
+            rai_engine_set_option(
+                engine,
+                name,
+                enabled ? 1 : 0,
+                &error,
+                error.count
+            )
+        }
+        guard status == 0 else {
+            throw RimeEngineError.optionConfiguration(
+                rimeErrorMessage(error)
+            )
         }
     }
 

@@ -66,7 +66,9 @@ trap cleanup EXIT
 
 "${project_root}/scripts/verify_macos_librime.sh" \
   "${macos_dir}/Native/RimeAIMacRuntime.xcframework" >/dev/null
-if [[ ! -f "${project_root}/.rimeai/rime/shared/data-lock.json" ]]; then
+if [[ ! -f "${project_root}/.rimeai/rime/shared/data-lock.json" \
+      || ! -f "${project_root}/.rimeai/rime/shared/opencc/t2s.json" \
+      || ! -f "${project_root}/.rimeai/rime/shared/opencc/TSCharacters.ocd2" ]]; then
   "${project_root}/scripts/bootstrap_rime_data.sh" >/dev/null
 fi
 dot_clean -m "${macos_dir}" "${project_root}/Sources" \

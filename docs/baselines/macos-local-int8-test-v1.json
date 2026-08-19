@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "status": "frozen_test_baseline",
+  "recorded_at": "2026-08-14",
+  "dataset": {
+    "path": ".rimeai/datasets/p0-librime-1.17.0-luna-simp.jsonl",
+    "sha256": "f0d46219a334d9d408518e387899c57b4881da27e8388d721827ebc86087b35d",
+    "split": "test",
+    "samples": 974,
+    "covered_samples": 789,
+    "candidate_limit": 10
+  },
+  "model": {
+    "artifact_id": "rimeai-24m-fusion:96a44df2d2d8ee63",
+    "manifest_sha256": "db21cbf9599d80d8c377339d289c7c7af911c7a43936fb45b0ed2c7f26beb61a",
+    "fusion_config_sha256": "708a2a90fa3e7fafc64756c91941bbd6fcd0a7a17f4807c703978b9a7e50a5cc",
+    "ngram_sha256": "36457c630dc8376df8a9aa74cf94faa78eb43febc6779618ae0792b33d879b49"
+  },
+  "product_gate": {
+    "minimum_confidence": 0.9,
+    "conditional_top1_accuracy": 0.945501,
+    "latency_ms": {
+      "p50": 15.17,
+      "p95": 42.70
+    },
+    "inference_errors": 0
+  },
+  "reproduce": "uv run --extra release rimeai-eval evaluate .rimeai/datasets/p0-librime-1.17.0-luna-simp.jsonl --ranker hybrid --ranker-config .rimeai/models/rimeai-ranker-s-24m-int8-onnx-fusion-v1.json --rime-dictionary .rimeai/rime/shared/luna_pinyin.dict.yaml --neural-model .rimeai/models/rimeai-ranker-s-24m-int8-onnx-v1 --language-model .rimeai/models/p0-char-ngram-v1.json.gz --device cpu --split test --min-confidence 0.90 --candidate-limit 10"
+}

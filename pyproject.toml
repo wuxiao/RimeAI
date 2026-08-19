@@ -26,13 +26,14 @@ release = [
 [project.scripts]
 rimeai-eval = "rimeai_eval.cli:main"
 rimeai-daemon = "rimeai_daemon.__main__:main"
+rimeai-cloud-broker = "rimeai_cloud_broker.__main__:main"
 
 [build-system]
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["rimeai_eval", "rimeai_daemon"]
+packages = ["rimeai_eval", "rimeai_daemon", "rimeai_cloud_broker"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

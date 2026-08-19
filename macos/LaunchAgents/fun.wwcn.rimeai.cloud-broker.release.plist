@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>fun.wwcn.rimeai.cloud-broker</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__CLOUD_BROKER_EXECUTABLE__</string>
+    <string>--socket</string>
+    <string>__SOCKET__</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__RELEASE_ROOT__</string>
+  <key>RunAtLoad</key>
+  <false/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>PathState</key>
+    <dict>
+      <key>__ENABLED_MARKER__</key>
+      <true/>
+    </dict>
+  </dict>
+  <key>ProcessType</key>
+  <string>Interactive</string>
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
+  <key>StandardOutPath</key>
+  <string>__LOG_PATH__</string>
+  <key>StandardErrorPath</key>
+  <string>__LOG_PATH__</string>
+</dict>
+</plist>

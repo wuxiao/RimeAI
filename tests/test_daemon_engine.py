@@ -66,6 +66,55 @@ def test_engine_reports_same_top_candidate_as_a_successful_decision():
     assert result["ranked_candidate"] == ""
 
 
+def test_engine_does_not_claim_agreement_when_only_one_candidate_is_comparable():
+    candidates = [
+        "附近服务为",
+        "放进去",
+        "风景区",
+        "否决权",
+        "飞进去",
+        "范家满",
+        "复决权",
+    ]
+    request = _request()
+    request["pinyin"] = "fjfww"
+    request["candidates"] = candidates
+
+    result = _engine(candidates, 1.0).infer(request)
+
+    assert result["decision"] == "insufficient_candidates"
+    assert result["ranked_candidate"] == ""
+    assert result["sentence_suggestion"] == ""
+    assert result["confidence"] == 0.0
+
+
+def test_sentence_suggestion_can_recover_an_insufficient_candidate_pool():
+    candidates = [
+        "附近服务为",
+        "放进去",
+        "风景区",
+        "否决权",
+        "飞进去",
+        "范家满",
+        "复决权",
+    ]
+    request = _request(allow_sentence=True)
+    request["pinyin"] = "fjfww"
+    request["candidates"] = candidates
+
+    result = _engine(
+        candidates,
+        1.0,
+        sentence="附近服务网",
+        sentence_confidence=0.60,
+    ).infer(request)
+
+    assert result["decision"] == "sentence_suggestion"
+    assert result["ranked_candidate"] == ""
+    assert result["sentence_suggestion"] == "附近服务网"
+    assert result["confidence"] == 0.60
+
+
 def test_too_long_sentence_abstains_instead_of_returning_a_ranked_fragment():
     result = _engine(
         ["命令", "明令"],
@@ -79,16 +128,41 @@ def test_too_long_sentence_abstains_instead_of_returning_a_ranked_fragment():
     assert result["confidence"] == 0.0
 
 
-def test_incomplete_sentence_abstains_instead_of_returning_a_ranked_fragment():
+def test_incomplete_sentence_keeps_a_confident_ranked_candidate():
     result = _engine(
         ["命令", "明令"],
         0.91,
         sentence_reason="incomplete_candidate",
     ).infer(_request(allow_sentence=True))
 
+    assert result["decision"] == "ranked_candidate"
+    assert result["ranked_candidate"] == "命令"
+    assert result["sentence_suggestion"] == ""
+    assert result["confidence"] == 0.91
+
+
+def test_incomplete_sentence_abstains_without_a_ranked_candidate():
+    result = _engine(
+        ["明令", "命令"],
+        0.54,
+        sentence_reason="incomplete_candidate",
+    ).infer(_request(allow_sentence=True))
+
     assert result["decision"] == "sentence_incomplete"
     assert result["ranked_candidate"] == ""
     assert result["sentence_suggestion"] == ""
+    assert result["confidence"] == 0.0
+
+
+def test_incomplete_sentence_abstains_on_a_same_top_candidate():
+    result = _engine(
+        ["明令", "命令"],
+        0.88,
+        sentence_reason="incomplete_candidate",
+    ).infer(_request(allow_sentence=True))
+
+    assert result["decision"] == "sentence_incomplete"
+    assert result["ranked_candidate"] == ""
     assert result["confidence"] == 0.0
 
 
@@ -112,12 +186,25 @@ def test_sentence_suggestion_has_an_explicit_decision():
     assert result["ranked_candidate"] == ""
 
 
+def test_sentence_suggestion_accepts_the_configured_point_six_confidence():
+    result = _engine(
+        ["明令", "命令"],
+        0.7,
+        sentence="请执行这条命令",
+        sentence_confidence=0.60,
+    ).infer(_request(allow_sentence=True))
+
+    assert result["decision"] == "sentence_suggestion"
+    assert result["sentence_suggestion"] == "请执行这条命令"
+    assert result["confidence"] == 0.60
+
+
 def test_low_confidence_sentence_does_not_override_ranked_candidate():
     result = _engine(
         ["命令", "明令"],
         0.99,
         sentence="请执行这条命令",
-        sentence_confidence=0.96,
+        sentence_confidence=0.59,
     ).infer(_request(allow_sentence=True))
 
     assert result["decision"] == "ranked_candidate"

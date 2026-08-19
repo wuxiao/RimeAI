@@ -38,6 +38,7 @@ pnpm-debug.log*
 
 # Local RimeAI/runtime state
 .rimeai/
+graphify-out/
 .wrangler/
 python-dist/
 reports/
@@ -46,3 +47,8 @@ reports/
 .env
 .env.*
 !.env.example
+
+# Cloud credentials (the live file lives at ~/.config/rimeai/cloud.env;
+# never commit a copy that contains a real key)
+secrets/cloud.env
+!secrets/cloud.env.example

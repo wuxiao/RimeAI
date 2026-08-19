@@ -20,7 +20,9 @@ public enum ContextPolicy: String, Codable, Sendable {
 public enum SemanticInferenceDecision: String, Codable, Sendable {
     case rankedCandidate = "ranked_candidate"
     case sentenceSuggestion = "sentence_suggestion"
+    case mixedComposition = "mixed_composition"
     case sameTopCandidate = "same_top_candidate"
+    case insufficientCandidates = "insufficient_candidates"
     case belowConfidence = "below_confidence"
     case noCandidate = "no_candidate"
     case sentenceTooLong = "sentence_too_long"
@@ -36,24 +38,44 @@ public enum SemanticCandidatePresentation: Equatable, Sendable {
         confidence: Double
     )
     case sameTopCandidate
+    case insufficientCandidates
     case belowConfidence
     case noCandidate
     case sentenceTooLong
     case sentenceIncomplete
+    case scriptMismatch
     case inputTooLong
+    case cloudAnalyzing
+    case cloudSameTopCandidate
+    case cloudBelowConfidence
+    case cloudFailure
     case unavailable
     case failure
 
     public var title: String {
+        title(mainCandidate: nil)
+    }
+
+    public func title(mainCandidate: String?) -> String {
         switch self {
         case .idle:
             "✦ 本地模型待命"
         case .analyzing:
             "✦ 本地模型分析中…"
-        case let .candidate(text, _, _):
-            "✦ \(text)"
+        case let .candidate(text, decision, _):
+            if decision == .mixedComposition {
+                "✦ 中英混输：\(text)"
+            } else {
+                "✦ \(text)"
+            }
         case .sameTopCandidate:
-            "✦ 本地模型：首选一致"
+            if let mainCandidate, !mainCandidate.isEmpty {
+                "✦ AI 建议：\(mainCandidate)（与 Rime 首选一致）"
+            } else {
+                "✦ 本地模型：首选一致"
+            }
+        case .insufficientCandidates:
+            "✦ 本地模型：完整候选不足，未执行重排"
         case .belowConfidence:
             "✦ 本地模型：置信度不足，保留 Rime"
         case .noCandidate:
@@ -62,8 +84,18 @@ public enum SemanticCandidatePresentation: Equatable, Sendable {
             "✦ 本地模型：整句超过 30 字，请分段输入"
         case .sentenceIncomplete:
             "✦ 本地模型：候选未覆盖完整拼音，保留 Rime"
+        case .scriptMismatch:
+            "✦ 本地模型：整句字形与当前简繁设置不符，保留 Rime"
         case .inputTooLong:
             "✦ 本地模型：拼音输入过长，保留 Rime"
+        case .cloudAnalyzing:
+            "☁︎ 云端分析中…"
+        case .cloudSameTopCandidate:
+            "☁︎ 云端：首选一致"
+        case .cloudBelowConfidence:
+            "☁︎ 云端：置信度不足，保留 Rime"
+        case .cloudFailure:
+            "☁︎ 云端暂不可用，已回退 Rime"
         case .unavailable:
             "✦ 本地模型已停用"
         case .failure:
@@ -78,22 +110,11 @@ public enum SemanticCandidatePresentation: Equatable, Sendable {
         return false
     }
 
-    public var prefersCommitOnSpace: Bool {
-        guard case let .candidate(_, decision, confidence) = self else {
-            return false
+    public var isMixedCompositionCandidate: Bool {
+        if case let .candidate(_, decision, _) = self {
+            return decision == .mixedComposition
         }
-        switch decision {
-        case .rankedCandidate:
-            return confidence >= 0.90
-        case .sentenceSuggestion:
-            return confidence >= 0.97
-        case .sameTopCandidate,
-             .belowConfidence,
-             .noCandidate,
-             .sentenceTooLong,
-             .sentenceIncomplete:
-            return false
-        }
+        return false
     }
 }
 
@@ -301,6 +322,12 @@ public struct SemanticInferenceResult: Codable, Sendable {
     }
 
     public var candidatePresentation: SemanticCandidatePresentation {
+        candidatePresentation(characterSet: .simplified)
+    }
+
+    public func candidatePresentation(
+        characterSet: RimeAICharacterSetPreference
+    ) -> SemanticCandidatePresentation {
         guard let confidence,
               let decision = resolvedDecision
         else {
@@ -314,13 +341,26 @@ public struct SemanticInferenceResult: Codable, Sendable {
                 confidence: confidence
             )
         case .sentenceSuggestion:
+            let suggestion = sentenceSuggestion ?? ""
+            guard SemanticCandidateScriptPolicy.allows(
+                text: suggestion,
+                characterSet: characterSet
+            ) else {
+                return .scriptMismatch
+            }
             return .candidate(
-                text: sentenceSuggestion ?? "",
+                text: suggestion,
                 decision: decision,
                 confidence: confidence
             )
+        case .mixedComposition:
+            // Mixed composition is constructed inside the trusted client from
+            // typed segments. The daemon is not allowed to synthesize it.
+            return .failure
         case .sameTopCandidate:
             return .sameTopCandidate
+        case .insufficientCandidates:
+            return .insufficientCandidates
         case .belowConfidence:
             return .belowConfidence
         case .noCandidate:
@@ -360,7 +400,10 @@ public struct SemanticInferenceResult: Codable, Sendable {
             return !rankedCandidate.isEmpty && sentenceSuggestion.isEmpty
         case .sentenceSuggestion:
             return rankedCandidate.isEmpty && !sentenceSuggestion.isEmpty
+        case .mixedComposition:
+            return false
         case .sameTopCandidate,
+             .insufficientCandidates,
              .belowConfidence,
              .noCandidate,
              .sentenceTooLong,

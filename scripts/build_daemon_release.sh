@@ -160,6 +160,25 @@ site_packages=$(
   --exclude-module scipy \
   "${project_root}/tools/rimeai_daemon_entry.py"
 
+"${release_python}" -m PyInstaller \
+  --noconfirm \
+  --clean \
+  --onedir \
+  --name rimeai-cloud-broker \
+  --target-arch arm64 \
+  --distpath "${build_root}/dist" \
+  --workpath "${build_root}/cloud-work" \
+  --specpath "${build_root}/cloud-spec" \
+  --exclude-module onnx \
+  --exclude-module onnxruntime \
+  --exclude-module safetensors \
+  --exclude-module torch \
+  --exclude-module transformers \
+  --exclude-module tkinter \
+  --exclude-module matplotlib \
+  --exclude-module scipy \
+  "${project_root}/tools/rimeai_cloud_broker_entry.py"
+
 mkdir -p \
   "${staging_root}/runtime" \
   "${staging_root}/models" \
@@ -169,6 +188,11 @@ rsync -a \
   --exclude='__pycache__' \
   "${build_root}/dist/rimeai-daemon/" \
   "${staging_root}/runtime/rimeai-daemon/"
+rsync -a \
+  --exclude='._*' \
+  --exclude='__pycache__' \
+  "${build_root}/dist/rimeai-cloud-broker/" \
+  "${staging_root}/runtime/rimeai-cloud-broker/"
 install -m 644 "${language_model_source}" \
   "${staging_root}/models/p0-char-ngram-v1.json.gz"
 install -m 644 "${beam_config_source}" \
@@ -232,14 +256,16 @@ if [[ -n "${RIMEAI_CODE_SIGN_KEYCHAIN:-}" ]]; then
   keychain_arguments=("--keychain" "${RIMEAI_CODE_SIGN_KEYCHAIN}")
 fi
 daemon_executable="${staging_root}/runtime/rimeai-daemon/rimeai-daemon"
+cloud_broker_executable="${staging_root}/runtime/rimeai-cloud-broker/rimeai-cloud-broker"
 macho_targets=()
 while IFS= read -r -d '' target_file; do
   if file -b "${target_file}" | grep -q 'Mach-O'; then
-    if [[ "${target_file}" != "${daemon_executable}" ]]; then
+    if [[ "${target_file}" != "${daemon_executable}" \
+      && "${target_file}" != "${cloud_broker_executable}" ]]; then
       macho_targets+=("${target_file}")
     fi
   fi
-done < <(find "${staging_root}/runtime/rimeai-daemon" -type f -print0)
+done < <(find "${staging_root}/runtime" -type f -print0)
 for target_file in "${macho_targets[@]}"; do
   codesign \
     --force \
@@ -257,6 +283,14 @@ codesign \
   --options runtime \
   --entitlements "${daemon_entitlements}" \
   "${daemon_executable}"
+codesign \
+  --force \
+  --sign "${signing_identity}" \
+  "${timestamp_argument}" \
+  "${keychain_arguments[@]}" \
+  --options runtime \
+  --entitlements "${daemon_entitlements}" \
+  "${cloud_broker_executable}"
 
 "${release_python}" "${project_root}/tools/release_manifest.py" create \
   --root "${staging_root}" \

@@ -36,6 +36,18 @@ RAI_PUBLIC void rai_engine_destroy(RAIEngine* engine);
 
 RAI_PUBLIC const char* rai_engine_version(RAIEngine* engine);
 
+RAI_PUBLIC int rai_engine_set_option(RAIEngine* engine,
+                                     const char* option,
+                                     int enabled,
+                                     char* error,
+                                     size_t error_size);
+
+RAI_PUBLIC int rai_engine_get_option(RAIEngine* engine,
+                                     const char* option,
+                                     int* enabled,
+                                     char* error,
+                                     size_t error_size);
+
 RAI_PUBLIC int rai_engine_candidates(RAIEngine* engine,
                                      const char* pinyin,
                                      size_t limit,

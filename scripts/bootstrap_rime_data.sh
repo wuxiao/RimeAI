@@ -8,8 +8,16 @@ runtime_root=${RIMEAI_RIME_ROOT:-"${project_root}/.rimeai/rime"}
 source_root="${runtime_root}/sources"
 shared_dir="${runtime_root}/shared"
 user_dir="${runtime_root}/user"
+opencc_data_dir="${project_root}/ios/RimeData/shared/opencc"
 
 mkdir -p "${source_root}" "${user_dir}"
+
+for required_opencc_file in t2s.json TSCharacters.ocd2 TSPhrases.ocd2; do
+  if [[ ! -f "${opencc_data_dir}/${required_opencc_file}" ]]; then
+    print -u2 "error: tracked OpenCC data is incomplete: ${required_opencc_file}"
+    exit 1
+  fi
+done
 
 repositories=(
   "rime-prelude|https://github.com/rime/rime-prelude.git|082425ea0684bca36474415d4a0e8db9b016487e"
@@ -56,6 +64,10 @@ rsync -a --exclude='._*' --include='*.yaml' --exclude='*' \
 rsync -a --exclude='._*' --include='*.yaml' --exclude='*' \
   "${source_root}/rime-stroke/" "${stage_dir}/"
 rsync -a "${source_root}/rime-essay/essay.txt" "${stage_dir}/essay.txt"
+# The controlled macOS runtime links librime-opencc, but the conversion filter
+# also requires its JSON configurations and compiled dictionaries at runtime.
+# Reuse the same tracked, licensed data set shipped by the iOS target.
+rsync -a --exclude='._*' "${opencc_data_dir}/" "${stage_dir}/opencc/"
 rsync -a "${project_root}/native/rime/default.custom.yaml" \
   "${stage_dir}/default.custom.yaml"
 rsync -a "${project_root}/native/rime/data-lock.json" \

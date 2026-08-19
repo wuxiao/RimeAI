@@ -12,7 +12,7 @@ public struct LocalSemanticEvaluation: Equatable, Sendable {
 
     public var candidatePresentation: SemanticCandidatePresentation {
         switch decision {
-        case .rankedCandidate, .sentenceSuggestion:
+        case .rankedCandidate, .sentenceSuggestion, .mixedComposition:
             guard let candidate else {
                 return .failure
             }
@@ -23,6 +23,8 @@ public struct LocalSemanticEvaluation: Equatable, Sendable {
             )
         case .sameTopCandidate:
             return .sameTopCandidate
+        case .insufficientCandidates:
+            return .insufficientCandidates
         case .belowConfidence:
             return .belowConfidence
         case .noCandidate:
@@ -110,6 +112,17 @@ public struct LocalSemanticRanker: Sendable {
                 decision: .noCandidate,
                 candidate: nil,
                 confidence: ranking.confidence
+            )
+        }
+        let comparisonTarget = comparisonLength(baseline)
+        let comparableCount = candidates.prefix(topCandidateCount).reduce(0) {
+            $0 + (comparisonLength($1) == comparisonTarget ? 1 : 0)
+        }
+        if comparableCount < 2 {
+            return LocalSemanticEvaluation(
+                decision: .insufficientCandidates,
+                candidate: nil,
+                confidence: 0
             )
         }
         if first == baseline {

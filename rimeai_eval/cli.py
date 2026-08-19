@@ -8,6 +8,11 @@ import sys
 from typing import Optional, Sequence
 
 from .capture import CaptureError, capture_dataset
+from .cloud_evaluation import (
+    CloudEvaluationError,
+    evaluate_cloud_observations,
+    load_cloud_observations,
+)
 from .beam_decoder import (
     BeamDecoderError,
     train_beam_decoder_config,
@@ -82,6 +87,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default=20,
         metavar="K",
     )
+
+    cloud_evaluate_parser = subparsers.add_parser(
+        "evaluate-cloud",
+        help="evaluate candidate expansion, correction, latency, and privacy gates",
+    )
+    cloud_evaluate_parser.add_argument("observations", type=Path)
 
     compare_parser = subparsers.add_parser(
         "compare", help="compare compatible aggregate evaluation reports"
@@ -709,6 +720,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             args.neural_model,
             args.language_model,
         )
+    if args.command == "evaluate-cloud":
+        try:
+            report = evaluate_cloud_observations(
+                load_cloud_observations(args.observations)
+            )
+        except (CloudEvaluationError, OSError) as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 2
+        print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+        return 0 if report["passed"] else 1
     if args.command == "compare":
         return _compare(args.reports)
     if args.command == "capture":

@@ -15,6 +15,10 @@ from rimeai_eval.neural_ranker import (
 )
 from rimeai_eval.pinyin_guard import PinyinGuard
 from rimeai_eval.evaluation import RankerError
+from rimeai_eval.candidate_policy import partition_full_length_candidates
+
+
+SENTENCE_MIN_CONFIDENCE = 0.60
 
 
 def _sha256_path(path: Path) -> str:
@@ -122,6 +126,13 @@ class LocalInferenceEngine:
 
     def infer(self, request: Dict[str, Any]) -> Dict[str, Any]:
         candidates = request["candidates"]
+        semantic_window = [
+            {"id": str(index), "text": candidate}
+            for index, candidate in enumerate(candidates[:10])
+        ]
+        comparable_candidates, _ = partition_full_length_candidates(
+            semantic_window
+        )
         try:
             if isinstance(self._ranker, HybridSemanticRanker):
                 ranking, rank_confidence = self._ranker.rank_candidates(
@@ -142,6 +153,12 @@ class LocalInferenceEngine:
         ranked_candidate = ""
         if not ranking:
             decision = "no_candidate"
+        elif len(comparable_candidates) < 2:
+            # The conservative completeness guard did not leave a real choice
+            # for the ranker. This is not evidence that the model agreed with
+            # Rime's first candidate.
+            decision = "insufficient_candidates"
+            rank_confidence = 0.0
         elif ranking[0] == candidates[0]:
             decision = "same_top_candidate"
         elif rank_confidence < self._ranker_min_confidence:
@@ -160,7 +177,10 @@ class LocalInferenceEngine:
             )
             suggestion_text = suggestion.text
             sentence_confidence = suggestion.confidence
-            if suggestion_text and sentence_confidence >= 0.97:
+            if (
+                suggestion_text
+                and sentence_confidence >= SENTENCE_MIN_CONFIDENCE
+            ):
                 sentence_suggestion = suggestion_text
                 decision = "sentence_suggestion"
                 ranked_candidate = ""
@@ -170,9 +190,10 @@ class LocalInferenceEngine:
                 ranked_candidate = ""
                 decision_confidence = 0.0
             elif getattr(suggestion, "reason", "") == "incomplete_candidate":
-                decision = "sentence_incomplete"
-                ranked_candidate = ""
-                decision_confidence = 0.0
+                if decision != "ranked_candidate":
+                    decision = "sentence_incomplete"
+                    ranked_candidate = ""
+                    decision_confidence = 0.0
         return {
             "decision": decision,
             "ranked_candidate": ranked_candidate,

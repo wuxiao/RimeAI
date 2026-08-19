@@ -8,6 +8,7 @@ final class CandidatePanelController: NSObject {
     private let semanticButton: NSButton
     private var mainSelectionHandler: ((Int) -> Void)?
     private var semanticSelectionHandler: (() -> Void)?
+    private var hasVisibleContent = false
 
     override init() {
         panel = NSPanel(
@@ -64,6 +65,7 @@ final class CandidatePanelController: NSObject {
     func update(
         mainCandidates: [String],
         semanticPresentation: SemanticCandidatePresentation,
+        suggestionSource: HistoryCommitSource,
         contextCharacterCount: Int,
         onMainSelection: @escaping (Int) -> Void,
         onSemanticSelection: @escaping () -> Void
@@ -89,23 +91,36 @@ final class CandidatePanelController: NSObject {
             mainCandidatesStack.addArrangedSubview(button)
         }
 
-        var semanticTitle = semanticPresentation.title
+        var semanticTitle: String
+        if case let .candidate(text, _, _) = semanticPresentation {
+            switch suggestionSource {
+            case .cloudExact:
+                semanticTitle = "☁︎ Qwen 建议：\(text)"
+            case .cloudFuzzy:
+                semanticTitle = "☁︎ Qwen 纠错：\(text)"
+            case .rimeMain, .localSemantic, .rawPinyin:
+                semanticTitle = semanticPresentation.title
+            }
+        } else {
+            semanticTitle = semanticPresentation.title(
+                mainCandidate: mainCandidates.first
+            )
+        }
         if contextCharacterCount > 0 {
             semanticTitle += " · 上下文 \(contextCharacterCount) 字"
-        }
-        if semanticPresentation.prefersCommitOnSpace {
-            semanticTitle += " · Space 采用"
         }
         semanticButton.title = semanticTitle
         semanticButton.setAccessibilityLabel(semanticTitle)
         semanticButton.isEnabled = semanticPresentation.isSelectable
         semanticButton.alphaValue = semanticPresentation.isSelectable ? 1 : 0.68
         semanticButton.toolTip = semanticPresentation.isSelectable
-            ? (
-                semanticPresentation.prefersCommitOnSpace
-                    ? "高置信候选：Space 或 Tab 接受"
-                    : "Tab 接受本地语义候选"
-            )
+            ? (semanticPresentation.isMixedCompositionCandidate
+                ? "Tab 接受中英混输候选"
+                : suggestionSource == .cloudFuzzy
+                ? "Tab 接受 Qwen 纠错候选"
+                : suggestionSource == .cloudExact
+                    ? "Tab 接受 Qwen 语义候选"
+                    : "Tab 接受本地语义候选")
             : semanticTitle
 
         let contentWidth = min(
@@ -116,12 +131,22 @@ final class CandidatePanelController: NSObject {
                 semanticButton.fittingSize.width + 24
             )
         )
-        panel.setContentSize(NSSize(width: contentWidth, height: 72))
-        layoutSubviews(width: contentWidth)
+        let showsMainCandidates = !mainCandidates.isEmpty
+        let contentHeight: CGFloat = showsMainCandidates ? 72 : 38
+        hasVisibleContent = showsMainCandidates
+            || semanticPresentation.isSelectable
+        panel.setContentSize(
+            NSSize(width: contentWidth, height: contentHeight)
+        )
+        layoutSubviews(
+            width: contentWidth,
+            height: contentHeight,
+            showsMainCandidates: showsMainCandidates
+        )
     }
 
     func show(anchorRect: NSRect) {
-        guard !mainCandidatesStack.arrangedSubviews.isEmpty else {
+        guard hasVisibleContent else {
             hide()
             return
         }
@@ -147,16 +172,20 @@ final class CandidatePanelController: NSObject {
         panel.orderOut(nil)
     }
 
-    private func layoutSubviews(width: CGFloat) {
+    private func layoutSubviews(
+        width: CGFloat,
+        height: CGFloat,
+        showsMainCandidates: Bool
+    ) {
         backgroundView.frame = NSRect(
             origin: .zero,
-            size: NSSize(width: width, height: 72)
+            size: NSSize(width: width, height: height)
         )
         mainCandidatesStack.frame = NSRect(
             x: 8,
-            y: 37,
+            y: showsMainCandidates ? 37 : 0,
             width: width - 16,
-            height: 30
+            height: showsMainCandidates ? 30 : 0
         )
         semanticButton.frame = NSRect(
             x: 8,

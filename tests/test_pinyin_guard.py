@@ -41,3 +41,21 @@ def test_guard_rejects_text_that_does_not_match_the_original_pinyin(
 
     assert not guard.matches("命令", "minglin")
     assert not guard.matches("命令。", "mingling")
+
+
+def test_guard_accepts_abbreviated_pinyin(tmp_path: Path):
+    guard = PinyinGuard.from_rime_dictionary(_dictionary(tmp_path))
+
+    assert guard.matches("命令", "mling")
+    assert guard.matches("命令", "ml")
+    assert guard.segment("命令", "ml") == ["ming", "ling"]
+    assert guard.segment("重庆", "cq") == ["chong", "qing"]
+
+
+def test_guard_rejects_abbreviated_input_without_a_matching_prefix(
+    tmp_path: Path,
+):
+    guard = PinyinGuard.from_rime_dictionary(_dictionary(tmp_path))
+
+    assert not guard.matches("命令", "mg")
+    assert not guard.matches("命令", "mlm")

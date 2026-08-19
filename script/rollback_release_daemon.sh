@@ -13,6 +13,8 @@ previous_link="${releases_root}/previous"
 target_plist="${HOME}/Library/LaunchAgents/${label}.plist"
 socket_file="${support_root}/runtime/rimeai.sock"
 enabled_marker="${HOME}/Library/Caches/RimeAI/daemon-enabled"
+cloud_label=fun.wwcn.rimeai.cloud-broker
+cloud_enabled_marker="${HOME}/Library/Caches/RimeAI/cloud-broker-enabled"
 
 for selector in "${current_link}" "${previous_link}"; do
   if [[ ! -L "${selector}" ]]; then
@@ -60,6 +62,9 @@ bootstrap_agent() {
 
 "${script_dir}/stop_daemon.sh" >/dev/null
 swap_selectors "${previous_name}" "${current_name}"
+if [[ -e "${cloud_enabled_marker}" ]]; then
+  launchctl kickstart -k "${domain}/${cloud_label}" >/dev/null 2>&1 || true
+fi
 if ! bootstrap_agent; then
   swap_selectors "${current_name}" "${previous_name}"
   bootstrap_agent >/dev/null 2>&1 || true
@@ -98,6 +103,9 @@ done
 
 launchctl bootout "${domain}/${label}" >/dev/null 2>&1 || true
 swap_selectors "${current_name}" "${previous_name}"
+if [[ -e "${cloud_enabled_marker}" ]]; then
+  launchctl kickstart -k "${domain}/${cloud_label}" >/dev/null 2>&1 || true
+fi
 bootstrap_agent >/dev/null 2>&1 || true
 launchctl kickstart -k "${domain}/${label}" >/dev/null 2>&1 || true
 print -u2 "error: rollback release failed health check; original release restored"

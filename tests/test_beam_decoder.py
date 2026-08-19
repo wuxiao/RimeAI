@@ -120,6 +120,33 @@ def test_beam_decoder_uses_a_full_input_candidate_when_first_is_partial(
     assert result.reason == "suggestion"
 
 
+def test_beam_decoder_generates_a_sentence_for_abbreviated_pinyin(
+    tmp_path: Path,
+):
+    decoder = BeamSentenceDecoder(
+        _language_model(),
+        _guard(tmp_path),
+        BeamDecoderConfig(
+            threshold=0.0,
+            beam_width=16,
+            characters_per_syllable=20,
+            language_model_sha256="a" * 64,
+            dictionary_sha256="b" * 64,
+            dataset_sha256="c" * 64,
+        ),
+    )
+
+    result = decoder.suggest(
+        context="请执行这条",
+        pinyin="ml",
+        candidates=["明令", "命令"],
+    )
+
+    assert result.text == "命令"
+    assert result.reason == "suggestion"
+    assert _guard(tmp_path).matches(result.text, "ml")
+
+
 def test_beam_decoder_reports_inputs_beyond_the_validated_sentence_limit(
     tmp_path: Path,
 ):

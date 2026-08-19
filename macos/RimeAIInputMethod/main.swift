@@ -1,5 +1,18 @@
 import AppKit
+import Darwin
 import InputMethodKit
+
+if CommandLine.arguments.contains("--verify-cloud-credential") {
+    let isAvailable: Bool
+    do {
+        isAvailable = try FileCloudCredentialStore.shared.loadAPIKey()?.isEmpty == false
+    } catch {
+        isAvailable = false
+    }
+    let result = isAvailable ? "available\n" : "unavailable\n"
+    FileHandle.standardOutput.write(Data(result.utf8))
+    Darwin.exit(isAvailable ? EXIT_SUCCESS : EXIT_FAILURE)
+}
 
 private final class RimeAIApplicationDelegate: NSObject, NSApplicationDelegate {
     private var inputMethodServer: IMKServer?

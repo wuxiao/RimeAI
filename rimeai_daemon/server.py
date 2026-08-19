@@ -532,6 +532,7 @@ class RimeAIDaemonServer:
                 "ranked_candidate",
                 "sentence_suggestion",
                 "same_top_candidate",
+                "insufficient_candidates",
                 "below_confidence",
                 "no_candidate",
                 "sentence_too_long",
@@ -569,6 +570,7 @@ class RimeAIDaemonServer:
                 decision
                 in {
                     "same_top_candidate",
+                    "insufficient_candidates",
                     "below_confidence",
                     "no_candidate",
                     "sentence_too_long",

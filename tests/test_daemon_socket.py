@@ -191,7 +191,12 @@ def test_daemon_emits_long_input_abstentions_without_partial_text():
             reader, writer = await asyncio.open_unix_connection(socket_path)
             await _hello(reader, writer)
             for revision, decision in enumerate(
-                ("sentence_too_long", "sentence_incomplete"), start=1
+                (
+                    "sentence_too_long",
+                    "sentence_incomplete",
+                    "insufficient_candidates",
+                ),
+                start=1,
             ):
                 await _write_json(
                     writer,

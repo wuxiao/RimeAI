@@ -208,11 +208,58 @@ func semanticAbstentionsAreValidVisibleModelDecisions() {
         confidence: 0.54,
         decision: .belowConfidence
     )
+    let insufficientCandidates = SemanticInferenceResult(
+        status: "ok",
+        requestID: "request",
+        compositionID: token.compositionID.uuidString,
+        revision: token.revision,
+        appSessionID: token.appSessionID,
+        rankedCandidate: "",
+        sentenceSuggestion: "",
+        confidence: 0,
+        decision: .insufficientCandidates
+    )
 
     #expect(sameTop.isValid(for: token, candidates: candidates))
     #expect(sameTop.candidatePresentation == .sameTopCandidate)
+    #expect(
+        sameTop.candidatePresentation.title(mainCandidate: "飞机")
+            == "✦ AI 建议：飞机（与 Rime 首选一致）"
+    )
     #expect(belowConfidence.isValid(for: token, candidates: candidates))
     #expect(belowConfidence.candidatePresentation == .belowConfidence)
+    #expect(insufficientCandidates.isValid(for: token, candidates: candidates))
+    #expect(
+        insufficientCandidates.candidatePresentation == .insufficientCandidates
+    )
+}
+
+@Test
+func sentenceSuggestionsRejectTheWrongChineseScriptBeforePresentation() {
+    let result = SemanticInferenceResult(
+        status: "ok",
+        requestID: "request",
+        compositionID: UUID().uuidString,
+        revision: 1,
+        appSessionID: "app-a",
+        rankedCandidate: "",
+        sentenceSuggestion: "飛機",
+        confidence: 0.9,
+        decision: .sentenceSuggestion
+    )
+
+    #expect(
+        result.candidatePresentation(characterSet: .simplified)
+            == .scriptMismatch
+    )
+    #expect(
+        result.candidatePresentation(characterSet: .traditional)
+            == .candidate(
+                text: "飛機",
+                decision: .sentenceSuggestion,
+                confidence: 0.9
+            )
+    )
 }
 
 @Test
@@ -266,6 +313,27 @@ func semanticCandidatePresentationExplainsEveryNormalModelOutcome() {
             "置信度不足"
         )
     )
+    #expect(
+        SemanticCandidatePresentation.insufficientCandidates.title.contains(
+            "未执行重排"
+        )
+    )
+    #expect(
+        SemanticCandidatePresentation.cloudFailure.title.contains("云端")
+    )
+    #expect(
+        !SemanticCandidatePresentation.cloudFailure.title.contains("本地模型")
+    )
+    #expect(!SemanticCandidatePresentation.cloudFailure.isSelectable)
+    for presentation in [
+        SemanticCandidatePresentation.cloudAnalyzing,
+        .cloudSameTopCandidate,
+        .cloudBelowConfidence,
+    ] {
+        #expect(presentation.title.contains("云端"))
+        #expect(!presentation.title.contains("本地模型"))
+        #expect(!presentation.isSelectable)
+    }
     let candidate = SemanticCandidatePresentation.candidate(
         text: "命令",
         decision: .rankedCandidate,
@@ -273,36 +341,13 @@ func semanticCandidatePresentationExplainsEveryNormalModelOutcome() {
     )
     #expect(candidate.title == "✦ 命令")
     #expect(candidate.isSelectable)
-}
-
-@Test
-func onlyHighConfidenceSemanticCandidatesOverrideSpaceCommit() {
-    let ranked = SemanticCandidatePresentation.candidate(
-        text: "命令",
-        decision: .rankedCandidate,
-        confidence: 0.91
-    )
-    let uncertainRanked = SemanticCandidatePresentation.candidate(
-        text: "命令",
-        decision: .rankedCandidate,
-        confidence: 0.89
-    )
-    let sentence = SemanticCandidatePresentation.candidate(
-        text: "请执行这条命令",
-        decision: .sentenceSuggestion,
+    let mixed = SemanticCandidatePresentation.candidate(
+        text: "这个API需要配置",
+        decision: .mixedComposition,
         confidence: 0.98
     )
-    let uncertainSentence = SemanticCandidatePresentation.candidate(
-        text: "请执行这条命令",
-        decision: .sentenceSuggestion,
-        confidence: 0.96
-    )
-
-    #expect(ranked.prefersCommitOnSpace)
-    #expect(!uncertainRanked.prefersCommitOnSpace)
-    #expect(sentence.prefersCommitOnSpace)
-    #expect(!uncertainSentence.prefersCommitOnSpace)
-    #expect(!SemanticCandidatePresentation.sameTopCandidate.prefersCommitOnSpace)
+    #expect(mixed.title == "✦ 中英混输：这个API需要配置")
+    #expect(mixed.isSelectable)
 }
 
 @Test
@@ -317,4 +362,23 @@ func longInputAbstentionsAreVisibleAndNonSelectable() {
     #expect(!tooLong.isSelectable)
     #expect(!incomplete.isSelectable)
     #expect(!pinyinTooLong.isSelectable)
+}
+
+@Test
+func daemonCannotInjectAClientOnlyMixedComposition() {
+    let token = CompositionState(appSessionID: "app").token
+    let result = SemanticInferenceResult(
+        status: "ok",
+        requestID: "request",
+        compositionID: token.compositionID.uuidString,
+        revision: token.revision,
+        appSessionID: token.appSessionID,
+        rankedCandidate: "",
+        sentenceSuggestion: "这个API",
+        confidence: 0.99,
+        decision: .mixedComposition
+    )
+
+    #expect(!result.isValid(for: token, candidates: ["这个"]))
+    #expect(result.candidatePresentation == .failure)
 }

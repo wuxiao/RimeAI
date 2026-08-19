@@ -291,6 +291,8 @@ if (( ai_enabled )); then
   fi
 fi
 
+"${script_dir}/install_release_cloud_broker.sh" "${stable_release}"
+
 activation_changed=0
 print -r -- "release=${target_release}"
 print -r -- "artifact_id=${artifact_id}"

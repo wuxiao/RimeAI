@@ -133,6 +133,43 @@ const char* rai_engine_version(RAIEngine* engine) {
   return engine ? engine->version.c_str() : nullptr;
 }
 
+int rai_engine_set_option(RAIEngine* engine,
+                          const char* option,
+                          int enabled,
+                          char* error,
+                          size_t error_size) {
+  clear_error(error, error_size);
+  if (!engine || !engine->api || !engine->session_id) {
+    set_error(error, error_size, "Rime engine is not running");
+    return -1;
+  }
+  if (!option || !option[0]) {
+    set_error(error, error_size, "Rime option name is invalid");
+    return -1;
+  }
+  engine->api->set_option(
+      engine->session_id, option, enabled ? True : False);
+  return 0;
+}
+
+int rai_engine_get_option(RAIEngine* engine,
+                          const char* option,
+                          int* enabled,
+                          char* error,
+                          size_t error_size) {
+  clear_error(error, error_size);
+  if (!engine || !engine->api || !engine->session_id) {
+    set_error(error, error_size, "Rime engine is not running");
+    return -1;
+  }
+  if (!option || !option[0] || !enabled) {
+    set_error(error, error_size, "Rime option query is invalid");
+    return -1;
+  }
+  *enabled = engine->api->get_option(engine->session_id, option) ? 1 : 0;
+  return 0;
+}
+
 int rai_engine_candidates(RAIEngine* engine,
                           const char* pinyin,
                           size_t limit,

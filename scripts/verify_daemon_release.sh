@@ -16,10 +16,12 @@ fi
 manifest_file="${release_root}/manifest.json"
 checksums_file="${release_root}/SHA256SUMS"
 daemon_executable="${release_root}/runtime/rimeai-daemon/rimeai-daemon"
+cloud_broker_executable="${release_root}/runtime/rimeai-cloud-broker/rimeai-cloud-broker"
 for required_file in \
   "${manifest_file}" \
   "${checksums_file}" \
-  "${daemon_executable}"; do
+  "${daemon_executable}" \
+  "${cloud_broker_executable}"; do
   if [[ ! -f "${required_file}" ]]; then
     print -u2 "error: required release file is missing: ${required_file}"
     exit 2
@@ -150,7 +152,7 @@ while IFS= read -r -d '' target_file; do
     print -u2 "error: hardened runtime is missing: ${target_file}"
     exit 1
   fi
-done < <(find "${release_root}/runtime/rimeai-daemon" -type f -print0)
+done < <(find "${release_root}/runtime" -type f -print0)
 
 if (( macho_count == 0 )); then
   print -u2 "error: release contains no Mach-O runtime"
@@ -158,6 +160,10 @@ if (( macho_count == 0 )); then
 fi
 if [[ ! -x "${daemon_executable}" ]]; then
   print -u2 "error: daemon entry point is not executable"
+  exit 1
+fi
+if [[ ! -x "${cloud_broker_executable}" ]]; then
+  print -u2 "error: cloud broker entry point is not executable"
   exit 1
 fi
 daemon_entitlements=$(
@@ -169,6 +175,15 @@ if [[ "${daemon_entitlements}" \
   exit 1
 fi
 "${daemon_executable}" --help >/dev/null
+cloud_broker_entitlements=$(
+  codesign -d --entitlements - "${cloud_broker_executable}" 2>&1
+)
+if [[ "${cloud_broker_entitlements}" \
+  != *'com.apple.security.cs.disable-library-validation'* ]]; then
+  print -u2 "error: cloud broker library-validation entitlement is missing"
+  exit 1
+fi
+"${cloud_broker_executable}" --help >/dev/null
 
 print -r -- "artifact_id=${artifact_id}"
 print -r -- "macho_files=${macho_count}"

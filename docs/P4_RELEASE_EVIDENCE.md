@@ -1,5 +1,9 @@
 # P4 量化与发布工程证据
 
+> 本文记录既有本地 daemon release 的历史证据。2026-08-14 起 release 构建
+> 同时支持独立云 broker，但新的双进程归档尚未完成本文同等级的签名、干净机
+> 安装与网络验收；当前状态见 [CLOUD_INPUT_IMPLEMENTATION.md](CLOUD_INPUT_IMPLEMENTATION.md)。
+
 ## 结论
 
 状态：**CHECKED IMPLEMENTATION / BLOCKED FOR PUBLIC DISTRIBUTION**

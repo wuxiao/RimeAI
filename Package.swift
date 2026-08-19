@@ -16,10 +16,17 @@ let package = Package(
             name: "rime-candidate-service",
             targets: ["RimeCandidateService"]
         ),
+        .executable(
+            name: "rimeai-voice-helper",
+            targets: ["RimeAIVoiceHelper"]
+        ),
     ],
     targets: [
         .target(
-            name: "RimeAIInputCore"
+            name: "RimeAIInputCore",
+            linkerSettings: [
+                .linkedLibrary("sqlite3"),
+            ]
         ),
         .binaryTarget(
             name: "RimeAIMacRuntime",
@@ -37,9 +44,17 @@ let package = Package(
             name: "RimeCandidateService",
             dependencies: ["RimeBridgeC"]
         ),
+        .executableTarget(
+            name: "RimeAIVoiceHelper",
+            dependencies: ["RimeAIInputCore"],
+            linkerSettings: [
+                .linkedFramework("Speech"),
+                .linkedFramework("AVFAudio"),
+            ]
+        ),
         .testTarget(
             name: "RimeAIInputCoreTests",
-            dependencies: ["RimeAIInputCore"]
+            dependencies: ["RimeAIInputCore", "RimeBridgeC"]
         ),
     ],
     cxxLanguageStandard: .cxx17

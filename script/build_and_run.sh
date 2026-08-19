@@ -9,7 +9,7 @@ script_dir=${0:A:h}
 project_root=${script_dir:h}
 macos_dir="${project_root}/macos"
 project_path="${macos_dir}/RimeAIInputMethod.xcodeproj"
-derived_data="${HOME}/Library/Developer/Xcode/DerivedData/RimeAI-Codex"
+derived_data=${RIMEAI_DERIVED_DATA_PATH:-"${HOME}/Library/Developer/Xcode/DerivedData/RimeAI-Codex"}
 app_bundle="${derived_data}/Build/Products/Debug/${app_name}.app"
 app_binary="${app_bundle}/Contents/MacOS/${app_name}"
 
@@ -22,7 +22,9 @@ case "${mode}" in
     ;;
 esac
 
-if [[ ! -f "${project_root}/.rimeai/rime/shared/data-lock.json" ]]; then
+if [[ ! -f "${project_root}/.rimeai/rime/shared/data-lock.json" \
+      || ! -f "${project_root}/.rimeai/rime/shared/opencc/t2s.json" \
+      || ! -f "${project_root}/.rimeai/rime/shared/opencc/TSCharacters.ocd2" ]]; then
   "${project_root}/scripts/bootstrap_rime_data.sh" >/dev/null
 fi
 "${project_root}/scripts/verify_macos_librime.sh" \
@@ -56,6 +58,12 @@ COPYFILE_DISABLE=1 xcodebuild \
   -derivedDataPath "${derived_data}" \
   "${signing_arguments[@]}" \
   clean build
+
+if otool -L "${app_binary}" \
+    | rg -Fq "@rpath/${app_name}.debug.dylib"; then
+  print -u2 "error: debug dylib executor is not suitable for an installed input method"
+  exit 1
+fi
 
 "${project_root}/script/bundle_librime_dependencies.sh" \
   "${app_bundle}" "${signing_identity:--}"

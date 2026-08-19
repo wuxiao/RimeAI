@@ -13,6 +13,18 @@
 | 核心范围 | 普通话全拼、简体中文、Rime 候选、上下文重排、拼音约束整句建议、本地隐私控制 |
 | 文档权威 | 本文件是键盘语义输入主线的产品与技术设计权威 |
 
+> **2026-08-14 macOS 可选云增强补充决策（覆盖下文冲突条款）**：默认产品和
+> 本地 daemon 仍保持本地优先、永久 Offline Lock。用户在隐私控制中心主动
+> 保存 API Key 后，可另行启用独立的阿里云 Qwen broker。该路径只允许固定
+> endpoint 与固定模型，从最多 50 个由 Rime 证明的精确/模糊候选中返回一个
+> candidate ID，不能自由生成上屏文本；总截止时间 800ms，结果只占一个显式
+> 建议位。配置 Key 后，RimeAI 成功上屏文本会跨应用明文、无限期保存在本机，
+> 用于 600 字近期上下文和最多 8 条 FTS/HNSW 检索片段；用户可导出或永久清除。
+> macOS Secure Event Input 会自动阻断云推理与历史写入；应用级本地 AI 策略、
+> 严格/标准/智能上下文档位不约束这一显式云功能。移除 Key 会停用云端但保留
+> 历史，清除历史是独立操作。下文“无云端推理”“不保存跨应用历史”以及
+> “所有产品进程 Offline Lock”等表述，仅适用于默认本地路径或历史方案。
+
 ## 0. 文档边界与证据等级
 
 本文件把相关讨论中已经接受的产品判断、产品能力、交互约束、模型路线、
@@ -21,7 +33,9 @@
 
 仓库中的 [PRD.md](PRD.md) 保留更早阶段的需求拆解和一条独立语音提案。
 语音并不在本次聊天确认的键盘语义输入基线中，因此必须作为独立工作流评审，
-不得借本文件自动进入 MVP。若两份文档在键盘语义输入主线上冲突，以本文件为准。
+不得借本文件自动进入 MVP。该独立工作流的设计草案见
+[docs/VOICE_INPUT_DESIGN.md](docs/VOICE_INPUT_DESIGN.md) 与本文件第 25 章
+摘要。若两份文档在键盘语义输入主线上冲突，以本文件为准。
 
 本文使用四种证据等级：
 
@@ -34,7 +48,7 @@
 
 ### 0.1 当前交付快照
 
-截至 2026-08-13，本仓库的状态是：
+截至 2026-08-14，本仓库的状态是：
 
 | 能力 | 证据等级 | 状态 |
 |---|---|---|
@@ -48,11 +62,14 @@
 | Qwen2.5-0.5B-Instruct | `LOCAL EXPERIMENT` | 已否决，不满足拼音正确性和实时预算 |
 | macOS InputMethodKit 输入法源码原型 | `CHECKED IMPLEMENTATION` | 已实现 Rime 候选、独立语义位、100ms debounce、取消和隐私控制 |
 | 用户级 Unix Domain Socket daemon | `CHECKED IMPLEMENTATION` | 已实现协议握手、同 UID 检查、超时、取消、熔断与离线网络守卫 |
+| 可选 Qwen 云 broker | `CHECKED IMPLEMENTATION` | cloud.env 文件凭据（0600）、独立同 UID UDS、固定模型、candidate-ID-only 合同、800ms/stale/Secure 门已实现；真实 API 效果和网络时延待外部验收 |
+| 云候选与长期历史 | `CHECKED IMPLEMENTATION` | Top-30 精确候选加受限错拼扩展至最多 50 条；明文 SQLite WAL、FTS、512 维 embedding/HNSW、导出和永久清除已实现 |
 | 隐私控制与数据生命周期 | `CHECKED IMPLEMENTATION` | 三档上下文、应用策略、无原文诊断、制品哈希、可恢复清理已实现 |
 | 用户级 daemon 生命周期 | `CHECKED IMPLEMENTATION` | 自包含 ONNX release、LaunchAgent、版本化升级/回滚、0600 UDS、无 INET 描述符已验证 |
 | 受控 macOS librime | `CHECKED IMPLEMENTATION` | 固定源码、静态 arm64 XCFramework、macOS 14、无 Homebrew 运行依赖 |
 | Developer ID Release 制品 | `CHECKED IMPLEMENTATION` | 输入法 ZIP 与 daemon 归档均完成 hardened-runtime 签名、时间戳和哈希验证 |
-| 自动测试 | `CHECKED IMPLEMENTATION` | Python 93 passed、Swift 32 passed、前端 production build passed |
+| 语音听写协议层（独立工作流） | `CHECKED IMPLEMENTATION` | 8 消息逐字段校验、客户端状态机（显式确认上屏、熔断）、引擎无关服务端核心（latest-wins、恰好一次投递）、UDS 传输层、Coordinator 粘合层与真实 socket 全栈回环共 31 项测试通过；helper 可执行（含 Apple Speech on-device 引擎源码，识别路径待 TCC 真机验证）经真实 launchd 生命周期验证（bootstrap、KeepAlive 重启、bootout 卸载）；UI 接线与冻结语音集未实现，见 `docs/VOICE_INPUT_DESIGN.md` 第 8 节 |
+| 自动测试 | `CHECKED IMPLEMENTATION` | Swift 47 passed；云 broker/evaluation/index 新增 Python 测试通过，完整命令与沙箱限制见 `docs/CLOUD_INPUT_IMPLEMENTATION.md` |
 | Apple Development 签名构建 | `CHECKED IMPLEMENTATION` | codesign 通过；保留为本地开发路径 |
 | Developer ID hardened-runtime 签名 | `CHECKED IMPLEMENTATION` | 主 App 与内嵌 dylib 深度验证通过，并带 Apple 安全时间戳 |
 | 安装、升级、回滚、卸载脚本 | `CHECKED IMPLEMENTATION` | v1→v3、v3→v1、再升级 v5 真实验证；卸载为可恢复移入废纸篓，Rime 数据默认保留 |
@@ -211,7 +228,9 @@ Rime 的确定性、可配置和离线能力很强，但仅依赖拼音切分、
 1. **同音消歧**：`suoyin` 在数据库上下文中应优先“索引”。
 2. **长句恢复**：连续拼音需要跨词切分、纠错和标点判断。
 3. **专业低频词**：`rongqibianpai` 应得到“容器编排”。
-4. **中英文混输**：`zhege API xuyaozengjia timeout peizhi` 应保留英文片段。
+4. **中英文混输**：`zhegeAPIxuyaozengjiatimeoutpeizhi` 应得到
+   “这个API需要增加timeout配置”。组合串内没有空格；Space 始终表示选择候选
+   并上屏，不能作为中英文边界。
 5. **用户固定表达**：词频能记住词，未必能理解当前句子的语义。
 6. **隐私冲突**：云端 AI 可能有更强语义能力，但输入法接触的内容过于敏感。
 
@@ -295,9 +314,11 @@ RimeAI 的差异化顺序是：
 ```
 
 排序器输出候选身份、排序或受约束的首选和置信度。MVP 不改变已经显示的
-Rime 数字候选，而是在独立语义位显示结果。用户按下 `Space` 时，当前组合中
-仍然有效的高置信度结果可以被主动采用；重排候选阈值为 0.90，整句建议阈值
-为 0.97，未达到阈值时仍提交 Rime 第一候选。
+Rime 数字候选，而是在独立语义位显示结果。用户按下 `Tab` 时可以主动采用
+当前组合中仍然有效的语义结果；`Space` 始终提交 Rime 第一候选。完整候选少于
+2 个时返回 `insufficient_candidates`，不得报告 `same_top_candidate`。当前运行时
+整句建议展示阈值为 0.60；模型比较后仍选择第一项时，语义位显示具体文本和
+“与 Rime 首选一致”，不再只显示抽象状态。
 
 ### 5.3 拼音约束整句建议
 
@@ -310,8 +331,9 @@ Rime 数字候选，而是在独立语义位显示结果。用户按下 `Space` 
 
 约束：
 
-- 只在组合串长度和策略满足条件时触发。
+- 简体拼音组合从 2 个字符起触发；单字符、繁体模式或策略禁止时不触发。
 - 每个中文字符必须能由冻结的 Rime 拼音词典证明与输入拼音兼容。
+- 本地生成文本必须符合当前简繁设置；字形不一致时显示不可选的拒绝原因。
 - 最多一条，默认不超过 30 个汉字，不含解释或换行。
 - 明确显示语义标记，用户主动选择后才上屏。
 - 超过 30 字或候选未覆盖完整拼音时必须显式弃权，不得展示截断的半句话。
@@ -319,6 +341,9 @@ Rime 数字候选，而是在独立语义位显示结果。用户按下 `Space` 
 
 当前质量门包含 4,000 条 6–10 字冻结数据和 1,600 条 11–30 字扩展冻结数据。
 扩展 test 在 0.97 产品阈值下相对 Rime 首选提升 38.4617%，P95 14.71ms。
+现用 6–30 字 test 明细按外层 0.60 重算为整句准确率 45.97%、相对 Rime 首选
+提升 48.03%；validation 选择的 beam margin 门禁继续保留，不以增加展示数量为
+目的继续下调。真实用户接受率与撤销率仍须内部预览验证。
 30 字仍是运行时安全上限，不代表支持任意长句、开放式续写或标点自由生成。
 
 ### 5.4 错误检测与有限纠错
@@ -382,6 +407,13 @@ Rime 领域词典
 
 任何自动翻译、改变大小写、重写标识符或拆分路径的行为均为错误。
 
+键盘混输必须按真实 InputMethodKit 交互验收：用户输入一个无空格连续键流，
+系统联合识别拼音段与 ASCII 段。连续大写缩写是强边界；全小写技术词可由保守
+词表和本地个人词表识别。若全小写组合串本身能完整分解为拼音音节，则保持
+普通 Rime/语义链路，不用历史英文子串强拆；历史中看似完整拼音的 ASCII 词也
+不进入个人英文边界。混输结果只进入独立 AI 建议位，由用户按 Tab 主动
+采用；Space 仍提交 Rime 第一候选，除非 Rime 没有候选而混输建议是唯一结果。
+
 ### 5.8 个性化
 
 长期个性化分三层：
@@ -414,7 +446,7 @@ P1 不新增持久 AI 学习，先证明即时语义价值。后续持久化必�
 |---|---|---|
 | 同音消歧 | 数据库上下文中的 `suoyin` 优先“索引” | 高置信度语义位出现“索引” |
 | 长句输入 | 连续拼音得到自然整句 | 建议满足拼音守卫且由用户主动上屏 |
-| 中英文混输 | API、路径、命令保持原样 | 不翻译、不改大小写、不破坏边界 |
+| 中英文混输 | 无空格连续输入中的 API、英文词保持原样 | 不翻译、不改大小写；Space 不充当分隔符；Tab 主动采用混输建议 |
 | 快速连续输入 | 候选不跳动 | 旧请求取消，数字候选位置变化为 0 |
 | daemon 故障 | 仍能输入 | 自动退回纯 Rime |
 | 应用切换 | 上下文不串线 | 旧应用结果永不进入新应用 |
@@ -437,8 +469,7 @@ P1 不新增持久 AI 学习，先证明即时语义价值。后续持久化必�
 
 - 第一行始终是同步 Rime 候选。
 - 第二行最多一个语义候选，可以是重排首选或整句建议。
-- 当前有效的高置信度语义候选出现时，`Space` 主动采用该候选；其他情况选择
-  Rime 第一候选。`Tab` 可接受当前可选的语义候选。
+- `Space` 始终采用 Rime 第一候选；`Tab` 可接受当前可选的语义候选。
 - `Esc` 关闭组合；数字键只映射到冻结的 Rime 候选。
 - 语义候选缺失时，`Tab` 不应吞掉应用原本行为。
 
@@ -486,10 +517,11 @@ stateDiagram-v2
     Committed --> Idle
 ```
 
-### 6.5 隐私控制中心
+### 6.5 设置与隐私控制中心
 
 设置界面应显示：
 
+- 简体/繁体、全角/半角和中文/西文标点；常用项也出现在输入法菜单。
 - AI 总开关与当前模型状态。
 - 当前上下文模式。
 - 应用级 AI 禁用列表和上下文禁用列表。
@@ -660,6 +692,10 @@ Top-10 请求。只有性能分析证明序列化是瓶颈时，才迁移到二�
 - 整句建议不超过 30 字且不包含换行。
 - `sentence_too_long` 和 `sentence_incomplete` 必须返回空候选，客户端以不可选
   状态解释原因，不得把部分结果当作建议。
+- `insufficient_candidates` 表示完整候选少于 2 个、没有实际执行重排，必须返回
+  空候选和 0 置信度，不能展示成“首选一致”。
+- 客户端必须在展示本地整句前检查当前简繁设置；不一致时显示不可选的
+  `scriptMismatch` 状态并保持 Rime 候选不变。
 - 置信度有限且位于 `[0, 1]`。
 - 应用会话、组合 ID、修订号和请求 ID 完全匹配。
 - 请求未过期、未取消、未进入安全输入。
@@ -1051,6 +1087,12 @@ socket，并保留 Unix Socket。它还不是操作系统级网络沙盒的完�
 - 操作系统、宿主应用或键盘记录器。
 - 同用户权限下绕过系统安全边界的高级攻击。
 - 用户主动导出并另行发送的数据。
+
+凭据存储的已知取舍：云端 API Key 存于 `~/.config/rimeai/cloud.env`
+（目录 0700、文件 0600、KEY=VALUE）。0600 只防其他本地用户读取，不防
+同 UID 进程；该文件同样会进入 Time Machine 备份或被 dotfile 同步工具
+带上云端。这是为绕开 ad-hoc 签名场景下 Keychain ACL 不稳定所做的有意
+取舍。
 
 ### 13.6 模型供应链
 
@@ -1450,7 +1492,12 @@ Runtime 的自包含 daemon；n-gram + beam 作为融合与故障降级。
 **原因**：原始确认范围把语音列为首版非目标，且 ASR 有独立权限、数据和质量
 合同。
 
-**处理**：若继续语音提案，使用独立 PRD 和放行门。
+**处理**：若继续语音提案，使用独立 PRD 和放行门。**已展开：**设计草案见
+[docs/VOICE_INPUT_DESIGN.md](docs/VOICE_INPUT_DESIGN.md)：语音是并行输入
+模态，不进入拼音候选管线、不改变 candidate-ID-only 键盘云合同；录音由
+独立 helper 进程承担（输入法进程无法可靠获得麦克风 TCC 授权），上屏唯一
+触发是用户显式确认。该决定本身不变：语音仍不属于键盘 MVP，逐阶段放行门
+见其第 5 节。
 
 ## 21. 待验证问题
 
@@ -1549,6 +1596,32 @@ Runtime 的自包含 daemon；n-gram + beam 作为融合与故障降级。
 | Offline Lock | 禁止产品进程主动联网的可验证模式 |
 | IMEBench | 面向输入法准确率、按键节省、延迟和稳定性的评测体系 |
 | IFM | Input Foundation Model，输入基础模型研究方向 |
+
+## 25. 语音听写模态（独立工作流摘要）
+
+本节是 [docs/VOICE_INPUT_DESIGN.md](docs/VOICE_INPUT_DESIGN.md) 的摘要，
+证据等级 `ACCEPTED TARGET STATE`；不改变键盘 MVP 范围与第 16 章阶段。
+
+- 语音是与拼音并行的输入模态：ASR 文本作为候选面板中的听写候选预览，
+  `Space`/回车显式确认后才上屏，`Esc` 全阶段取消；helper 进程只能提供
+  建议文本，永远不能触发上屏。
+- 录音由独立用户级 helper 进程（`fun.wwcn.rimeai.voice-helper`）承担：
+  输入法进程无法可靠获得麦克风 TCC 授权。生命周期沿用云 broker 模式
+  （LaunchAgent 按需启停、同 UID、0600 UDS）。
+- 传输与协议风格沿用第 8 章选型：NDJSON over UDS，逐字段校验、显式
+  状态机、latest-wins、熔断后回退纯键盘。消息族为 `voice_hello`/
+  `voice_ready`/`dictation_start`/`dictation_delta`/`dictation_final`/
+  `dictation_cancel`/`dictation_accept`/`dictation_error`。
+- 网络策略在握手中声明并由隐私中心展示：V0 本地 ASR 全离线（音频不出
+  内存、不出设备）；V1 云 ASR 与润色各自独立开关，润色复用现有
+  `glm-5.3` 端点与 cloud.env 凭证，不引入新凭证。
+- 阶段：V0 本地 direct（Apple Speech on-device 或受控 qwen-asr C 库，
+  质量门选择）；V1 云 ASR + polish（显式降级语义）；V2 模式即数据与
+  热词沉淀。逐阶段放行门见设计文档第 5 节。
+- 开源复用（均为 MIT，引入时增补 THIRD_PARTY_NOTICES）：Type4Me 的
+  Swift 模块骨架与投机润色节流语义；OpenLess 的 qwen-asr vendored C 库
+  与流式 ASR 协议参考。不采纳两者的剪贴板注入、明文凭证路径与
+  Tauri/Rust 工具链。
 
 ---
 
