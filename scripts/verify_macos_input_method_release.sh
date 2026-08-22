@@ -13,6 +13,8 @@ fi
 
 archive_file=${1:A}
 expected_signing_identity=${2:-}
+script_dir=${0:A:h}
+project_root=${script_dir:h}
 if [[ ! -f "${archive_file}" || -L "${archive_file}" ]]; then
   print -u2 "error: expected a regular input-method ZIP archive"
   exit 2
@@ -58,10 +60,21 @@ for archive_entry in "${archive_entries[@]}"; do
     exit 1
   fi
 done
+if zipinfo -l "${archive_file}" | awk '
+  substr($1, 1, 1) == "l" { found = 1 }
+  END { exit(found ? 0 : 1) }
+'; then
+  print -u2 "error: symbolic links are forbidden in the input-method archive"
+  exit 1
+fi
 
 # Deliberately use plain unzip here. This is the extraction path that exposes
 # AppleDouble entries which macOS-native ditto extraction can hide or merge.
 unzip -qq "${archive_file}" -d "${temporary_root}"
+if [[ -n "$(find "${temporary_root}" -type l -print -quit)" ]]; then
+  print -u2 "error: extracted input-method archive contains a symbolic link"
+  exit 1
+fi
 top_level_entries=("${temporary_root}"/*(DN))
 if (( ${#top_level_entries} != 1 )) \
   || [[ ! -d "${top_level_entries[1]}" \
@@ -72,8 +85,31 @@ if (( ${#top_level_entries} != 1 )) \
 fi
 app_bundle=${top_level_entries[1]}
 app_executable="${app_bundle}/Contents/MacOS/RimeAIInputMethod"
+embedded_helper=\
+"${app_bundle}/Contents/Helpers/RimeAIVoiceHelper.app"
+embedded_helper_executable=\
+"${embedded_helper}/Contents/MacOS/rimeai-voice-helper"
+embedded_voice_resources="${app_bundle}/Contents/Resources/VoiceHelper"
+embedded_launch_agent=\
+"${embedded_voice_resources}/fun.wwcn.rimeai.voice-helper.plist"
+embedded_voice_policy=\
+"${embedded_voice_resources}/VoiceReleasePolicy.plist"
+embedded_helper_policy=\
+"${embedded_helper}/Contents/Resources/VoiceReleasePolicy.plist"
 if [[ ! -x "${app_executable}" ]]; then
   print -u2 "error: input-method executable is missing or not executable"
+  exit 1
+fi
+if [[ ! -d "${embedded_helper}" || -L "${embedded_helper}" \
+  || ! -x "${embedded_helper_executable}" \
+  || ! -f "${embedded_launch_agent}" || -L "${embedded_launch_agent}" \
+  || ! -f "${embedded_voice_policy}" || -L "${embedded_voice_policy}" \
+  || ! -f "${embedded_helper_policy}" || -L "${embedded_helper_policy}" ]]; then
+  print -u2 "error: paired voice Release payload is missing or unsafe"
+  exit 1
+fi
+if ! cmp -s "${embedded_voice_policy}" "${embedded_helper_policy}"; then
+  print -u2 "error: paired voice Release payload is missing or unsafe"
   exit 1
 fi
 if [[ -n "$(find "${app_bundle}" \
@@ -83,7 +119,12 @@ if [[ -n "$(find "${app_bundle}" \
 fi
 
 for required_resource in \
-  THIRD_PARTY_NOTICES.md ATTRIBUTION.md ThirdPartyLicenses/librime-BSD-3-Clause.txt; do
+  THIRD_PARTY_NOTICES.md \
+  ATTRIBUTION.md \
+  ThirdPartyLicenses/librime-BSD-3-Clause.txt \
+  ThirdPartyLicenses/sherpa-onnx-Apache-2.0.txt \
+  ThirdPartyLicenses/onnxruntime-MIT.txt \
+  ThirdPartyLicenses/onnxruntime-ThirdPartyNotices-1.27.1.txt; do
   if [[ ! -f "${app_bundle}/Contents/Resources/${required_resource}" ]]; then
     print -u2 "error: release attribution is missing: ${required_resource}"
     exit 1
@@ -92,11 +133,28 @@ done
 
 mach_o_count=0
 bridge_found=false
+host_executable_mach_o_found=false
+helper_executable_mach_o_found=false
 while IFS= read -r -d '' target_file; do
   if ! file -b "${target_file}" | grep -q 'Mach-O'; then
     continue
   fi
   (( mach_o_count += 1 ))
+  relative_mach_o_path=${target_file#${app_bundle}/}
+  case "${relative_mach_o_path}" in
+    Contents/MacOS/RimeAIInputMethod)
+      host_executable_mach_o_found=true
+      ;;
+    Contents/Helpers/RimeAIVoiceHelper.app/Contents/MacOS/rimeai-voice-helper)
+      helper_executable_mach_o_found=true
+      ;;
+    *)
+      print -u2 \
+        "error: unapproved Mach-O path in formal Release payload: "\
+"${relative_mach_o_path}"
+      exit 1
+      ;;
+  esac
   if [[ "$(lipo -archs "${target_file}")" != "arm64" ]]; then
     print -u2 "error: input-method Mach-O must be arm64: ${target_file}"
     exit 1
@@ -140,8 +198,12 @@ while IFS= read -r -d '' target_file; do
   fi
 done < <(find "${app_bundle}/Contents" -type f -print0)
 
-if (( mach_o_count == 0 )); then
-  print -u2 "error: input-method archive contains no Mach-O files"
+if (( mach_o_count != 2 )) \
+  || [[ "${host_executable_mach_o_found}" != true \
+  || "${helper_executable_mach_o_found}" != true ]]; then
+  print -u2 \
+    "error: formal Release payload must contain exactly the input method "\
+"and paired helper Mach-O executables"
   exit 1
 fi
 if [[ "${bridge_found}" != true ]]; then
@@ -156,6 +218,61 @@ if [[ -n "${expected_signing_identity}" \
   exit 1
 fi
 
+"${project_root}/script/verify_voice_release_policy.sh" \
+  "${app_bundle}/Contents/Info.plist" \
+  "${embedded_helper}/Contents/Info.plist" \
+  "${embedded_voice_policy}" >/dev/null
+
+host_team=$(print -r -- "${app_signature}" | sed -n 's/^TeamIdentifier=//p')
+helper_signature=$(codesign -dvvv "${embedded_helper}" 2>&1)
+helper_team=$(print -r -- "${helper_signature}" \
+  | sed -n 's/^TeamIdentifier=//p')
+if ! print -r -- "${host_team}" | grep -Eq '^[A-Z0-9]{10}$' \
+  || [[ "${helper_team}" != "${host_team}" ]]; then
+  print -u2 "error: input method and voice helper must use the same TeamIdentifier"
+  exit 1
+fi
+host_requirement=\
+"anchor apple generic and identifier \"fun.wwcn.inputmethod.RimeAI\" and "\
+"certificate 1[field.1.2.840.113635.100.6.2.6] exists and "\
+"certificate leaf[field.1.2.840.113635.100.6.1.13] exists and "\
+"certificate leaf[subject.OU] = \"${host_team}\""
+if ! codesign --verify --strict --verbose=2 \
+  -R="${host_requirement}" "${app_bundle}"; then
+  print -u2 "error: input method does not satisfy the Developer ID requirement"
+  exit 1
+fi
+
+plutil -lint "${embedded_launch_agent}" >/dev/null
+
+rendered_launch_agent="${temporary_root}/voice-helper.plist"
+release_home="/Users/RimeAIReleaseVerifier"
+host_build=$(plutil -extract CFBundleVersion raw \
+  -o - "${app_bundle}/Contents/Info.plist")
+voice_policy_sha256=$(shasum -a 256 "${embedded_voice_policy}" \
+  | awk '{ print $1 }')
+installed_helper=\
+"${release_home}/Library/Input Methods/RimeAIInputMethod.app/Contents/Helpers/RimeAIVoiceHelper.app"
+installed_executable=\
+"${installed_helper}/Contents/MacOS/rimeai-voice-helper"
+sed \
+  -e "s|__HELPER_APP__|${installed_helper}|g" \
+  -e 's|__TRANSPORT_FLAG__|--mach-service|g' \
+  -e 's|__TRANSPORT_ENDPOINT__|fun.wwcn.rimeai.voice-helper|g' \
+  -e "s|__ENABLED_MARKER__|${release_home}/Library/Caches/RimeAI/voice-enabled|g" \
+  -e "s|__LOG_PATH__|${release_home}/Library/Application Support/RimeAI/runtime/rimeai-voice-helper.log|g" \
+  -e "s|__HOST_BUILD__|${host_build}|g" \
+  -e "s|__VOICE_POLICY_SHA256__|${voice_policy_sha256}|g" \
+  "${embedded_launch_agent}" \
+  | sed -e '/__ENGINE_FLAG__/d' -e '/__ENGINE_NAME__/d' \
+  >"${rendered_launch_agent}"
+"${project_root}/script/verify_voice_helper_bundle.sh" \
+  "${embedded_helper}" \
+  "${rendered_launch_agent}" \
+  authenticated-xpc \
+  fun.wwcn.rimeai.voice-helper \
+  "${installed_executable}" >/dev/null
+
 print -r -- "archive_sha256=$(shasum -a 256 "${archive_file}" | awk '{ print $1 }')"
 print -r -- "app=${app_bundle:t}"
 print -r -- "macho_files=${mach_o_count}"
@@ -164,3 +281,5 @@ print -r -- "minimum_macos=14.0"
 print -r -- "appledouble=none"
 print -r -- "plain_unzip_codesign=verified"
 print -r -- "hardened_runtime=verified"
+print -r -- "paired_voice_helper=verified"
+print -r -- "voice_release_eligible=false"

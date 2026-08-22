@@ -1,10 +1,11 @@
 import CryptoKit
 import Foundation
 
-/// 语音听写模态协议 V1。权威定义见 docs/VOICE_INPUT_DESIGN.md 第 3 节。
-/// 输入法是客户端，语音 helper 是服务端；传输为 NDJSON over UDS。
+/// 语音听写模态协议 V2。权威定义见 docs/VOICE_INPUT_DESIGN.md 第 3 节。
+/// 输入法是客户端，语音 helper 是服务端。Debug UDS 使用 UTF-8 NDJSON；
+/// Release XPC 的每次 Data RPC 承载一条无尾随换行的 JSON 消息。
 public enum VoiceDictationConstants {
-    public static let protocolVersion = 1
+    public static let protocolVersion = 2
     public static let maximumTextCharacters = 200
     public static let maximumContextCharacters = 600
     public static let minimumDeadlineMilliseconds = 1
@@ -12,6 +13,10 @@ public enum VoiceDictationConstants {
     public static let maximumDurationMilliseconds = 60_000
     public static let deltaTimeoutMilliseconds = 2_000
     public static let circuitBreakerLimit = 3
+    public static let maximumHotwordCount = 128
+    public static let maximumHotwordCharacters = 32
+    public static let maximumHotwordUTF8Bytes = 128
+    public static let maximumHotwordSetUTF8Bytes = 16_384
     public static let clientID = "fun.wwcn.inputmethod.RimeAI"
     public static let serverID = "fun.wwcn.rimeai.voice-helper"
 
@@ -25,6 +30,7 @@ public enum VoiceDictationConstants {
         "cloud_asr",
         "streaming",
         "polish",
+        "hotword_snapshot",
     ]
 }
 
@@ -63,6 +69,142 @@ enum VoiceTextValidation {
     static func isValidSingleLine(_ text: String) -> Bool {
         !text.contains("\n") && !text.contains("\r")
     }
+
+    /// 协议长度以 Swift `Character`（扩展字素簇）计数；`prefix` 不会
+    /// 把 emoji 或组合字符截成无效的 Unicode 片段。
+    static func truncatedToMaximumCharacters(_ text: String) -> String {
+        guard text.count > VoiceDictationConstants.maximumTextCharacters else {
+            return text
+        }
+        return String(text.prefix(
+            VoiceDictationConstants.maximumTextCharacters
+        ))
+    }
+}
+
+/// One immutable, bounded hotword set captured by the input method before a
+/// voice request. The digest binds the exact normalized order; neither the
+/// phrases nor this low-entropy digest belongs in diagnostics or telemetry.
+public struct VoiceHotwordSnapshot: Codable, Equatable, Sendable {
+    public let normalizationVersion: Int
+    public let phrases: [String]
+    public let hotwordSetSHA256: String
+
+    public init(phrases: [String]) throws {
+        let canonical = try Self.canonicalized(phrases)
+        self.normalizationVersion = 1
+        self.phrases = canonical
+        self.hotwordSetSHA256 = Self.digest(canonical)
+    }
+
+    public static let empty: Self = {
+        // The empty array satisfies every invariant by construction.
+        try! Self(phrases: [])
+    }()
+
+    public var isEmpty: Bool { phrases.isEmpty }
+
+    public var isValid: Bool {
+        guard let canonical = try? Self.canonicalized(phrases),
+              canonical == phrases,
+              normalizationVersion == 1,
+              Self.isSHA256(hotwordSetSHA256)
+        else {
+            return false
+        }
+        return hotwordSetSHA256 == Self.digest(canonical)
+    }
+
+    public func limited(to maximumEntries: Int) throws -> Self {
+        guard maximumEntries >= 0 else {
+            throw ValidationError.invalidLimit
+        }
+        return try Self(phrases: Array(phrases.prefix(maximumEntries)))
+    }
+
+    public enum ValidationError: Error, Equatable, Sendable {
+        case tooManyPhrases
+        case invalidPhrase
+        case duplicatePhrase
+        case aggregateTooLarge
+        case invalidLimit
+    }
+
+    private static func canonicalized(
+        _ phrases: [String]
+    ) throws -> [String] {
+        guard phrases.count <= VoiceDictationConstants.maximumHotwordCount
+        else {
+            throw ValidationError.tooManyPhrases
+        }
+        var seen = Set<String>()
+        var totalUTF8Bytes = 0
+        var canonical: [String] = []
+        canonical.reserveCapacity(phrases.count)
+        for phrase in phrases {
+            let normalized = phrase
+                .precomposedStringWithCompatibilityMapping
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard (2 ... VoiceDictationConstants.maximumHotwordCharacters)
+                    .contains(normalized.count),
+                  normalized.utf8.count
+                    <= VoiceDictationConstants.maximumHotwordUTF8Bytes,
+                  !normalized.unicodeScalars.contains(where: {
+                      $0.value < 0x20
+                          || (0x7f ... 0x9f).contains($0.value)
+                  }),
+                  !normalized.contains("/"),
+                  !normalized.contains(":"),
+                  !normalized.contains("#"),
+                  !normalized.contains("@")
+            else {
+                throw ValidationError.invalidPhrase
+            }
+            guard seen.insert(normalized).inserted else {
+                throw ValidationError.duplicatePhrase
+            }
+            totalUTF8Bytes += normalized.utf8.count
+            guard totalUTF8Bytes
+                <= VoiceDictationConstants.maximumHotwordSetUTF8Bytes
+            else {
+                throw ValidationError.aggregateTooLarge
+            }
+            canonical.append(normalized)
+        }
+        return canonical
+    }
+
+    private static func digest(_ phrases: [String]) -> String {
+        var payload = Data("rimeai.voice-hotwords.v1\0".utf8)
+        append(UInt32(phrases.count), to: &payload)
+        for phrase in phrases {
+            let bytes = Data(phrase.utf8)
+            append(UInt32(bytes.count), to: &payload)
+            payload.append(bytes)
+        }
+        return SHA256.hash(data: payload)
+            .map { String(format: "%02x", $0) }
+            .joined()
+    }
+
+    private static func append(_ value: UInt32, to data: inout Data) {
+        var bigEndian = value.bigEndian
+        withUnsafeBytes(of: &bigEndian) { bytes in
+            data.append(contentsOf: bytes)
+        }
+    }
+
+    private static func isSHA256(_ value: String) -> Bool {
+        value.utf8.count == 64 && value.utf8.allSatisfy {
+            (0x30 ... 0x39).contains($0) || (0x61 ... 0x66).contains($0)
+        }
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case normalizationVersion = "normalization_version"
+        case phrases
+        case hotwordSetSHA256 = "hotword_set_sha256"
+    }
 }
 
 // MARK: - 客户端 → 服务端
@@ -86,6 +228,18 @@ public struct VoiceHelloRequest: Codable, Equatable, Sendable {
         self.capabilities = capabilities
     }
 
+    /// 客户端只能声明 V2 已知能力，且必须具备听写主能力。
+    public var isValid: Bool {
+        let advertisedCapabilities = Set(capabilities)
+        return protocolVersion == VoiceDictationConstants.protocolVersion
+            && type == "voice_hello"
+            && clientID == VoiceDictationConstants.clientID
+            && advertisedCapabilities.contains("dictation")
+            && advertisedCapabilities.isSubset(
+                of: VoiceDictationConstants.clientCapabilities
+            )
+    }
+
     enum CodingKeys: String, CodingKey {
         case protocolVersion = "protocol_version"
         case type
@@ -104,6 +258,7 @@ public struct VoiceDictationStart: Codable, Equatable, Sendable {
     public let mode: VoiceDictationMode
     public let deadlineMilliseconds: Int
     public let maximumDurationMilliseconds: Int
+    public let hotwordSnapshot: VoiceHotwordSnapshot?
 
     public init(
         protocolVersion: Int = VoiceDictationConstants.protocolVersion,
@@ -114,7 +269,8 @@ public struct VoiceDictationStart: Codable, Equatable, Sendable {
         mode: VoiceDictationMode,
         deadlineMilliseconds: Int,
         maximumDurationMilliseconds: Int = VoiceDictationConstants
-            .maximumDurationMilliseconds
+            .maximumDurationMilliseconds,
+        hotwordSnapshot: VoiceHotwordSnapshot? = .empty
     ) {
         self.protocolVersion = protocolVersion
         self.type = "dictation_start"
@@ -125,6 +281,7 @@ public struct VoiceDictationStart: Codable, Equatable, Sendable {
         self.mode = mode
         self.deadlineMilliseconds = deadlineMilliseconds
         self.maximumDurationMilliseconds = maximumDurationMilliseconds
+        self.hotwordSnapshot = hotwordSnapshot
     }
 
     public var isValid: Bool {
@@ -143,6 +300,7 @@ public struct VoiceDictationStart: Codable, Equatable, Sendable {
             && maximumDurationMilliseconds > 0
             && maximumDurationMilliseconds
                 <= VoiceDictationConstants.maximumDurationMilliseconds
+            && (hotwordSnapshot?.isValid ?? true)
     }
 
     enum CodingKeys: String, CodingKey {
@@ -155,6 +313,36 @@ public struct VoiceDictationStart: Codable, Equatable, Sendable {
         case mode
         case deadlineMilliseconds = "deadline_ms"
         case maximumDurationMilliseconds = "max_duration_ms"
+        case hotwordSnapshot = "hotword_snapshot"
+    }
+}
+
+/// 松开按住说话快捷键后，客户端停止提交新音频并请求当前会话 final。
+public struct VoiceDictationStop: Codable, Equatable, Sendable {
+    public let protocolVersion: Int
+    public let type: String
+    public let requestID: String
+
+    public init(
+        protocolVersion: Int = VoiceDictationConstants.protocolVersion,
+        requestID: String
+    ) {
+        self.protocolVersion = protocolVersion
+        self.type = "dictation_stop"
+        self.requestID = requestID
+    }
+
+    public var isValid: Bool {
+        protocolVersion == VoiceDictationConstants.protocolVersion
+            && type == "dictation_stop"
+            && !requestID.isEmpty
+            && requestID.utf8.count <= 128
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case protocolVersion = "protocol_version"
+        case type
+        case requestID = "request_id"
     }
 }
 
@@ -260,13 +448,15 @@ public struct VoiceReadyResponse: Codable, Equatable, Sendable {
     public let capabilities: [String]
     public let networkPolicy: VoiceNetworkPolicy
     public let asrEngineID: String
+    public let maximumHotwords: Int
 
     public init(
         protocolVersion: Int = VoiceDictationConstants.protocolVersion,
         serverID: String = VoiceDictationConstants.serverID,
         capabilities: [String],
         networkPolicy: VoiceNetworkPolicy,
-        asrEngineID: String
+        asrEngineID: String,
+        maximumHotwords: Int = 0
     ) {
         self.protocolVersion = protocolVersion
         self.type = "voice_ready"
@@ -274,27 +464,55 @@ public struct VoiceReadyResponse: Codable, Equatable, Sendable {
         self.capabilities = capabilities
         self.networkPolicy = networkPolicy
         self.asrEngineID = asrEngineID
+        self.maximumHotwords = maximumHotwords
     }
 
     /// mode 为 polish 时握手能力必须包含 polish。
     public func supports(_ mode: VoiceDictationMode) -> Bool {
+        let advertised = Set(capabilities)
+        let hasASR = advertised.contains("local_asr")
+            || advertised.contains("cloud_asr")
         switch mode {
         case .direct:
-            return true
+            return hasASR
         case .polish:
-            return capabilities.contains("polish")
+            return hasASR && advertised.contains("polish")
         }
     }
 
     public var isCompatible: Bool {
-        protocolVersion == VoiceDictationConstants.protocolVersion
+        let advertised = Set(capabilities)
+        let hasLocalASR = advertised.contains("local_asr")
+        let hasCloudASR = advertised.contains("cloud_asr")
+        let supportsHotwordSnapshot = advertised.contains(
+            "hotword_snapshot"
+        )
+        let networkPolicyMatches: Bool
+        switch networkPolicy {
+        case .offline:
+            networkPolicyMatches = hasLocalASR && !hasCloudASR
+        case .cloudASROnly:
+            networkPolicyMatches = hasCloudASR
+                && !hasLocalASR
+                && !advertised.contains("polish")
+        case .cloudASRAndPolish:
+            networkPolicyMatches = (hasLocalASR || hasCloudASR)
+                && advertised.contains("polish")
+        }
+        return protocolVersion == VoiceDictationConstants.protocolVersion
             && type == "voice_ready"
             && serverID == VoiceDictationConstants.serverID
             && !capabilities.isEmpty
-            && Set(capabilities)
-                .isSubset(of: VoiceDictationConstants.serverCapabilities)
+            && advertised.count == capabilities.count
+            && advertised.isSubset(of: VoiceDictationConstants.serverCapabilities)
+            && (hasLocalASR || hasCloudASR)
+            && networkPolicyMatches
             && !asrEngineID.isEmpty
             && asrEngineID.utf8.count <= 128
+            && (supportsHotwordSnapshot
+                ? (1 ... VoiceDictationConstants.maximumHotwordCount)
+                    .contains(maximumHotwords)
+                : maximumHotwords == 0)
     }
 
     enum CodingKeys: String, CodingKey {
@@ -304,6 +522,7 @@ public struct VoiceReadyResponse: Codable, Equatable, Sendable {
         case capabilities
         case networkPolicy = "network_policy"
         case asrEngineID = "asr_engine_id"
+        case maximumHotwords = "maximum_hotwords"
     }
 }
 

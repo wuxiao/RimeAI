@@ -34,6 +34,8 @@ struct RimeAISettingsStoreTests {
         #expect(store.aiEnabled)
         #expect(store.offlineLockEnabled)
         #expect(!store.cloudConfigured)
+        #expect(!store.voiceEnabled)
+        #expect(!store.voiceRimeHotwordsEnabled)
         #expect(
             store.cloudModelID
                 == RimeAICloudConfiguration.defaultRankingModelID
@@ -230,6 +232,8 @@ struct RimeAISettingsStoreTests {
         store.aiEnabled = false
         store.offlineLockEnabled = false
         store.cloudConfigured = true
+        store.voiceEnabled = true
+        store.voiceRimeHotwordsEnabled = true
         store.cloudModelID = "glm-5.3"
         store.contextPolicy = .smart
         store.disabledAIApplications = ["com.example.Secret"]
@@ -243,6 +247,8 @@ struct RimeAISettingsStoreTests {
         #expect(store.punctuationStyle == .chinese)
         #expect(store.offlineLockEnabled)
         #expect(!store.cloudConfigured)
+        #expect(!store.voiceEnabled)
+        #expect(!store.voiceRimeHotwordsEnabled)
         #expect(
             store.cloudModelID
                 == RimeAICloudConfiguration.defaultRankingModelID
@@ -250,5 +256,18 @@ struct RimeAISettingsStoreTests {
         #expect(store.contextPolicy == .standard)
         #expect(store.disabledAIApplications.isEmpty)
         #expect(store.diagnosticSnapshot().isEmpty)
+    }
+
+    @Test("voice hotword consent is explicit and exported")
+    func voiceHotwordConsentIsExplicitAndExported() {
+        let (store, _) = makeStore()
+
+        #expect(!store.voiceRimeHotwordsEnabled)
+        store.voiceRimeHotwordsEnabled = true
+
+        let snapshot = store.exportSnapshot()
+        #expect(snapshot.schemaVersion == 5)
+        #expect(snapshot.voiceEnabled == false)
+        #expect(snapshot.voiceRimeHotwordsEnabled)
     }
 }

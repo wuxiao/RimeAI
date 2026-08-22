@@ -42,15 +42,114 @@ Qwen 增强路径；它与始终无 INET socket 的本地 daemon 是两个独立
 | 本地语义结论展示 | macOS 显式展示分析中、上下文用量、首选一致、完整候选不足、低置信度、长输入拒答、回退或可选候选 |
 | 无空格中英混输 | 连续键流按拼音/ASCII 分段；大写缩写、内置技术词和本地学到的英文词原样保留，纯拼音串保留原链路，Tab 接受独立混输建议；大小写真实 librime 样例已覆盖 |
 | iOS 过渡语义排序 | 冻结 P0 字符 n-gram 已以只读紧凑制品接入；24M 神经排序器未接入 |
-| 用户级后台生命周期 | LaunchAgent、按需启停、崩溃重启与 0600 UDS 已验证 |
-| 安装、升级、回滚、卸载 | 自包含 release 的 v1→v3、v3→v1、再升级 v5 已验证；公证/干净机器待验 |
+| 用户级后台生命周期 | LaunchAgent、按需启停、崩溃重启、失败回滚与当前用户 0700 runtime/0600 UDS（无扩展 ACL）的 fail-closed 权限门已验证 |
+| 安装、升级、回滚、卸载 | daemon 自包含 release 的 v1→v3、v3→v1、再升级 v5 已验证；输入法/语音 Release 的正式安装、回滚、公证与干净机器待验 |
 | Offline Lock | daemon 进程无 INET socket；公开版仍需系统级抓包矩阵 |
 | 可选 Qwen 云增强 | candidate-ID-only broker、Top-50/错拼扩候选、800ms 门、cloud.env 文件 API Key（0600）已接入；真实云冻结集尚待跑 |
 | 长期记忆 | 配置 API Key 后跨应用明文保存 RimeAI 上屏记录，600 字 recent + 最多 8 条 FTS/HNSW 片段；可导出、永久清除 |
-| Release 制品 | 输入法 ZIP 5.0MB；daemon 归档约 69MB、安装约 120MB；均有 SHA-256 与 Developer ID 签名 |
-| 语音听写协议层 | 独立工作流；消息校验、客户端状态机、服务端核心、UDS 传输层、Coordinator 与真实 socket 全栈回环 31 项测试通过；helper 含 Apple Speech 引擎源码并经真实 launchd 生命周期验证（识别路径待 TCC 真机验证）；UI 接线未实现 |
-| 自动化测试 | 云增强新增测试与既有本地测试通过；最新可复现命令见 `docs/CLOUD_INPUT_IMPLEMENTATION.md` |
-| 公开分发许可证放行 | 未完成；当前模型制品仅供内部 P0/P1 |
+| Release 制品 | 输入法成对 ZIP 约 6.4MB（内嵌独立签名语音 Helper）；daemon 归档约 69MB、安装约 120MB；均有 SHA-256 与 Developer ID 签名 |
+| 语音听写（实验、默认关闭） | `⌃⇧V` 按住说话、松开 final、浮层预览、Space/回车确认、Esc/切换/SEI 取消已接入。Debug 只允许显式私有 UDS；Release 只允许双向认证 NSXPC/Mach service，认证失败不回退 UDS。V2 wire 在用户另行开启默认关闭的“Rime 会话热词辅助”后，才把当前焦点会话中用户已确认的 Rime commit 变成有界、带摘要、按引擎上限协商的易失热词快照，并在 final 后销毁原生 stream。产品模型的 manifest schema v2、Store、sherpa-onnx 1.13.6 + ORT 1.27.1 静态 runtime 和真实 C backend 已实现；Debug helper 的 `evaluation-product-managed` 与独立 V0 WAV eval driver 都可严格验证并真实加载显式候选目录，但不产生发布审批。production catalog 因模型权利/来源尚未放行而为空，正式语料结果也未产出；Apple 适配器在 macOS 14/15 仅为 probe-only。这是默认关闭的 V1 交互技术探针，真实 TCC、合格产品模型、公证与干净机器门未通过，不进入公开放行 |
+| 自动化测试 | 键盘/云增强、语音协议与状态机、制品/发布策略、PCM/产品引擎、WAV→真实产品状态机的 V0 observation driver、XPC、原生性能采集器及 Python 质量门均有分层回归；各证据边界与最新可复现命令见对应设计文档，不以易过期总数代替测试输出 |
+| 公开分发许可证放行 | 未完成；语音候选只有 intake 完整性记录与非发布评测入口，没有获批 production model artifact |
+
+语音 helper 的本地模式离线边界来自 on-device 引擎门禁（本机识别不可用时
+fail-closed）和当前实现不存在云 ASR/音频上传代码路径。签名中不含 network
+entitlement 只是一项最小权限静态信号；helper 是非沙箱进程，仍须以运行态无
+INET socket/抓包审计作为发布门。
+
+语音 IPC 后端由不可变构建配置选择：ad-hoc Debug 使用当前用户 0700 runtime
+目录中的 0600 UDS（无扩展 ACL、0177 umask）；Release 使用用户级 LaunchAgent
+注册的 `fun.wwcn.rimeai.voice-helper` Mach service。Release 双端 requirement
+固定 Apple generic anchor、Developer ID 中间证书/叶证书 OID、同一 Team ID 与
+精确 bundle identifier，并在每次 XPC 调用再次校验有效 UID；每帧最多 64 KiB，
+每个方向只有一帧在途，待发队列最多 32 帧/256 KiB。签名、UID、容量或代际门
+任一失败都中止该连接，Release 不会自动降级到 UDS。
+
+正式配置的输入法 ZIP 现在是一个原子配对制品：唯一顶层
+`RimeAIInputMethod.app` 在标准 `Contents/Helpers` 位置内嵌独立签名的
+`RimeAIVoiceHelper.app`，并携带签名内的 LaunchAgent 模板与 fail-closed
+语音发布策略。Release LaunchAgent 只传 executable 与固定 Mach service，不能用
+用户可写 argv 选择引擎；helper 在初始化模型、TCC 或 IPC server 前复验自身 exact
+identifier、Developer ID Team/OID 与完整 bundle 资源封印，再严格读取 schema 2
+策略。策略同时绑定 code-shipped trusted catalog v2 全字段的 canonical SHA-256，
+其中包括来源审核、模型权利审核、再分发审核 ID，以及 schema v2 质量报告顶层的
+`quality_report_sha256`；宿主与 helper 内副本必须逐字一致。Swift 只校验该摘要的
+形状并把它纳入 catalog；首个生产 approval 前，发布流程还必须重算摘要、确认
+`quality_gate_pass == true` 并逐字段核对产品制品 provenance。两端必须使用同一 Team、
+相同 version/build；Release 运行时直接
+执行 nested helper，不再复制第二份可漂移的可执行文件到 Application Support。
+渲染后的 LaunchAgent 还绑定当前 host build 与签名 policy 文件 SHA-256；原位升级
+即使路径不变、甚至误复用 build number，只要策略变化也会强制替换旧 helper
+进程，避免新输入法继续复用已撤回策略的运行态。
+当前策略明确记录 Apple Speech 为 `system_managed`、
+`ReleaseEligible=false`，并绑定当前空 production catalog；它不会把尚未完成
+模型来源、再分发与质量门的 product-managed 分支放行。
+
+语音 V0 的 corpus、run、observations、聚合指标、隐私约束和质量门报告合同见
+[`docs/VOICE_EVAL_FORMAT.md`](docs/VOICE_EVAL_FORMAT.md)。`validate-voice` 可验证
+外部受控语料；`collect-voice-observations` 会把冻结 PCM16 WAV 通过真实 artifact
+verifier、sherpa loader、产品流式引擎与 ServerCore 生成严格 observations；
+`evaluate-voice` 只输出不含逐句原文的聚合报告。该回放在 session 前预读、哈希、
+转换音频并加载模型，因此只提供候选质量/流式信号，不是 cold-load、TCC、键盘或
+真机发布证据。未传 gates 时报告固定为 `measurement_only`，不得出现
+`quality_gate_pass`；当前 schema-v3 performance sidecar 又固定公开
+`authenticated_production_driver=false`，所以提供 gates 也只能得到
+`policy_incomplete`/退出码 1，不能由 gates 或用户输入把它提升为 true。未来完整
+authenticated control plane 落地后必须使用新证据 schema。即使后续质量门通过，
+模型权利、TCC、运行态隐私、公证和干净机器等产品发布门仍须独立完成。仓库只
+提交运行时生成的合成 WAV 测试夹具，正式授权录音与逐句转录不进入 Git。
+
+`collect-voice-performance` 现已接通一个独立的 macOS native collector：它用
+`mach_continuous_time` 和 `proc_pid_rusage(RUSAGE_INFO_V6)` 采集输入法、候选服务、
+voice helper 三进程 cohort，并复验 PID generation、UID、规范路径、CDHash、exact
+identifier、Team 与 Developer ID requirement；Python 只转发无文本实时边界、绑定
+corpus/run/制品身份并原子写入 schema-v3 sidecar。质量 gates v2 还要求获批的
+collection-protocol 摘要、冷加载/键盘/partial/final/cancel/churn/子集分母，以及
+五类迟到挑战的独立最小次数；空值、零值或只有一次的稀疏证据不能再隐式冒充完整
+证据。collector 自身也必须先做 Developer ID 签名再冻结 SHA-256，普通 ad-hoc
+SwiftPM build 会 fail-closed。当前尚缺与真实语音回放和键盘阶段相连的受控
+production driver 及真机证据，因此 pipe/合成 marker 的通过只能证明采集器合同，
+不能获得 release gate 资格；Python evaluator 已把该缺口作为固定 false 写入聚合
+metrics/provenance，并让 gate policy 与 performance evidence completeness fail-closed。
+
+产品管理本地 ASR 的 manifest、逐文件 hash、目录权限、`current` / `previous`
+原子 selector 与证据边界见
+[`docs/VOICE_ASR_ARTIFACT.md`](docs/VOICE_ASR_ARTIFACT.md)。这层只证明本地内容
+完整性，不证明来源签名、许可证、质量或 Release 资格。manifest schema v2 只
+记录制品事实并拒绝 v1 与 legacy `redistribution_approved` 键；再分发决定和
+`VoiceASRReleaseEvidence` 只存在于 code-shipped catalog。当前仓库没有下载或
+接入任何获批产品语音模型。
+
+已通过的自动化覆盖：9 消息编解码与状态机、真实私有 UDS 回环和 ACL/权限门、
+匿名 NSXPC 回环、首个合法 `voice_hello` promotion、旧连接/旧核心 epoch 丢弃、
+认证前回调拒绝、错误 UID ping、64 KiB 帧界限、单飞 FIFO/溢出/NACK，以及
+安装器的 Debug/Release 传输选择、Developer ID requirement 构造、完整
+`voice_ready` 解析和失败回滚。
+这些测试与面向 macOS 14 SDK 的编译探针不等于真实发布验证。
+
+直接启动 Debug helper 时，候选评测只接受 exact 形式
+`--socket <path> --engine evaluation-product-managed --artifact-dir <absolute-canonical-directory>`。
+该路径以严格 verifier 和真实 sherpa loader 处理
+调用方明确选择的目录，但不读写产品 Store、publisher、selector 或 trusted
+catalog；helper 的该 argv dispatch 由 Debug 编译条件隔离，不能出现在 Release
+argv/policy 中。候选能够
+被验证或加载不代表真实质量、TCC、资源、不落盘或识别态 no-INET 已通过。
+
+独立 `rimeai-voice-eval-driver --plan <owner-only-plan>` 则是非发布的 V0 回放工具：
+它可用 Release 优化构建复用同一 evaluation factory，但不嵌入输入法/helper 包，
+不进入 Release helper argv/policy，也不读写产品 Store、selector 或 trusted catalog。
+
+ad-hoc 开发安装器默认打包用于链路验证的 `apple-speech` on-device 引擎，但不创建
+启用 marker、也不启动 LaunchAgent；`--engine unavailable` 仅用于显式验证不可用
+故障路径。Developer ID helper 只允许 `--build-only` 并作为正式输入法 ZIP 的 nested
+组件，不能再形成第二种 standalone Release 安装拓扑。该 Apple 适配器在 macOS 14/15
+不满足 PRD 的产品管理资产要求，
+不能因静态签名或协议测试通过而获得发布资格。是否启用语音仍由设置中心的
+默认关闭开关决定。尚未完成的语音发布
+门是：当前已静态验签的 Developer ID 配对 App 在安装后通过命名 Mach service
+完成真实双向连接、真实 macOS 14 运行、麦克风与 Speech Recognition TCC
+全流程、公证/stapling/Gatekeeper，以及清洁机器上的安装、错峰升级、回滚和
+宿主/设备矩阵。
 
 完整证据与放行边界见 [P0_EVIDENCE.md](docs/P0_EVIDENCE.md)。P0 文件中的
 测试数量是当时的冻结快照；当前仓库测试数量以本轮测试输出为准。
@@ -121,7 +220,8 @@ licensed source text
 ## 仓库组成
 
 - `rimeai_eval/`：数据校验、采集、训练、评测和本地进程协议。
-- `Sources/`、`Package.swift`：真实 librime C/C++ 桥和 Swift 候选服务。
+- `Sources/`、`Package.swift`：真实 librime C/C++ 桥、Swift 候选服务、语音 helper、
+  product-managed ASR 基础设施与独立 macOS 性能采集器。
 - `tools/`：冻结数据构造和模型工作进程。
 - `script/`：本地候选、排序和整句服务入口。
 - `scripts/`：Rime 数据、语料、模型及干净 Python 包构建脚本。
@@ -297,7 +397,7 @@ script/build_and_run.sh --settings
 script/install_debug_input_method.sh
 ```
 
-构建 Developer ID 签名的正式配置输入法 ZIP：
+构建 Developer ID 签名的正式配置成对 ZIP（输入法内嵌同版本语音 Helper）：
 
 ```bash
 RIMEAI_CODE_SIGN_IDENTITY='Developer ID Application: NAME (TEAMID)' \
@@ -318,8 +418,8 @@ script/install_release_daemon.sh \
 script/rollback_release_daemon.sh
 ```
 
-使用 Developer ID 安装时，显式传入证书、私钥和身份。脚本使用一次性隔离
-钥匙串，并在退出时恢复原钥匙串搜索列表：
+下列源码签名安装器仍是开发工具：它使用一次性隔离钥匙串，但当前走 Debug
+构建，不能代替上面的 Release ZIP、认证 XPC 或公开安装/升级门：
 
 ```bash
 RIMEAI_DEVELOPER_ID_CERTIFICATE=/path/to/developer-id.cer \
@@ -344,7 +444,10 @@ RimeAI。它仍不是可公开分发的安装包。
 
 输入法 ZIP 不保留 resource fork/扩展属性，并由验证器使用普通 `unzip`
 解包后检查无 AppleDouble `._*`、arm64/macOS 14、受控 librime 符号、
-Developer ID hardened runtime 和 `codesign --deep --strict`。
+Developer ID hardened runtime、两端同 Team/同版本、Helper entitlement 精确
+白名单、LaunchAgent authenticated-XPC 合同和
+`ReleaseEligible=false`。公证脚本在提交成功后分别 staple/validate
+nested helper 与外层 App，再重新生成 ZIP。
 
 配置 Apple `notarytool` keychain profile 后，公证和 stapling 使用：
 
@@ -359,7 +462,13 @@ scripts/notarize_macos_input_method.sh \
 
 - [P0_FORMATS.md](docs/P0_FORMATS.md)：候选与整句进程协议。
 - [VOICE_INPUT_DESIGN.md](docs/VOICE_INPUT_DESIGN.md)：语音听写独立
-  工作流的设计与协议草案（`ACCEPTED TARGET STATE`，未实现）。
+  工作流、协议与当前内部原型实现证据。
+- [VOICE_ASR_ARTIFACT.md](docs/VOICE_ASR_ARTIFACT.md)：语音制品 schema v2、
+  publisher/selector、Debug evaluation 与 trusted catalog v2 审批边界。
+- [VOICE_ASR_RUNTIME_INTAKE.md](docs/VOICE_ASR_RUNTIME_INTAKE.md)：固定
+  sherpa/ORT runtime 身份、许可证/notices 与候选模型 intake 门。
+- [VOICE_IPC_SECURITY.md](docs/VOICE_IPC_SECURITY.md)：Debug 私有 UDS、Release
+  双向认证 NSXPC/Mach service 的实现边界与尚未完成的真实发布验证。
 - [P0_EVIDENCE.md](docs/P0_EVIDENCE.md)：冻结哈希、指标和放行决定。
 - [P1_IMPLEMENTATION_EVIDENCE.md](docs/P1_IMPLEMENTATION_EVIDENCE.md)：
   输入法、daemon、隐私和安装生命周期证据。

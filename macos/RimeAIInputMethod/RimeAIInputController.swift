@@ -4,7 +4,9 @@ import InputMethodKit
 
 @objc(RimeAIInputController)
 @MainActor
-final class RimeAIInputController: IMKInputController, @unchecked Sendable {
+final class RimeAIInputController: IMKInputController,
+    VoiceDictationRuntimeOwner, @unchecked Sendable
+{
     private static var contextStore = SessionContextStore(maxCharacters: 100)
 
     private let sessionNonce = UUID().uuidString
@@ -29,8 +31,13 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
     private var semanticContextCharacterCount = 0
     private weak var activeClientObject: AnyObject?
     private var currentBundleIdentifier: String?
+    private var hostFocusEpoch: UInt64 = 0
     private var settingsObservers: [NSObjectProtocol] = []
     private let settings = RimeAISettingsStore.shared
+    private var voiceHotKeyRegistrationFailed = false
+    private var voiceHotKeyIsRegistered = false
+    private var isHostActive = false
+    private var voiceHotwordAdmission = VoiceHotwordAdmissionState()
 
     override init!(
         server: IMKServer!,
@@ -55,6 +62,14 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
         for observer in settingsObservers {
             NotificationCenter.default.removeObserver(observer)
         }
+        // IMK controllers normally die on main. Do not call assumeIsolated
+        // off-main; runtime/HotKeyManager hold owners weakly and their timers
+        // invalidate an owner that has disappeared.
+        if Thread.isMainThread {
+            MainActor.assumeIsolated {
+                VoiceDictationRuntime.shared.deactivate(owner: self)
+            }
+        }
     }
 
     override nonisolated func activateServer(_ sender: Any!) {
@@ -63,20 +78,30 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
             guard let client = sender as? any IMKTextInput else {
                 return
             }
-            activeClientObject = sender as AnyObject
+            beginHostActivation(sender as AnyObject)
             activateSession(for: client)
             if IsSecureEventInputEnabled() {
                 enterSecureInput(client: client)
+            } else {
+                VoiceDictationRuntime.shared.secureInputChanged(
+                    active: false,
+                    owner: self
+                )
+                configureVoiceHotKey()
             }
         }
     }
 
     override nonisolated func deactivateServer(_ sender: Any!) {
         MainActor.assumeIsolated {
+            VoiceDictationRuntime.shared.deactivate(owner: self)
+            voiceHotKeyIsRegistered = false
+            isHostActive = false
             invalidateInference(clearPresentation: true)
             candidatePanel.hide()
             composition.reset()
             Self.contextStore.suspend(ownerID: sessionNonce)
+            voiceHotwordAdmission.deactivate()
             activeClientObject = nil
         }
         super.deactivateServer(sender)
@@ -100,7 +125,11 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
         else {
             return false
         }
-        activeClientObject = sender as AnyObject
+        if isHostActive {
+            adoptActiveClient(sender as AnyObject)
+        } else {
+            beginHostActivation(sender as AnyObject)
+        }
         activateSession(for: client)
 
         if IsSecureEventInputEnabled() {
@@ -115,7 +144,41 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
                 sessionID: client.bundleIdentifier() ?? "unknown-client",
                 ownerID: sessionNonce
             )
+            VoiceDictationRuntime.shared.secureInputChanged(
+                active: false,
+                owner: self
+            )
+            configureVoiceHotKey()
         }
+
+        let voiceRuntime = VoiceDictationRuntime.shared
+        let voiceDecision = VoiceDictationKeyRouter.decision(
+            keyCode: event.keyCode,
+            isExactVoiceShortcut: isVoiceShortcut(event),
+            shortcutRegistered: voiceHotKeyIsRegistered,
+            hasActiveSession: voiceRuntime.isActive(owner: self),
+            pendingConfirmation: voiceRuntime.isPendingConfirmation(owner: self),
+            isPlainConfirmationKey: VoiceDictationKeyRouter
+                .isPlainConfirmation(
+                    modifiers: voiceKeyModifiers(event.modifierFlags)
+                )
+        )
+        switch voiceDecision {
+        case .consumeShortcut:
+            return true
+        case .confirm:
+            voiceRuntime.confirm(owner: self)
+            return true
+        case .cancelAndConsume:
+            cancelVoiceDictation()
+            return true
+        case .cancelAndContinue:
+            // 先使语音目标永久失效，再继续原有键盘路径。
+            cancelVoiceDictation()
+        case .passThrough:
+            break
+        }
+        voiceRuntime.dismissTransientPanel(owner: self)
 
         let modifiers = event.modifierFlags.intersection(
             [.command, .control, .option]
@@ -203,6 +266,7 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
                 composition.pinyin + String(character),
                 client: client
             )
+            configureVoiceHotKey()
             return true
         }
 
@@ -230,6 +294,8 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
         guard let client = sender as? any IMKTextInput else {
             return
         }
+        cancelVoiceDictation()
+        adoptActiveClient(sender as AnyObject)
         if !composition.mainCandidates.isEmpty {
             selectMainCandidate(index: 0, client: client)
         } else if !composition.pinyin.isEmpty {
@@ -302,6 +368,15 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
             selected: preferences.punctuationStyle == .western
         ))
         menu.addItem(.separator())
+        let voiceItem = NSMenuItem(
+            title: RimeAISettingsStore.shared.voiceEnabled
+                ? "语音听写已开启（按住 \(VoiceHotKeyManager.displayShortcut)）"
+                : "设置语音听写…",
+            action: #selector(showPrivacyCenter(_:)),
+            keyEquivalent: ""
+        )
+        voiceItem.target = self
+        menu.addItem(voiceItem)
         let settingsItem = NSMenuItem(
             title: "RimeAI 设置…",
             action: #selector(showPrivacyCenter(_:)),
@@ -361,15 +436,21 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
         currentBundleIdentifier = bundleIdentifier
         prewarmHistoryEnglishTokens(for: bundleIdentifier)
         let sessionID = applicationSessionID(for: client)
+        voiceHotwordAdmission.activate(
+            session: voiceHotwordSession(for: client),
+            policy: voiceHotwordPolicy(for: bundleIdentifier)
+        )
         Self.contextStore.activate(
             sessionID: bundleIdentifier,
             ownerID: sessionNonce
         )
         if composition.appSessionID != sessionID {
+            VoiceDictationRuntime.shared.sessionSwitched(owner: self)
             invalidateInference(clearPresentation: true)
             candidatePanel.hide()
             composition.switchApplicationSession(to: sessionID)
         }
+        configureVoiceHotKey()
     }
 
     private func applicationSessionID(
@@ -377,13 +458,246 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
     ) -> String {
         let bundleIdentifier = client.bundleIdentifier()
             ?? "unknown-client"
-        return "\(bundleIdentifier)#\(sessionNonce)"
+        return "\(bundleIdentifier)#\(sessionNonce)#\(hostFocusEpoch)"
+    }
+
+    private func voiceHotwordSession(
+        for client: any IMKTextInput
+    ) -> VoiceHotwordAdmissionSession {
+        VoiceHotwordAdmissionSession(
+            applicationIdentifier: client.bundleIdentifier()
+                ?? "unknown-client",
+            controllerSessionIdentifier: sessionNonce,
+            focusEpoch: hostFocusEpoch
+        )
+    }
+
+    private func voiceHotwordPolicy(
+        for bundleIdentifier: String
+    ) -> VoiceHotwordAdmissionPolicy {
+        VoiceHotwordAdmissionPolicy(
+            isVoiceEnabled: settings.voiceEnabled,
+            isAIAllowed: settings.isAIAllowed(for: bundleIdentifier),
+            isHotwordAssistEnabled: settings.voiceRimeHotwordsEnabled,
+            contextPolicy: settings.contextPolicy(for: bundleIdentifier),
+            isSecureInput: composition.isSecureInput
+                || IsSecureEventInputEnabled()
+        )
+    }
+
+    private func adoptActiveClient(_ clientObject: AnyObject) {
+        if let activeClientObject, activeClientObject !== clientObject {
+            VoiceHotKeyManager.shared.deactivate(owner: self)
+            voiceHotKeyIsRegistered = false
+            VoiceDictationRuntime.shared.sessionSwitched(owner: self)
+            hostFocusEpoch &+= 1
+        }
+        activeClientObject = clientObject
+    }
+
+    private func beginHostActivation(_ clientObject: AnyObject) {
+        isHostActive = true
+        VoiceHotKeyManager.shared.deactivate(owner: self)
+        voiceHotKeyIsRegistered = false
+        VoiceDictationRuntime.shared.claim(owner: self)
+        VoiceDictationRuntime.shared.sessionSwitched(owner: self)
+        hostFocusEpoch &+= 1
+        activeClientObject = clientObject
+    }
+
+    private func isVoiceShortcut(_ event: NSEvent) -> Bool {
+        guard event.keyCode == UInt16(kVK_ANSI_V) else {
+            return false
+        }
+        return VoiceDictationKeyRouter.isExactVoiceShortcut(
+            modifiers: voiceKeyModifiers(event.modifierFlags)
+        )
+    }
+
+    private func voiceKeyModifiers(
+        _ modifiers: NSEvent.ModifierFlags
+    ) -> VoiceDictationKeyModifiers {
+        let semantic = modifiers.intersection(.deviceIndependentFlagsMask)
+        var result: VoiceDictationKeyModifiers = []
+        let mapping: [(NSEvent.ModifierFlags, VoiceDictationKeyModifiers)] = [
+            (.capsLock, .capsLock),
+            (.shift, .shift),
+            (.control, .control),
+            (.option, .option),
+            (.command, .command),
+            (.numericPad, .numericPad),
+            (.help, .help),
+            (.function, .function),
+        ]
+        for (appKitFlag, voiceFlag) in mapping
+        where semantic.contains(appKitFlag) {
+            result.insert(voiceFlag)
+        }
+        return result
+    }
+
+    private func startVoiceDictation(
+        client: any IMKTextInput
+    ) -> Bool {
+        let bundleIdentifier = client.bundleIdentifier()
+            ?? "unknown-client"
+        guard canStartVoiceDictation(client: client),
+              let clientObject = activeClientObject
+        else {
+            configureVoiceHotKey()
+            return false
+        }
+        let selection = client.selectedRange()
+        guard selection.location != NSNotFound else {
+            settings.record(.voiceFailure)
+            return false
+        }
+        guard let anchor = voiceCaretRect(
+            client: client,
+            characterIndex: selection.location
+        ) else {
+            // 语音最终会直接上屏；拿不到由宿主返回的真实 caret 时必须
+            // fail closed，不能沿用候选窗的鼠标位置回退。
+            settings.record(.voiceFailure)
+            return false
+        }
+        candidatePanel.hide()
+        let started = VoiceDictationRuntime.shared.start(
+            owner: self,
+            client: clientObject,
+            context: VoiceDictationSessionContext(
+                compositionID: UUID(),
+                appSessionID: applicationSessionID(for: client),
+                bundleID: bundleIdentifier,
+                hotwordSnapshot: voiceHotwordSnapshot(for: client)
+            ),
+            selection: selection,
+            anchorRect: anchor
+        )
+        return started
+    }
+
+    private func voiceHotwordSnapshot(
+        for client: any IMKTextInput
+    ) -> VoiceHotwordSnapshot {
+        let bundleIdentifier = client.bundleIdentifier() ?? "unknown-client"
+        let session = voiceHotwordSession(for: client)
+        voiceHotwordAdmission.activate(
+            session: session,
+            policy: voiceHotwordPolicy(for: bundleIdentifier)
+        )
+        return voiceHotwordAdmission.snapshot(session: session)
+    }
+
+    private func recordVoiceHotwordFromRimeCommit(
+        _ committedText: String?,
+        matching expectedText: String? = nil,
+        client: any IMKTextInput
+    ) {
+        let bundleIdentifier = client.bundleIdentifier() ?? "unknown-client"
+        let session = voiceHotwordSession(for: client)
+        voiceHotwordAdmission.activate(
+            session: session,
+            policy: voiceHotwordPolicy(for: bundleIdentifier)
+        )
+        voiceHotwordAdmission.recordRimeCommitResult(
+            committedText,
+            matching: expectedText,
+            session: session
+        )
+    }
+
+    private func canStartVoiceDictation(
+        client: any IMKTextInput
+    ) -> Bool {
+        let bundleIdentifier = client.bundleIdentifier()
+            ?? "unknown-client"
+        return settings.voiceEnabled
+            && isHostActive
+            && settings.isAIAllowed(for: bundleIdentifier)
+            && composition.pinyin.isEmpty
+            && client.markedRange().location == NSNotFound
+            && !composition.isSecureInput
+            && !IsSecureEventInputEnabled()
+    }
+
+    private func finishVoiceDictation() {
+        VoiceDictationRuntime.shared.stop(owner: self)
+    }
+
+    private func cancelVoiceDictation() {
+        VoiceDictationRuntime.shared.cancel(owner: self)
+    }
+
+    private func configureVoiceHotKey() {
+        let runtime = VoiceDictationRuntime.shared
+        if IsSecureEventInputEnabled() {
+            // 覆盖 Carbon 轮询 tick 之间刚进入 Secure Input 的窗口，并
+            // 记录本 controller 的安全态，以便后续真实键事件恢复注册。
+            enterSecureInputIfPossible()
+            return
+        }
+        let activeInputClient = activeClientObject as? any IMKTextInput
+        let bundleIdentifier = currentBundleIdentifier
+            ?? activeInputClient?.bundleIdentifier()
+            ?? "unknown-client"
+        let canRegister = isHostActive
+            && activeInputClient != nil
+            && settings.voiceEnabled
+            && settings.isAIAllowed(for: bundleIdentifier)
+            && composition.pinyin.isEmpty
+            && activeInputClient?.markedRange().location == NSNotFound
+            && !composition.isSecureInput
+            && runtime.canRegisterHotKey
+        guard canRegister else {
+            VoiceHotKeyManager.shared.deactivate(owner: self)
+            voiceHotKeyIsRegistered = false
+            return
+        }
+        do {
+            try VoiceHotKeyManager.shared.activate(
+                owner: self,
+                onPressed: { [weak self] in
+                    guard let self,
+                          let client = self.activeClientObject
+                            as? any IMKTextInput
+                    else {
+                        return
+                    }
+                    if !VoiceDictationRuntime.shared.isActive(owner: self) {
+                        _ = self.startVoiceDictation(client: client)
+                    }
+                },
+                onReleased: { [weak self] in
+                    guard let self else {
+                        return
+                    }
+                    self.finishVoiceDictation()
+                },
+                onSecureInputDetected: { [weak self] in
+                    guard let self else {
+                        return
+                    }
+                    self.voiceHotKeyIsRegistered = false
+                    self.enterSecureInputIfPossible()
+                }
+            )
+            voiceHotKeyIsRegistered = true
+            voiceHotKeyRegistrationFailed = false
+        } catch {
+            voiceHotKeyIsRegistered = false
+            if !voiceHotKeyRegistrationFailed {
+                settings.record(.voiceFailure)
+            }
+            voiceHotKeyRegistrationFailed = true
+        }
     }
 
     private func compositionInput(
         _ rawInput: String,
         client: any IMKTextInput
     ) {
+        cancelVoiceDictation()
         invalidateInference()
         mixedCompositionSuggestion = nil
         let rimeInput = rawInput.lowercased()
@@ -405,6 +719,7 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
             pinyin: rawInput,
             candidates: candidates
         )
+        configureVoiceHotKey()
         semanticHistorySource = .localSemantic
         semanticCloudCandidate = nil
         cloudSuggestionApplied = false
@@ -1037,9 +1352,19 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
                 self.selectSemanticCandidate(candidate, client: client)
             }
         )
+        candidatePanel.show(anchorRect: cursorAnchorRect(
+            client: client,
+            characterIndex: 0
+        ))
+    }
+
+    private func cursorAnchorRect(
+        client: any IMKTextInput,
+        characterIndex: Int
+    ) -> NSRect {
         var cursorRect = NSRect.zero
         _ = client.attributes(
-            forCharacterIndex: 0,
+            forCharacterIndex: max(0, characterIndex),
             lineHeightRectangle: &cursorRect
         )
         if cursorRect.isEmpty {
@@ -1048,7 +1373,27 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
                 size: NSSize(width: 1, height: 20)
             )
         }
-        candidatePanel.show(anchorRect: cursorRect)
+        return cursorRect
+    }
+
+    private func voiceCaretRect(
+        client: any IMKTextInput,
+        characterIndex: Int
+    ) -> NSRect? {
+        var caretRect = NSRect.zero
+        _ = client.attributes(
+            forCharacterIndex: max(0, characterIndex),
+            lineHeightRectangle: &caretRect
+        )
+        guard !caretRect.isEmpty,
+              caretRect.origin.x.isFinite,
+              caretRect.origin.y.isFinite,
+              caretRect.size.width.isFinite,
+              caretRect.size.height.isFinite
+        else {
+            return nil
+        }
+        return caretRect
     }
 
     private func selectMainCandidate(
@@ -1072,10 +1417,12 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
             : nil
         composition.beginSelection()
         invalidateInference()
-        let committed = RimeEngine.shared.commitCandidate(
+        let rimeCommitted = RimeEngine.shared.commitCandidate(
             pinyin: pinyin,
             index: index
-        ) ?? fallback
+        )
+        let committed = rimeCommitted ?? fallback
+        recordVoiceHotwordFromRimeCommit(rimeCommitted, client: client)
         if acceptedViaSemanticCandidate {
             recordSemanticAcceptance(decision: semanticDecision)
         } else {
@@ -1130,6 +1477,7 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
             settings.learnPersonalEnglishTokens(tokens)
         }
         let committedCandidate: String
+        let rimeCommitResult: String?
         if let cloudCandidate,
            let rimeIndex = cloudCandidate.rimeIndex
         {
@@ -1137,12 +1485,19 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
                 pinyin: cloudCandidate.alignedPinyin,
                 index: rimeIndex
             )
+            rimeCommitResult = committed
             committedCandidate = committed == candidate
                 ? committed ?? candidate
                 : candidate
         } else {
+            rimeCommitResult = nil
             committedCandidate = candidate
         }
+        recordVoiceHotwordFromRimeCommit(
+            rimeCommitResult,
+            matching: candidate,
+            client: client
+        )
         commitText(
             committedCandidate,
             source: semanticHistorySource,
@@ -1249,12 +1604,20 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
         if !preserveContext {
             Self.contextStore.deactivate()
         }
+        configureVoiceHotKey()
     }
 
     private func enterSecureInput(client: any IMKTextInput) {
+        VoiceDictationRuntime.shared.secureInputChanged(
+            active: true,
+            owner: self
+        )
+        VoiceHotKeyManager.shared.deactivate(owner: self)
+        voiceHotKeyIsRegistered = false
         invalidateInference(clearPresentation: true)
         composition.enterSecureInput()
         Self.contextStore.enterSecureInput()
+        voiceHotwordAdmission.enterSecureInput()
         client.setMarkedText(
             "",
             selectionRange: NSRange(location: 0, length: 0),
@@ -1266,9 +1629,16 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
 
     private func enterSecureInputIfPossible() {
         guard let client = activeClientObject as? any IMKTextInput else {
+            VoiceDictationRuntime.shared.secureInputChanged(
+                active: true,
+                owner: self
+            )
+            VoiceHotKeyManager.shared.deactivate(owner: self)
+            voiceHotKeyIsRegistered = false
             invalidateInference(clearPresentation: true)
             composition.enterSecureInput()
             Self.contextStore.enterSecureInput()
+            voiceHotwordAdmission.enterSecureInput()
             return
         }
         enterSecureInput(client: client)
@@ -1369,11 +1739,25 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
                 self?.clearEphemeralData()
             }
         }
-        settingsObservers = [settingsObserver, clearObserver]
+        settingsObservers = [
+            settingsObserver,
+            clearObserver,
+        ]
     }
 
     private func applyChangedSettings() {
         RimeEngine.shared.apply(settings.inputPreferences)
+        if !settings.voiceEnabled {
+            cancelVoiceDictation()
+        }
+        if let currentBundleIdentifier {
+            voiceHotwordAdmission.updatePolicy(
+                voiceHotwordPolicy(for: currentBundleIdentifier)
+            )
+        } else {
+            voiceHotwordAdmission.deactivate()
+        }
+        configureVoiceHotKey()
         if let client = activeClientObject as? any IMKTextInput,
            !composition.pinyin.isEmpty
         {
@@ -1388,7 +1772,12 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
             invalidateCurrentResult()
             Self.contextStore.deactivate()
         }
+        if settings.contextPolicy(for: currentBundleIdentifier) == .strict {
+            cancelVoiceDictation()
+        }
         if !settings.isAIAllowed(for: currentBundleIdentifier) {
+            cancelVoiceDictation()
+            configureVoiceHotKey()
             DaemonClient.shared.disconnect()
         }
         if !settings.cloudConfigured {
@@ -1399,6 +1788,93 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
         }
     }
 
+    // MARK: - VoiceDictationRuntimeOwner
+
+    func voiceRuntimeTargetIsValid(
+        client: AnyObject,
+        appSessionID: String,
+        selection: NSRange,
+        anchorRect: NSRect
+    ) -> Bool {
+        guard activeClientObject === client,
+              let inputClient = client as? any IMKTextInput,
+              applicationSessionID(for: inputClient) == appSessionID,
+              currentBundleIdentifier
+                == (inputClient.bundleIdentifier() ?? "unknown-client"),
+              composition.pinyin.isEmpty,
+              inputClient.markedRange().location == NSNotFound,
+              !composition.isSecureInput,
+              !IsSecureEventInputEnabled(),
+              inputClient.selectedRange() == selection
+        else {
+            return false
+        }
+        guard let currentAnchor = voiceCaretRect(
+            client: inputClient,
+            characterIndex: selection.location
+        ) else {
+            return false
+        }
+        return voiceRectsMatch(anchorRect, currentAnchor)
+    }
+
+    func voiceRuntimeCommit(
+        _ text: String,
+        client: AnyObject,
+        appSessionID: String,
+        selection: NSRange,
+        anchorRect: NSRect
+    ) -> Bool {
+        guard voiceRuntimeTargetIsValid(
+            client: client,
+            appSessionID: appSessionID,
+            selection: selection,
+            anchorRect: anchorRect
+        ),
+        let inputClient = client as? any IMKTextInput,
+        !text.isEmpty,
+        text.count <= VoiceDictationConstants.maximumTextCharacters,
+        !text.contains("\n"),
+        !text.contains("\r")
+        else {
+            return false
+        }
+
+        inputClient.insertText(text, replacementRange: notFoundRange)
+        if let currentBundleIdentifier,
+           settings.isAIAllowed(for: currentBundleIdentifier),
+           settings.contextPolicy(for: currentBundleIdentifier) != .strict
+        {
+            // 只进入易失的当前应用上下文；语音文本不写入长期历史。
+            Self.contextStore.appendCommittedText(text)
+        } else {
+            Self.contextStore.deactivate()
+        }
+        return true
+    }
+
+    func voiceRuntimeDidBecomeUnavailable() {
+        VoiceHotKeyManager.shared.deactivate(owner: self)
+        voiceHotKeyIsRegistered = false
+    }
+
+    func voiceRuntimeDidBecomeAvailable() {
+        voiceHotKeyRegistrationFailed = false
+        configureVoiceHotKey()
+    }
+
+    func voiceRuntimeSecureInputDetected() {
+        enterSecureInputIfPossible()
+    }
+
+    private func voiceRectsMatch(_ lhs: NSRect, _ rhs: NSRect) -> Bool {
+        let tolerance: CGFloat = 1
+        return abs(lhs.minX - rhs.minX) <= tolerance
+            && abs(lhs.minY - rhs.minY) <= tolerance
+            && abs(lhs.width - rhs.width) <= tolerance
+            && abs(lhs.height - rhs.height) <= tolerance
+    }
+
     private func transformedLiteral(_ literal: String) -> String? {
         RimeAIInputTextTransformer.transformedLiteral(
             literal,
@@ -1407,6 +1883,8 @@ final class RimeAIInputController: IMKInputController, @unchecked Sendable {
     }
 
     private func clearEphemeralData() {
+        cancelVoiceDictation()
+        voiceHotwordAdmission.clear()
         historyEnglishTokensGeneration &+= 1
         historyEnglishTokens = []
         historyEnglishTokensLoaded = false

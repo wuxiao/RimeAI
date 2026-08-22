@@ -67,11 +67,11 @@
 | 隐私控制与数据生命周期 | `CHECKED IMPLEMENTATION` | 三档上下文、应用策略、无原文诊断、制品哈希、可恢复清理已实现 |
 | 用户级 daemon 生命周期 | `CHECKED IMPLEMENTATION` | 自包含 ONNX release、LaunchAgent、版本化升级/回滚、0600 UDS、无 INET 描述符已验证 |
 | 受控 macOS librime | `CHECKED IMPLEMENTATION` | 固定源码、静态 arm64 XCFramework、macOS 14、无 Homebrew 运行依赖 |
-| Developer ID Release 制品 | `CHECKED IMPLEMENTATION` | 输入法 ZIP 与 daemon 归档均完成 hardened-runtime 签名、时间戳和哈希验证 |
-| 语音听写协议层（独立工作流） | `CHECKED IMPLEMENTATION` | 8 消息逐字段校验、客户端状态机（显式确认上屏、熔断）、引擎无关服务端核心（latest-wins、恰好一次投递）、UDS 传输层、Coordinator 粘合层与真实 socket 全栈回环共 31 项测试通过；helper 可执行（含 Apple Speech on-device 引擎源码，识别路径待 TCC 真机验证）经真实 launchd 生命周期验证（bootstrap、KeepAlive 重启、bootout 卸载）；UI 接线与冻结语音集未实现，见 `docs/VOICE_INPUT_DESIGN.md` 第 8 节 |
+| Developer ID Release 制品 | `CHECKED IMPLEMENTATION` | 输入法成对 ZIP（同 Team/version 的 nested voice helper）与 daemon 归档均完成 hardened-runtime 签名、时间戳和哈希验证；公证仍是外部门 |
+| 语音听写链路与 V0 评测工具（独立工作流） | `CHECKED IMPLEMENTATION` | 9 消息 V2 严格协议、客户端/服务端状态机、Coordinator、私有 UDS、Release 认证 NSXPC、helper、按住说话浮层与设置生命周期均已接线并有自动化覆盖；只有另行明示开启默认关闭的会话热词策略后，当前焦点会话的已确认 Rime commit 才会以有界摘要快照传入声明支持热词的引擎。sherpa-onnx 1.13.6 + ORT 1.27.1 静态 runtime、真实 C backend、冻结 corpus loader、评分器与产品模型 manifest/store 基础层已实现。当前 Apple Speech 仍是 probe-only；production catalog 因模型权利/来源未完成而为空，正式授权录音、真实 TCC/设备、运行态隐私、公证和清洁机结果待外部验收，见 `docs/VOICE_INPUT_DESIGN.md`、`docs/VOICE_EVAL_FORMAT.md` 与 `docs/VOICE_ASR_ARTIFACT.md` |
 | 自动测试 | `CHECKED IMPLEMENTATION` | Swift 47 passed；云 broker/evaluation/index 新增 Python 测试通过，完整命令与沙箱限制见 `docs/CLOUD_INPUT_IMPLEMENTATION.md` |
 | Apple Development 签名构建 | `CHECKED IMPLEMENTATION` | codesign 通过；保留为本地开发路径 |
-| Developer ID hardened-runtime 签名 | `CHECKED IMPLEMENTATION` | 主 App 与内嵌 dylib 深度验证通过，并带 Apple 安全时间戳 |
+| Developer ID hardened-runtime 签名 | `CHECKED IMPLEMENTATION` | 主 App、内嵌 librime 与独立签名语音 Helper 深度验证通过，并带 Apple 安全时间戳 |
 | 安装、升级、回滚、卸载脚本 | `CHECKED IMPLEMENTATION` | v1→v3、v3→v1、再升级 v5 真实验证；卸载为可恢复移入废纸篓，Rime 数据默认保留 |
 | 真实应用完整输入路径 | `EXTERNAL ACCEPTANCE` | 未完成本轮记录化验证 |
 | 公证与系统输入源信任 | `EXTERNAL ACCEPTANCE` | 未完成；当前 Developer ID bundle 因未公证被 spctl 拒绝 |
@@ -1607,20 +1607,23 @@ Runtime 的自包含 daemon；n-gram + beam 作为融合与故障降级。
   建议文本，永远不能触发上屏。
 - 录音由独立用户级 helper 进程（`fun.wwcn.rimeai.voice-helper`）承担：
   输入法进程无法可靠获得麦克风 TCC 授权。生命周期沿用云 broker 模式
-  （LaunchAgent 按需启停、同 UID、0600 UDS）。
-- 传输与协议风格沿用第 8 章选型：NDJSON over UDS，逐字段校验、显式
-  状态机、latest-wins、熔断后回退纯键盘。消息族为 `voice_hello`/
-  `voice_ready`/`dictation_start`/`dictation_delta`/`dictation_final`/
-  `dictation_cancel`/`dictation_accept`/`dictation_error`。
-- 网络策略在握手中声明并由隐私中心展示：V0 本地 ASR 全离线（音频不出
-  内存、不出设备）；V1 云 ASR 与润色各自独立开关，润色复用现有
-  `glm-5.3` 端点与 cloud.env 凭证，不引入新凭证。
-- 阶段：V0 本地 direct（Apple Speech on-device 或受控 qwen-asr C 库，
-  质量门选择）；V1 云 ASR + polish（显式降级语义）；V2 模式即数据与
-  热词沉淀。逐阶段放行门见设计文档第 5 节。
-- 开源复用（均为 MIT，引入时增补 THIRD_PARTY_NOTICES）：Type4Me 的
-  Swift 模块骨架与投机润色节流语义；OpenLess 的 qwen-asr vendored C 库
-  与流式 ASR 协议参考。不采纳两者的剪贴板注入、明文凭证路径与
+  （LaunchAgent 按需启停；Debug 私有 UDS，Release 认证 NSXPC/Mach service）。
+- 传输逐字段校验并使用显式状态机、latest-wins、熔断后回退纯键盘；消息族
+  另含松开停止采集的 `dictation_stop`。Debug 使用 NDJSON over UDS；Release
+  使用双向 Developer ID requirement、逐调用 UID/PID 和有界单飞 FIFO 的 XPC。
+- V2 `dictation_start` 仅在引擎协商 `hotword_snapshot` 后携带当前焦点
+  会话内已确认的 Rime commit MRU；按引擎上限截断并用 SHA-256
+  绑定归一化有序集。它不枚举完整 userdb，也不读历史/剪贴板。
+- 网络策略在握手中声明并由隐私中心展示：当前 direct 技术探针全离线，音频
+  不出内存、不出设备；云 ASR 与润色不在当前 V1 范围，未来必须独立立项和
+  放行。
+- 阶段遵循 PRD：V0 只建立授权冻结语音集并比较引擎；V1 才是通过 V0 后的
+  本地 direct 按住说话原型。当前 UI/IPC/helper 是提前完成、默认关闭的 V1
+  技术探针，不代表 V0 已通过。macOS 14/15 发布候选必须是产品管理本地模型；
+  当前 `SFSpeechRecognizer` 适配器在这些系统上仅为 probe-only。
+- 开源复用候选（引入前仍须核对许可证并增补 THIRD_PARTY_NOTICES）：Type4Me
+  的 Swift 模块骨架与投机润色节流语义；OpenLess 的流式 ASR 协议仅作参考，
+  不能绕过 V0 的质量、制品和许可证门。不采纳两者的剪贴板注入、明文凭证路径与
   Tauri/Rust 工具链。
 
 ---

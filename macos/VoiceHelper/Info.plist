@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key>
+  <string>zh_CN</string>
+  <key>CFBundleDisplayName</key>
+  <string>RimeAI Voice Helper</string>
+  <key>CFBundleExecutable</key>
+  <string>rimeai-voice-helper</string>
+  <key>CFBundleIdentifier</key>
+  <string>fun.wwcn.rimeai.voice-helper</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>CFBundleName</key>
+  <string>RimeAIVoiceHelper</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>0.1.0</string>
+  <key>CFBundleVersion</key>
+  <string>1</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>14.0</string>
+  <key>LSUIElement</key>
+  <true/>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>RimeAI 使用麦克风将按住说话的语音转换为待确认文本。</string>
+  <key>NSSpeechRecognitionUsageDescription</key>
+  <string>RimeAI 使用 Apple 本地语音识别生成待确认的听写文本。</string>
+</dict>
+</plist>

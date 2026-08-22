@@ -37,6 +37,17 @@ final class PrivacyCenterWindowController: NSObject {
     private let apiKeyField = NSSecureTextField()
     private let cloudStatusLabel = NSTextField(labelWithString: "")
     private let historyStatusLabel = NSTextField(labelWithString: "")
+    private let voiceToggle = NSButton(
+        checkboxWithTitle: "",
+        target: nil,
+        action: nil
+    )
+    private let voiceRimeHotwordToggle = NSButton(
+        checkboxWithTitle: "",
+        target: nil,
+        action: nil
+    )
+    private let voiceStatusLabel = NSTextField(labelWithString: "")
     private let disabledAIField = NSTextField()
     private let disabledContextField = NSTextField()
     private let daemonStatusLabel = NSTextField(labelWithString: "")
@@ -211,6 +222,64 @@ final class PrivacyCenterWindowController: NSObject {
         contextPopup.action = #selector(contextChanged(_:))
         contextRow.addArrangedSubview(contextPopup)
         stack.addArrangedSubview(contextRow)
+
+        stack.addArrangedSubview(separator())
+        stack.addArrangedSubview(sectionTitle("本地语音听写（实验）"))
+        stack.addArrangedSubview(
+            label(
+                "按住 \(VoiceHotKeyManager.displayShortcut) 录音，松开后等待最终"
+                    + "文本；Space 或回车确认上屏，Esc 取消。音频只在独立的"
+                    + "本地 helper 内存中处理，不写入录音或听写历史。Apple "
+                    + "Speech 属于系统管理引擎；麦克风与语音识别权限都由 "
+                    + "RimeAI Voice Helper 申请和持有，而不是输入法进程。",
+                secondary: true
+            )
+        )
+        voiceToggle.title =
+            "启用按住说话（\(VoiceHotKeyManager.displayShortcut)）"
+        voiceToggle.target = self
+        voiceToggle.action = #selector(toggleChanged(_:))
+        stack.addArrangedSubview(voiceToggle)
+        stack.addArrangedSubview(
+            label(
+                "可单独允许把当前焦点会话中成功确认的 Rime 词条作为"
+                    + "易失本地热词。不会读取完整用户词典、长期历史或光标"
+                    + "文本；切换焦点、进入安全输入或关闭语音时立即清空。",
+                secondary: true
+            )
+        )
+        voiceRimeHotwordToggle.title =
+            "使用当前会话已确认的 Rime 词条辅助语音（实验）"
+        voiceRimeHotwordToggle.target = self
+        voiceRimeHotwordToggle.action = #selector(toggleChanged(_:))
+        stack.addArrangedSubview(voiceRimeHotwordToggle)
+        configureWrapping(voiceStatusLabel)
+        stack.addArrangedSubview(voiceStatusLabel)
+        let voiceButtons = NSStackView()
+        voiceButtons.orientation = .horizontal
+        voiceButtons.spacing = 8
+        voiceButtons.addArrangedSubview(
+            NSButton(
+                title: "重试语音服务",
+                target: self,
+                action: #selector(retryVoice(_:))
+            )
+        )
+        voiceButtons.addArrangedSubview(
+            NSButton(
+                title: "打开麦克风权限…",
+                target: self,
+                action: #selector(openMicrophonePrivacy(_:))
+            )
+        )
+        voiceButtons.addArrangedSubview(
+            NSButton(
+                title: "打开语音识别权限…",
+                target: self,
+                action: #selector(openSpeechRecognitionPrivacy(_:))
+            )
+        )
+        stack.addArrangedSubview(voiceButtons)
 
         stack.addArrangedSubview(separator())
         stack.addArrangedSubview(sectionTitle("云端模型增强与长期记忆"))
@@ -433,6 +502,14 @@ final class PrivacyCenterWindowController: NSObject {
         )
         aiToggle.state = settings.aiEnabled ? .on : .off
         offlineToggle.state = settings.offlineLockEnabled ? .on : .off
+        voiceToggle.state = settings.voiceEnabled ? .on : .off
+        voiceToggle.isEnabled = settings.aiEnabled
+        voiceRimeHotwordToggle.state = settings.voiceRimeHotwordsEnabled
+            ? .on
+            : .off
+        voiceRimeHotwordToggle.isEnabled = settings.aiEnabled
+            && settings.voiceEnabled
+            && settings.contextPolicy != .strict
         cloudModelPopup.selectItem(
             withTitle: settings.cloudModelID
         )
@@ -461,6 +538,7 @@ final class PrivacyCenterWindowController: NSObject {
             cloudStatusLabel.stringValue =
                 "云增强：未启用 · 未配置的输入不会保存到长期历史或上传"
         }
+        refreshVoiceStatus()
         if let statistics = try? historyService.statistics() {
             historyStatusLabel.stringValue =
                 "明文历史：\(statistics.recordCount) 条 · 代次 "
@@ -481,9 +559,61 @@ final class PrivacyCenterWindowController: NSObject {
             if sender.state == .off {
                 settings.clearEphemeralData()
                 DaemonClient.shared.disconnect()
+                settings.voiceEnabled = false
+                // 即使 helper 仍处于异步启动阶段，关闭总开关也必须推进
+                // generation 并在同一串行队列中排入 suspend。
+                setManagedVoiceEnabled(false)
             }
             setManagedDaemonEnabled(sender.state == .on)
+        } else if sender === voiceToggle {
+            guard settings.aiEnabled else {
+                voiceToggle.state = .off
+                return
+            }
+            let enabled = sender.state == .on
+            if !enabled {
+                settings.voiceEnabled = false
+            }
+            setManagedVoiceEnabled(enabled)
+        } else if sender === voiceRimeHotwordToggle {
+            guard settings.aiEnabled,
+                  settings.voiceEnabled,
+                  settings.contextPolicy != .strict
+            else {
+                voiceRimeHotwordToggle.state = settings
+                    .voiceRimeHotwordsEnabled ? .on : .off
+                return
+            }
+            settings.voiceRimeHotwordsEnabled = sender.state == .on
         }
+    }
+
+    @objc private func retryVoice(_ sender: Any?) {
+        guard settings.aiEnabled, settings.voiceEnabled else {
+            refreshVoiceStatus()
+            return
+        }
+        // 只在 lifecycle 确认 helper ready 后由成功分支广播 retry，避免
+        // 输入法先重注册热键、却连接到尚未就绪的 socket。
+        setManagedVoiceEnabled(true)
+    }
+
+    @objc private func openMicrophonePrivacy(_ sender: Any?) {
+        guard let url = URL(
+            string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
+        ) else {
+            return
+        }
+        NSWorkspace.shared.open(url)
+    }
+
+    @objc private func openSpeechRecognitionPrivacy(_ sender: Any?) {
+        guard let url = URL(
+            string: "x-apple.systempreferences:com.apple.preference.security?Privacy_SpeechRecognition"
+        ) else {
+            return
+        }
+        NSWorkspace.shared.open(url)
     }
 
     @objc private func characterSetChanged(_ sender: NSPopUpButton) {
@@ -686,6 +816,7 @@ final class PrivacyCenterWindowController: NSObject {
         DaemonClient.shared.disconnect()
         CloudBrokerClient.shared.disconnect()
         settings.cloudConfigured = false
+        settings.voiceEnabled = false
         settings.aiEnabled = false
         let layout = RimeAIProductDataLayout(
             homeDirectory: FileManager.default.homeDirectoryForCurrentUser
@@ -700,6 +831,8 @@ final class PrivacyCenterWindowController: NSObject {
                 self.historyService.discardOpenStore()
                 try Self.stopManagedDaemon(layout: layout)
                 try Self.stopManagedCloudBroker(layout: layout)
+                try VoiceHelperLifecycleCoordinator.shared
+                    .suspendSynchronously(layout: layout)
                 try Self.trashManagedData(layout: layout)
             }
             DispatchQueue.main.async { [weak self] in
@@ -808,6 +941,71 @@ final class PrivacyCenterWindowController: NSObject {
         }
     }
 
+    private func setManagedVoiceEnabled(_ enabled: Bool) {
+        let layout = RimeAIProductDataLayout(
+            homeDirectory: FileManager.default.homeDirectoryForCurrentUser
+        )
+        voiceStatusLabel.stringValue = enabled
+            ? "语音：正在启动本地 helper"
+            : "语音：正在停止"
+        VoiceHelperLifecycleCoordinator.shared.setDesired(
+            enabled,
+            layout: layout
+        ) { [weak self] result in
+            guard let self else {
+                return
+            }
+            switch result {
+            case .success:
+                self.settings.voiceEnabled = enabled
+                if enabled {
+                    NotificationCenter.default.post(
+                        name: .rimeAIVoiceRetryRequested,
+                        object: self.settings
+                    )
+                }
+                self.refresh()
+            case let .failure(error):
+                self.settings.voiceEnabled = false
+                self.voiceToggle.state = .off
+                self.refreshVoiceStatus()
+                self.presentError(
+                    error,
+                    message: enabled
+                        ? "未能启动语音听写"
+                        : "未能完整停止语音听写",
+                    information: enabled
+                        ? "请先安装带权限声明的 RimeAI Voice Helper，再重试。"
+                        : "语音偏好已关闭；重新登录后 helper 不会再次启动。"
+                )
+            }
+        }
+    }
+
+    private func refreshVoiceStatus() {
+        guard settings.aiEnabled else {
+            voiceStatusLabel.stringValue = "语音：已随 AI 总开关停用"
+            return
+        }
+        let layout = RimeAIProductDataLayout(
+            homeDirectory: FileManager.default.homeDirectoryForCurrentUser
+        )
+        switch VoiceHelperLifecycle.installationStatus(layout: layout) {
+        case .notInstalled:
+            voiceStatusLabel.stringValue =
+                "语音：helper 未安装 · 键盘输入不受影响"
+        case .disabled:
+            voiceStatusLabel.stringValue = settings.voiceEnabled
+                ? "语音：等待启动"
+                : "语音：已关闭"
+        case .starting:
+            voiceStatusLabel.stringValue = "语音：helper 正在启动"
+        case .running:
+            voiceStatusLabel.stringValue =
+                "语音：helper 已运行 · 首次按住快捷键时完成认证与权限确认"
+        }
+    }
+
     private func applyDaemonStatus(_ notification: Notification) {
         guard settings.aiEnabled else {
             daemonStatusLabel.stringValue =
@@ -874,6 +1072,15 @@ final class PrivacyCenterWindowController: NSObject {
             "cloud_timeout": "云请求超时",
             "cloud_invalid_result": "云端无效结果已拦截",
             "cloud_transport_failure": "Qwen 连接失败",
+            "voice_started": "语音录音已开始",
+            "voice_stopped": "语音录音已结束",
+            "voice_preview_shown": "语音临时文本已显示",
+            "voice_final_shown": "语音最终文本已显示",
+            "voice_accepted": "语音文本已确认",
+            "voice_cancelled": "语音会话已取消",
+            "voice_microphone_denied": "麦克风权限被拒绝",
+            "voice_failure": "语音会话失败",
+            "voice_disabled": "语音已熔断",
         ]
         return diagnostics.keys.sorted().map { key in
             let name = names[key] ?? key

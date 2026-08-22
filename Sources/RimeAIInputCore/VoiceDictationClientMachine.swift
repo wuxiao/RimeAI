@@ -6,6 +6,7 @@ public enum VoiceDictationClientPhase: Equatable, Sendable {
     case idle
     case connecting
     case listening(requestID: String)
+    case finalizing(requestID: String)
     case pendingConfirm(requestID: String)
     case disabled
 }
@@ -14,9 +15,11 @@ public enum VoiceDictationClientPhase: Equatable, Sendable {
 public enum VoiceDictationClientEffect: Equatable, Sendable {
     case sendHello(VoiceHelloRequest)
     case sendStart(VoiceDictationStart)
+    case sendStop(VoiceDictationStop)
     case sendCancel(VoiceDictationCancel)
-    case sendAccept(VoiceDictationAccept)
-    case commitText(String)
+    /// 上屏与 accept 是同一原子意图；Coordinator 仅在宿主确认实际
+    /// insertText 成功后发送随附回执。
+    case commitText(String, accept: VoiceDictationAccept)
     case showPreview(
         stable: String,
         partial: String,
@@ -35,19 +38,22 @@ public struct VoiceDictationSessionContext: Equatable, Sendable {
     public let bundleID: String
     public let mode: VoiceDictationMode
     public let deadlineMilliseconds: Int
+    public let hotwordSnapshot: VoiceHotwordSnapshot
 
     public init(
         compositionID: UUID,
         appSessionID: String,
         bundleID: String,
         mode: VoiceDictationMode = .direct,
-        deadlineMilliseconds: Int = 1_500
+        deadlineMilliseconds: Int = 1_500,
+        hotwordSnapshot: VoiceHotwordSnapshot = .empty
     ) {
         self.compositionID = compositionID
         self.appSessionID = appSessionID
         self.bundleID = bundleID
         self.mode = mode
         self.deadlineMilliseconds = deadlineMilliseconds
+        self.hotwordSnapshot = hotwordSnapshot
     }
 }
 
@@ -97,6 +103,12 @@ public struct VoiceDictationClientMachine: Sendable {
         else {
             return []
         }
+        // Secure Input 可能在连接建立期间激活。即使宿主的状态变更通知
+        // 与 ready 交错，也绝不能由迟到 ready 启动麦克风会话。
+        guard !secureInputActive else {
+            resetSession()
+            return []
+        }
         guard response.isCompatible,
               response.supports(context.mode)
         else {
@@ -107,13 +119,25 @@ public struct VoiceDictationClientMachine: Sendable {
         previewStableText = ""
         previewPartialText = ""
         phase = .listening(requestID: requestID)
+        let negotiatedHotwords: VoiceHotwordSnapshot?
+        if response.capabilities.contains("hotword_snapshot") {
+            guard let limited = try? context.hotwordSnapshot.limited(
+                to: response.maximumHotwords
+            ) else {
+                return protocolFailure(.invalidRequest)
+            }
+            negotiatedHotwords = limited
+        } else {
+            negotiatedHotwords = nil
+        }
         let start = VoiceDictationStart(
             requestID: requestID,
             compositionID: context.compositionID,
             appSessionID: context.appSessionID,
             bundleID: context.bundleID,
             mode: context.mode,
-            deadlineMilliseconds: context.deadlineMilliseconds
+            deadlineMilliseconds: context.deadlineMilliseconds,
+            hotwordSnapshot: negotiatedHotwords
         )
         guard start.isValid else {
             return protocolFailure(.invalidRequest)
@@ -154,7 +178,7 @@ public struct VoiceDictationClientMachine: Sendable {
     public mutating func finalResult(
         _ final: VoiceDictationFinal
     ) -> [VoiceDictationClientEffect] {
-        guard case let .listening(requestID) = phase,
+        guard let requestID = activeRequestIDForFinal(),
               final.requestID == requestID
         else {
             return []
@@ -162,6 +186,9 @@ public struct VoiceDictationClientMachine: Sendable {
         guard final.isValid else {
             return protocolFailure(.internalError)
         }
+        // 一次完整、有效的服务端 final 证明协议链路已经恢复；熔断统计
+        // 必须是“连续失败”，不能让很久以前的失败跨成功会话累计。
+        consecutiveProtocolFailures = 0
         pendingConfirmText = final.finalText
         previewStableText = final.finalText
         previewPartialText = ""
@@ -197,6 +224,22 @@ public struct VoiceDictationClientMachine: Sendable {
 
     // MARK: - 用户与宿主事件
 
+    /// 按住说话按键松开：停止提交新音频并等待服务端 final。
+    /// 若仍在握手，直接放弃本次启动，迟到 ready 将被忽略。
+    @discardableResult
+    public mutating func userStoppedRecording()
+        -> [VoiceDictationClientEffect] {
+        if phase == .connecting {
+            resetSession()
+            return []
+        }
+        guard case let .listening(requestID) = phase else {
+            return []
+        }
+        phase = .finalizing(requestID: requestID)
+        return [.sendStop(VoiceDictationStop(requestID: requestID))]
+    }
+
     /// `Space`/回车：上屏的唯一触发。上屏后回传 accept 哈希。
     @discardableResult
     public mutating func userConfirmed()
@@ -212,13 +255,17 @@ public struct VoiceDictationClientMachine: Sendable {
             acceptedTextSHA256: VoiceDictationAccept.acceptHash(for: text)
         )
         resetSession()
-        return [.commitText(text), .sendAccept(accept)]
+        return [.commitText(text, accept: accept)]
     }
 
     /// `Esc`：录音、润色、待确认阶段全可用。
     @discardableResult
     public mutating func userCancelled()
         -> [VoiceDictationClientEffect] {
+        if phase == .connecting {
+            resetSession()
+            return []
+        }
         guard let requestID = activeRequestIDForCancel() else {
             return []
         }
@@ -235,6 +282,10 @@ public struct VoiceDictationClientMachine: Sendable {
     @discardableResult
     public mutating func sessionSwitched()
         -> [VoiceDictationClientEffect] {
+        if phase == .connecting {
+            resetSession()
+            return []
+        }
         guard let requestID = activeRequestIDForCancel() else {
             return []
         }
@@ -252,9 +303,14 @@ public struct VoiceDictationClientMachine: Sendable {
     public mutating func secureInputChanged(active: Bool)
         -> [VoiceDictationClientEffect] {
         secureInputActive = active
-        guard active,
-              let requestID = activeRequestIDForCancel()
-        else {
+        guard active else {
+            return []
+        }
+        if phase == .connecting {
+            resetSession()
+            return []
+        }
+        guard let requestID = activeRequestIDForCancel() else {
             return []
         }
         resetSession()
@@ -282,6 +338,22 @@ public struct VoiceDictationClientMachine: Sendable {
         )]
     }
 
+    /// 松开后的 final 等待超时：取消服务端会话并静默回到键盘输入。
+    @discardableResult
+    public mutating func finalTimedOut()
+        -> [VoiceDictationClientEffect] {
+        guard case let .finalizing(requestID) = phase else {
+            return []
+        }
+        resetSession()
+        return [.sendCancel(
+            VoiceDictationCancel(
+                requestID: requestID,
+                reason: .clientTimeout
+            )
+        )]
+    }
+
     /// 连接失败：计熔断。
     @discardableResult
     public mutating func connectionFailed()
@@ -291,6 +363,17 @@ public struct VoiceDictationClientMachine: Sendable {
         }
         resetSession()
         return registerProtocolFailure()
+    }
+
+    /// socket 已连接并发送 hello，但服务端未在期限内给出合法 ready。
+    /// 这是服务/协议链路失败：回到 idle、明确告知用户并计入熔断。
+    @discardableResult
+    public mutating func helloResponseTimedOut()
+        -> [VoiceDictationClientEffect] {
+        guard phase == .connecting else {
+            return []
+        }
+        return protocolFailure(.internalError)
     }
 
     /// 设置中心显式重试：清除熔断与麦克风拒绝标记。
@@ -306,16 +389,27 @@ public struct VoiceDictationClientMachine: Sendable {
 
     private func hasActiveSession(_ requestID: String) -> Bool {
         switch phase {
-        case let .listening(active), let .pendingConfirm(active):
+        case let .listening(active), let .finalizing(active),
+             let .pendingConfirm(active):
             return active == requestID
         case .idle, .connecting, .disabled:
             return false
         }
     }
 
+    private func activeRequestIDForFinal() -> String? {
+        switch phase {
+        case let .listening(active), let .finalizing(active):
+            return active
+        case .idle, .connecting, .pendingConfirm, .disabled:
+            return nil
+        }
+    }
+
     private func activeRequestIDForCancel() -> String? {
         switch phase {
-        case let .listening(requestID), let .pendingConfirm(requestID):
+        case let .listening(requestID), let .finalizing(requestID),
+             let .pendingConfirm(requestID):
             return requestID
         case .idle, .connecting, .disabled:
             return nil

@@ -15,6 +15,9 @@ targets:
     sources:
       - path: RimeAIInputMethod
       - path: ../Sources/RimeAIInputCore
+        excludes:
+          - VoiceASREvaluationArtifact.swift
+      - path: ../Sources/RimeAIVoiceArtifactCore
       - path: ../Sources/RimeBridgeC/RimeBridgeC.cc
       - path: ../Sources/RimeBridgeC/include/RimeBridgeC.h
         buildPhase: headers
@@ -37,6 +40,7 @@ targets:
       - sdk: Carbon.framework
       - sdk: InputMethodKit.framework
       - sdk: Network.framework
+      - sdk: Security.framework
       - sdk: libsqlite3.tbd
     settings:
       base:
@@ -48,9 +52,6 @@ targets:
         HEADER_SEARCH_PATHS:
           - "$(inherited)"
           - "$(SRCROOT)/../Sources/RimeBridgeC/include"
-        OTHER_LDFLAGS:
-          - "$(inherited)"
-          - "-Wl,-exported_symbol,_rai_engine_create"
         CODE_SIGN_STYLE: Manual
         DEVELOPMENT_TEAM: ""
         CODE_SIGN_IDENTITY: "-"
@@ -60,6 +61,36 @@ targets:
         MACOSX_DEPLOYMENT_TARGET: "14.0"
         ONLY_ACTIVE_ARCH: true
         SKIP_INSTALL: false
+      configs:
+        Debug:
+          OTHER_LDFLAGS:
+            - "$(inherited)"
+            - "-Xlinker"
+            - "-export_dynamic"
+        Release:
+          OTHER_LDFLAGS:
+            - "$(inherited)"
+            - "-Wl,-exported_symbol,_rai_engine_create"
+  RimeAIInputMethodTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: RimeAIInputMethodTests
+      - path: LaunchAgents/fun.wwcn.rimeai.voice-helper.plist
+        buildPhase: resources
+      - path: VoiceHelper/VoiceReleasePolicy.plist
+        buildPhase: resources
+    dependencies:
+      - target: RimeAIInputMethod
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: fun.wwcn.inputmethod.RimeAI.tests
+        GENERATE_INFOPLIST_FILE: true
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/RimeAIInputMethod.app/Contents/MacOS/RimeAIInputMethod"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "-"
+        MACOSX_DEPLOYMENT_TARGET: "14.0"
 schemes:
   RimeAIInputMethod:
     build:
@@ -69,3 +100,7 @@ schemes:
       config: Debug
     archive:
       config: Release
+    test:
+      config: Debug
+      targets:
+        - RimeAIInputMethodTests

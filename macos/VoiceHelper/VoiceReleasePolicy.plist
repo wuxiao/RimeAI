@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>SchemaVersion</key>
+  <integer>2</integer>
+  <key>RuntimeEngine</key>
+  <string>apple-speech</string>
+  <key>EngineIdentifier</key>
+  <string>apple-speech-ondevice</string>
+  <key>AssetManagement</key>
+  <string>system_managed</string>
+  <key>ReleaseEligible</key>
+  <false/>
+  <key>EligibilityReason</key>
+  <string>macos14_15_system_managed_probe_only</string>
+  <key>TrustedCatalogSHA256</key>
+  <string>b0c8659b59e05d39683c4d9c50126f736eb620ba5c2d9c0ef925bba1d275b499</string>
+</dict>
+</plist>

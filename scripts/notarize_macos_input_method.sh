@@ -67,6 +67,12 @@ if (( ${#apps} != 1 )); then
   exit 1
 fi
 app_bundle=${apps[1]}
+embedded_helper=\
+"${app_bundle}/Contents/Helpers/RimeAIVoiceHelper.app"
+if [[ ! -d "${embedded_helper}" || -L "${embedded_helper}" ]]; then
+  print -u2 "error: paired voice helper is missing from the signed archive"
+  exit 1
+fi
 codesign --verify --deep --strict "${app_bundle}"
 
 submission_json="${work_root}/notary-submission.json"
@@ -83,8 +89,12 @@ if [[ "${submission_status}" != "Accepted" ]]; then
   exit 1
 fi
 
+xcrun stapler staple "${embedded_helper}"
+xcrun stapler validate "${embedded_helper}"
 xcrun stapler staple "${app_bundle}"
 xcrun stapler validate "${app_bundle}"
+codesign --verify --deep --strict "${app_bundle}"
+spctl --assess --type execute --verbose=4 "${embedded_helper}"
 spctl --assess --type execute --verbose=4 "${app_bundle}"
 COPYFILE_DISABLE=1 ditto --norsrc -c -k --keepParent \
   "${app_bundle}" "${temporary_zip}"

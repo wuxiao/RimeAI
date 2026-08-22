@@ -108,8 +108,68 @@ RIMEAI_CODE_SIGN_KEYCHAIN=${RIMEAI_CODE_SIGN_KEYCHAIN:-} \
   "${project_root}/script/bundle_librime_dependencies.sh" \
     "${app_bundle}" "${signing_identity}" >/dev/null
 codesign --verify --deep --strict "${app_bundle}"
+
+# The Release ZIP is a paired product artifact.  Keep the voice helper as a
+# nested, independently signed App so it retains its TCC identity and exact
+# audio-input entitlement while the distribution stays one top-level bundle.
+RIMEAI_CODE_SIGN_KEYCHAIN=${RIMEAI_CODE_SIGN_KEYCHAIN:-} \
+  "${project_root}/script/install_voice_helper.sh" \
+    --signing-identity "${signing_identity}" \
+    --marketing-version "${marketing_version}" \
+    --build-number "${build_number}" \
+    --build-only >/dev/null
+staged_helper="${project_root}/.build/voice-helper/RimeAIVoiceHelper.app"
+staged_launch_agent=\
+"${project_root}/macos/LaunchAgents/fun.wwcn.rimeai.voice-helper.plist"
+voice_policy="${project_root}/macos/VoiceHelper/VoiceReleasePolicy.plist"
+staged_helper_policy=\
+"${staged_helper}/Contents/Resources/VoiceReleasePolicy.plist"
+embedded_helper=\
+"${app_bundle}/Contents/Helpers/RimeAIVoiceHelper.app"
+embedded_voice_resources="${app_bundle}/Contents/Resources/VoiceHelper"
+if [[ ! -d "${staged_helper}" || -L "${staged_helper}" \
+  || ! -f "${staged_launch_agent}" || ! -f "${voice_policy}" \
+  || ! -f "${staged_helper_policy}" || -L "${staged_helper_policy}" ]]; then
+  print -u2 "error: paired voice Release payload is incomplete"
+  exit 1
+fi
+if ! cmp -s "${voice_policy}" "${staged_helper_policy}"; then
+  print -u2 "error: paired voice Release payload is incomplete"
+  exit 1
+fi
+mkdir -p "${embedded_helper:h}" "${embedded_voice_resources}"
+COPYFILE_DISABLE=1 ditto --norsrc "${staged_helper}" "${embedded_helper}"
+find "${embedded_helper}" -name '._*' -type f -delete
+codesign --verify --deep --strict "${embedded_helper}"
+install -m 0644 "${staged_launch_agent}" \
+  "${embedded_voice_resources}/fun.wwcn.rimeai.voice-helper.plist"
+install -m 0644 "${staged_helper_policy}" \
+  "${embedded_voice_resources}/VoiceReleasePolicy.plist"
+if ! cmp -s \
+  "${embedded_helper}/Contents/Resources/VoiceReleasePolicy.plist" \
+  "${embedded_voice_resources}/VoiceReleasePolicy.plist"; then
+  print -u2 "error: nested and host voice Release policies diverged"
+  exit 1
+fi
+
+outer_codesign_arguments=(
+  --force
+  --sign "${signing_identity}"
+  --options runtime
+  --timestamp=http://timestamp.apple.com/ts01
+)
+if [[ -n "${RIMEAI_CODE_SIGN_KEYCHAIN:-}" ]]; then
+  outer_codesign_arguments+=(--keychain "${RIMEAI_CODE_SIGN_KEYCHAIN}")
+fi
+codesign "${outer_codesign_arguments[@]}" "${app_bundle}"
+codesign --verify --deep --strict "${app_bundle}"
 for required_resource in \
-  THIRD_PARTY_NOTICES.md ATTRIBUTION.md ThirdPartyLicenses/librime-BSD-3-Clause.txt; do
+  THIRD_PARTY_NOTICES.md \
+  ATTRIBUTION.md \
+  ThirdPartyLicenses/librime-BSD-3-Clause.txt \
+  ThirdPartyLicenses/sherpa-onnx-Apache-2.0.txt \
+  ThirdPartyLicenses/onnxruntime-MIT.txt \
+  ThirdPartyLicenses/onnxruntime-ThirdPartyNotices-1.27.1.txt; do
   if [[ ! -f "${app_bundle}/Contents/Resources/${required_resource}" ]]; then
     print -u2 "error: release attribution is missing: ${required_resource}"
     exit 1
@@ -132,3 +192,5 @@ print -r -- "build=${build_number}"
 print -r -- "architecture=arm64"
 print -r -- "minimum_macos=14.0"
 print -r -- "signing_identity=${signing_identity}"
+print -r -- "paired_voice_helper=embedded"
+print -r -- "voice_release_eligible=false"

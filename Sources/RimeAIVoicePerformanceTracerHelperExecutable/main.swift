@@ -1,0 +1,4 @@
+import Darwin
+import RimeAIVoicePerformanceTracerHelperProcess
+
+Darwin._exit(VoicePerformanceTracerHelperEntrypoint.run())

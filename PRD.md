@@ -24,11 +24,11 @@
 
 | 项目 | 内容 |
 |---|---|
-| 文档状态 | 键盘 P0/P1/P2-internal 已实现；公开 P2 受外部放行门约束；V0/V1 未开始 |
+| 文档状态 | 键盘 P0/P1/P2-internal 已实现；语音 V0 评测工具与 V1 交互技术探针已实现，但尚无正式授权语料结论；公开 P2 与语音 V1 均受独立放行门约束 |
 | 版本 | v0.4 |
 | 日期 | 2026-07-29 |
 | 首发范围 | macOS Apple Silicon 开发者预览版 |
-| 产品阶段 | P0 文本门已通过 → P1/P2-internal 键盘原型已实现 → 公开 P2 外部验收；V0/V1 独立未开始 |
+| 产品阶段 | P0 文本门已通过 → P1/P2-internal 键盘原型已实现；语音处于 V0 数据采集与引擎评测期（V1 交互链路仅为默认关闭探针）→ 公开 P2 / 语音 V1 外部验收 |
 | 交付载体 | 本地 Markdown；当前工作目录尚未配置远程仓库或 issue tracker |
 
 ## 文档约定
@@ -37,10 +37,22 @@
 
 当前仓库已经实现 P0 离线评测工具、Rime 候选采集服务、P1 macOS 输入法，
 以及纯键盘 P2-internal 所需的隐私控制、Offline Lock、应用级策略、无原文
-诊断、用户级 LaunchAgent 和可恢复清理。`RimeAI-Ranker-S-24M`、语音采集和
-语音识别运行时尚未实现。实现状态不等于公开发布：Developer ID、公证、
-受控最低系统 librime、许可证和真实应用矩阵仍属于外部放行门。详细证据见
-[docs/P1_IMPLEMENTATION_EVIDENCE.md](docs/P1_IMPLEMENTATION_EVIDENCE.md)。
+诊断、用户级 LaunchAgent 和可恢复清理。语音轨已有默认关闭的内部技术原型：
+独立 helper App、按住说话、流式浮层、显式确认、取消/会话/安全输入隔离已经
+接线；真实 TCC、设备、WER/延迟、隐私运行态与分发门仍未通过。实现状态不等于
+公开发布：Developer ID、公证、受控最低系统 librime、许可证和真实应用矩阵
+仍属于外部放行门。键盘证据见
+[docs/P1_IMPLEMENTATION_EVIDENCE.md](docs/P1_IMPLEMENTATION_EVIDENCE.md)，语音
+证据与剩余门见 [docs/VOICE_INPUT_DESIGN.md](docs/VOICE_INPUT_DESIGN.md)，公开
+分发前的本机 IPC 身份边界见
+[docs/VOICE_IPC_SECURITY.md](docs/VOICE_IPC_SECURITY.md)。V0 的冻结 corpus、run、
+observations、归一化指标、隐私聚合和 fail-closed gate 已实现，格式见
+[docs/VOICE_EVAL_FORMAT.md](docs/VOICE_EVAL_FORMAT.md)；这只证明评测工具合同，
+不替代至少 200 句授权真实录音、产品管理引擎运行与正式阈值结果。
+语音 wire contract 已升级到 V2：只有用户另行开启默认关闭的“Rime 会话
+热词辅助”后，输入法才把当前焦点会话中用户已确认且 Rime commit 成功的
+词条作为有界、带摘要的易失热词快照；完整现有 Rime 用户词典的安全枚举
+仍未实现，不得宣称已复制全部用户词库。
 
 本 PRD 使用三类表述：
 

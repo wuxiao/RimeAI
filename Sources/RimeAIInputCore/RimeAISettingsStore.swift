@@ -10,6 +10,9 @@ public extension Notification.Name {
     static let rimeAIDiagnosticsDidChange = Notification.Name(
         "fun.wwcn.inputmethod.RimeAI.diagnostics-did-change"
     )
+    static let rimeAIVoiceRetryRequested = Notification.Name(
+        "fun.wwcn.inputmethod.RimeAI.voice-retry-requested"
+    )
 }
 
 public enum RimeAIDiagnosticEvent: String, CaseIterable, Codable, Sendable {
@@ -48,6 +51,15 @@ public enum RimeAIDiagnosticEvent: String, CaseIterable, Codable, Sendable {
     case cloudTimeout = "cloud_timeout"
     case cloudInvalidResult = "cloud_invalid_result"
     case cloudTransportFailure = "cloud_transport_failure"
+    case voiceStarted = "voice_started"
+    case voiceStopped = "voice_stopped"
+    case voicePreviewShown = "voice_preview_shown"
+    case voiceFinalShown = "voice_final_shown"
+    case voiceAccepted = "voice_accepted"
+    case voiceCancelled = "voice_cancelled"
+    case voiceMicrophoneDenied = "voice_microphone_denied"
+    case voiceFailure = "voice_failure"
+    case voiceDisabled = "voice_disabled"
 }
 
 public struct RimeAISettingsExport: Codable, Equatable, Sendable {
@@ -59,13 +71,15 @@ public struct RimeAISettingsExport: Codable, Equatable, Sendable {
     public let cloudProvider: String
     public let cloudEndpoint: String
     public let cloudModelID: String
+    public let voiceEnabled: Bool
+    public let voiceRimeHotwordsEnabled: Bool
     public let contextPolicy: ContextPolicy
     public let disabledAIApplications: [String]
     public let disabledContextApplications: [String]
     public let diagnostics: [String: Int]
 
     public init(
-        schemaVersion: Int = 3,
+        schemaVersion: Int = 5,
         inputPreferences: RimeAIInputPreferences = RimeAIInputPreferences(),
         aiEnabled: Bool,
         offlineLockEnabled: Bool,
@@ -73,6 +87,8 @@ public struct RimeAISettingsExport: Codable, Equatable, Sendable {
         cloudProvider: String = RimeAICloudConfiguration.provider,
         cloudEndpoint: String = RimeAICloudConfiguration.endpoint.absoluteString,
         cloudModelID: String = RimeAICloudConfiguration.defaultRankingModelID,
+        voiceEnabled: Bool = false,
+        voiceRimeHotwordsEnabled: Bool = false,
         contextPolicy: ContextPolicy,
         disabledAIApplications: [String],
         disabledContextApplications: [String],
@@ -86,6 +102,8 @@ public struct RimeAISettingsExport: Codable, Equatable, Sendable {
         self.cloudProvider = cloudProvider
         self.cloudEndpoint = cloudEndpoint
         self.cloudModelID = cloudModelID
+        self.voiceEnabled = voiceEnabled
+        self.voiceRimeHotwordsEnabled = voiceRimeHotwordsEnabled
         self.contextPolicy = contextPolicy
         self.disabledAIApplications = disabledAIApplications
         self.disabledContextApplications = disabledContextApplications
@@ -102,6 +120,9 @@ public final class RimeAISettingsStore: @unchecked Sendable {
         public static let offlineLockEnabled = "RimeAIOfflineLockEnabled"
         public static let cloudConfigured = "RimeAICloudConfigured"
         public static let cloudModelID = "RimeAICloudModelID"
+        public static let voiceEnabled = "RimeAIVoiceEnabled"
+        public static let voiceRimeHotwordsEnabled =
+            "RimeAIVoiceRimeHotwordsEnabled"
         public static let contextPolicy = "RimeAIContextPolicy"
         public static let disabledAIApplications =
             "RimeAIDisabledAIApplications"
@@ -253,6 +274,27 @@ public final class RimeAISettingsStore: @unchecked Sendable {
         }
     }
 
+    /// 语音是独立 opt-in 的实验能力，默认关闭；只有用户显式启用且 AI
+    /// 总开关允许时，输入法才注册按住说话快捷键并连接 voice helper。
+    public var voiceEnabled: Bool {
+        get { defaults.bool(forKey: Keys.voiceEnabled) }
+        set {
+            defaults.set(newValue, forKey: Keys.voiceEnabled)
+            notifySettingsChanged()
+        }
+    }
+
+    /// 独立于语音总开关的明示策略。开启后只允许使用当前焦点会话中用户
+    /// 已经通过 Rime 成功确认的有界词条；不会读取完整 userdb、历史或光标文本。
+    /// 默认关闭，避免把“语音已启用”误解为授权传递最近上屏词条。
+    public var voiceRimeHotwordsEnabled: Bool {
+        get { defaults.bool(forKey: Keys.voiceRimeHotwordsEnabled) }
+        set {
+            defaults.set(newValue, forKey: Keys.voiceRimeHotwordsEnabled)
+            notifySettingsChanged()
+        }
+    }
+
     public func shouldCaptureCloudHistory(
         isSecureInput: Bool
     ) -> Bool {
@@ -394,6 +436,8 @@ public final class RimeAISettingsStore: @unchecked Sendable {
             Keys.offlineLockEnabled,
             Keys.cloudConfigured,
             Keys.cloudModelID,
+            Keys.voiceEnabled,
+            Keys.voiceRimeHotwordsEnabled,
             Keys.contextPolicy,
             Keys.disabledAIApplications,
             Keys.disabledContextApplications,
@@ -413,6 +457,8 @@ public final class RimeAISettingsStore: @unchecked Sendable {
             offlineLockEnabled: offlineLockEnabled,
             cloudConfigured: cloudConfigured,
             cloudModelID: cloudModelID,
+            voiceEnabled: voiceEnabled,
+            voiceRimeHotwordsEnabled: voiceRimeHotwordsEnabled,
             contextPolicy: contextPolicy,
             disabledAIApplications: disabledAIApplications,
             disabledContextApplications: disabledContextApplications,

@@ -39,7 +39,20 @@
          </BuildableReference>
       </MacroExpansion>
       <Testables>
+         <TestableReference
+            skipped = "NO"
+            parallelizable = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "5CDD52CA97C3AD13B88CEBA3"
+               BuildableName = "RimeAIInputMethodTests.xctest"
+               BlueprintName = "RimeAIInputMethodTests"
+               ReferencedContainer = "container:RimeAIInputMethod.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
       </Testables>
+      <CommandLineArguments>
+      </CommandLineArguments>
    </TestAction>
    <LaunchAction
       buildConfiguration = "Debug"

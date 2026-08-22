@@ -7,12 +7,24 @@
   <string>fun.wwcn.rimeai.voice-helper</string>
   <key>ProgramArguments</key>
   <array>
-    <string>__HELPER_BINARY__</string>
-    <string>--socket</string>
-    <string>__SOCKET__</string>
+    <string>__HELPER_APP__/Contents/MacOS/rimeai-voice-helper</string>
+    <string>__TRANSPORT_FLAG__</string>
+    <string>__TRANSPORT_ENDPOINT__</string>
     <string>__ENGINE_FLAG__</string>
     <string>__ENGINE_NAME__</string>
   </array>
+  <key>MachServices</key>
+  <dict>
+    <key>fun.wwcn.rimeai.voice-helper</key>
+    <true/>
+  </dict>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>RIMEAI_PAIRED_BUILD</key>
+    <string>__HOST_BUILD__</string>
+    <key>RIMEAI_VOICE_POLICY_SHA256</key>
+    <string>__VOICE_POLICY_SHA256__</string>
+  </dict>
   <key>RunAtLoad</key>
   <false/>
   <key>KeepAlive</key>

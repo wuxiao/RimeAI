@@ -5,7 +5,7 @@ import json
 from math import isfinite
 from pathlib import Path
 import sys
-from typing import Optional, Sequence
+from typing import Mapping, Optional, Sequence
 
 from .capture import CaptureError, capture_dataset
 from .cloud_evaluation import (
@@ -24,7 +24,11 @@ from .command_sentence_decoder import (
     SentenceDecoderConfigurationError,
 )
 from .dataset import DatasetValidationError, load_dataset
-from .evaluation import BaselineRanker, ContextRepeatRanker, evaluate_dataset
+from .evaluation import (
+    BaselineRanker,
+    ContextRepeatRanker,
+    evaluate_dataset,
+)
 from .ngram_ranker import (
     NGramModelError,
     load_ngram_model,
@@ -46,6 +50,25 @@ from .reporting import (
     write_jsonl_atomic,
 )
 from .sentence_evaluation import evaluate_sentence_dataset
+from .voice_dataset import VoiceDatasetError, load_voice_corpus
+from .voice_evaluation import (
+    VoiceEvaluationError,
+    evaluate_voice,
+    load_voice_gates,
+    load_voice_observations,
+    load_voice_run,
+)
+from .voice_performance import VoicePerformanceError, load_voice_performance
+from .voice_performance_collection import (
+    VoicePerformanceCollectionError,
+    collect_voice_performance,
+    load_voice_collection_plan,
+    write_voice_performance_atomic,
+)
+from .voice_observation_collection import (
+    VoiceObservationCollectionError,
+    collect_voice_observations,
+)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -56,6 +79,17 @@ def _build_parser() -> argparse.ArgumentParser:
         "validate", help="validate a JSONL rerank dataset"
     )
     validate_parser.add_argument("dataset", type=Path)
+
+    validate_voice_parser = subparsers.add_parser(
+        "validate-voice",
+        help="validate a privacy-safe voice evaluation corpus",
+    )
+    validate_voice_parser.add_argument("corpus_root", type=Path)
+    validate_voice_parser.add_argument(
+        "--profile",
+        choices=("fixture", "frozen-quality"),
+        required=True,
+    )
 
     evaluate_parser = subparsers.add_parser(
         "evaluate", help="evaluate a ranker against a JSONL dataset"
@@ -93,6 +127,79 @@ def _build_parser() -> argparse.ArgumentParser:
         help="evaluate candidate expansion, correction, latency, and privacy gates",
     )
     cloud_evaluate_parser.add_argument("observations", type=Path)
+
+    voice_evaluate_parser = subparsers.add_parser(
+        "evaluate-voice",
+        help="evaluate aggregate voice quality and optional quality gates",
+    )
+    voice_evaluate_parser.add_argument("corpus_root", type=Path)
+    voice_evaluate_parser.add_argument("run", type=Path)
+    voice_evaluate_parser.add_argument("observations", type=Path)
+    voice_evaluate_parser.add_argument("--baseline-run", type=Path)
+    voice_evaluate_parser.add_argument("--baseline-observations", type=Path)
+    voice_evaluate_parser.add_argument("--gates-config", type=Path)
+    voice_evaluate_parser.add_argument("--performance-evidence", type=Path)
+
+    voice_collect_parser = subparsers.add_parser(
+        "collect-voice-performance",
+        help="collect native macOS voice performance evidence from live boundary events",
+        description=(
+            "Collect fail-closed macOS performance evidence from live NDJSON "
+            "boundary events on stdin. The collector must be a canonical, "
+            "Developer-ID-signed executable pinned by the collection plan."
+        ),
+        epilog=(
+            "stdin must be a live pipe/socket/terminal, not a replay file; "
+            "--output must be outside the corpus, artifact directory, plan, "
+            "collector, and measured executables."
+        ),
+    )
+    voice_collect_parser.add_argument(
+        "corpus_root",
+        type=Path,
+        help="validated external voice corpus root",
+    )
+    voice_collect_parser.add_argument(
+        "run",
+        type=Path,
+        help="schema-v2 voice run manifest",
+    )
+    voice_collect_parser.add_argument(
+        "collection_plan",
+        type=Path,
+        help="strict process, collector, protocol, and artifact identity plan",
+    )
+    voice_collect_parser.add_argument(
+        "--native-collector",
+        required=True,
+        type=Path,
+        help="canonical signed rimeai-voice-performance-collector path",
+    )
+    voice_collect_parser.add_argument(
+        "--output",
+        required=True,
+        type=Path,
+        help="new or replaceable owner-only performance sidecar path",
+    )
+
+    voice_observation_collect_parser = subparsers.add_parser(
+        "collect-voice-observations",
+        help="collect validated observations through the native voice driver",
+    )
+    voice_observation_collect_parser.add_argument("corpus_root", type=Path)
+    voice_observation_collect_parser.add_argument("run", type=Path)
+    voice_observation_collect_parser.add_argument(
+        "--native-driver", required=True, type=Path
+    )
+    voice_observation_collect_parser.add_argument(
+        "--artifact-dir", required=True, type=Path
+    )
+    voice_observation_collect_parser.add_argument(
+        "--output", required=True, type=Path
+    )
+    voice_observation_collect_parser.add_argument(
+        "--hotwords-file", type=Path
+    )
 
     compare_parser = subparsers.add_parser(
         "compare", help="compare compatible aggregate evaluation reports"
@@ -215,6 +322,228 @@ def _validate(dataset_path: Path) -> int:
         "splits": dict(sorted(Counter(s["split"] for s in samples).items())),
     }
     print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+    return 0
+
+
+def _validate_voice(corpus_root: Path, profile: str) -> int:
+    expected_profile = profile.replace("-", "_")
+    try:
+        load_voice_corpus(corpus_root, expected_profile=expected_profile)
+    except (VoiceDatasetError, OSError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    report = {
+        "kind": "voice_corpus_validation",
+        "profile": profile,
+        "schema_version": 1,
+        "valid": True,
+    }
+    print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+    return 0
+
+
+def _evaluate_voice(
+    corpus_root: Path,
+    run_path: Path,
+    observations_path: Path,
+    baseline_run_path: Optional[Path],
+    baseline_observations_path: Optional[Path],
+    gates_config_path: Optional[Path],
+    performance_evidence_path: Optional[Path],
+) -> int:
+    if (baseline_run_path is None) != (baseline_observations_path is None):
+        print(
+            "error: --baseline-run and --baseline-observations must be used together",
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        corpus = load_voice_corpus(corpus_root)
+        run = load_voice_run(run_path, corpus)
+        observations = load_voice_observations(
+            observations_path,
+            corpus,
+            run,
+        )
+        performance_evidence = (
+            load_voice_performance(performance_evidence_path, corpus, run)
+            if performance_evidence_path is not None
+            else None
+        )
+        baseline_run = None
+        baseline_observations = None
+        if (
+            baseline_run_path is not None
+            and baseline_observations_path is not None
+        ):
+            baseline_run = load_voice_run(baseline_run_path, corpus)
+            baseline_observations = load_voice_observations(
+                baseline_observations_path,
+                corpus,
+                baseline_run,
+            )
+        gates = (
+            load_voice_gates(gates_config_path)
+            if gates_config_path is not None
+            else None
+        )
+        evaluation_options = {
+            "baseline_run": baseline_run,
+            "baseline_observations": baseline_observations,
+            "gates": gates,
+        }
+        if performance_evidence is not None:
+            evaluation_options["performance_evidence"] = performance_evidence
+        report = evaluate_voice(corpus, run, observations, **evaluation_options)
+    except (
+        VoiceDatasetError,
+        VoiceEvaluationError,
+        VoicePerformanceError,
+        OSError,
+    ) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+
+    # A measurement run must never be mistaken for a quality-gate decision,
+    # even if a future evaluator accidentally leaves a stale field in its result.
+    report = dict(report)
+    report.pop("release_pass", None)
+    if gates_config_path is None:
+        report.pop("quality_gate_pass", None)
+        report["decision"] = "measurement_only"
+    print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+    if gates_config_path is None:
+        return 0
+    return 0 if report.get("quality_gate_pass") is True else 1
+
+
+def _collect_voice_performance(
+    corpus_root: Path,
+    run_path: Path,
+    collection_plan_path: Path,
+    native_collector_path: Path,
+    output_path: Path,
+) -> int:
+    try:
+        output_resolved = output_path.resolve()
+        protected_inputs = (
+            run_path.resolve(),
+            collection_plan_path.resolve(),
+            native_collector_path.resolve(),
+        )
+        corpus_resolved = corpus_root.resolve()
+        output_is_in_corpus = (
+            output_resolved == corpus_resolved
+            or corpus_resolved in output_resolved.parents
+        )
+        if output_resolved in protected_inputs or output_is_in_corpus:
+            raise VoicePerformanceCollectionError(
+                "--output must not overwrite a collection input"
+            )
+        corpus = load_voice_corpus(corpus_root)
+        run = load_voice_run(run_path, corpus)
+        plan = load_voice_collection_plan(collection_plan_path, run)
+        if _voice_performance_output_conflicts_with_plan(output_resolved, plan):
+            raise VoicePerformanceCollectionError(
+                "--output must not overwrite a collection input"
+            )
+        performance = collect_voice_performance(
+            corpus,
+            run,
+            plan,
+            native_collector_path,
+            sys.stdin.buffer,
+        )
+        output_sha256 = write_voice_performance_atomic(
+            performance,
+            output_resolved,
+        )
+    except RuntimeError:
+        print("error: collection path cannot be resolved", file=sys.stderr)
+        return 2
+    except (
+        VoiceDatasetError,
+        VoiceEvaluationError,
+        VoicePerformanceError,
+        VoicePerformanceCollectionError,
+        OSError,
+    ) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    print(
+        json.dumps(
+            {
+                "kind": "voice_performance_collection",
+                "schema_version": 2,
+                "sha256": output_sha256,
+                "valid": True,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def _voice_performance_output_conflicts_with_plan(
+    output_path: Path,
+    plan,
+) -> bool:
+    if not isinstance(plan, Mapping):
+        return False
+    output = output_path.resolve()
+    artifact_directory = plan.get("artifact_directory")
+    if isinstance(artifact_directory, str):
+        artifact = Path(artifact_directory).resolve()
+        if output == artifact or artifact in output.parents:
+            return True
+    processes = plan.get("processes")
+    if isinstance(processes, list):
+        for process in processes:
+            if not isinstance(process, Mapping):
+                continue
+            executable = process.get("expected_executable_path")
+            if isinstance(executable, str) and output == Path(executable).resolve():
+                return True
+    return False
+
+
+def _collect_voice_observations(
+    corpus_root: Path,
+    run_path: Path,
+    native_driver_path: Path,
+    artifact_dir: Path,
+    output_path: Path,
+    hotwords_file: Optional[Path],
+) -> int:
+    try:
+        output_sha256 = collect_voice_observations(
+            corpus_root,
+            run_path,
+            native_driver_path,
+            artifact_dir,
+            output_path,
+            hotwords_file,
+        )
+    except (
+        VoiceDatasetError,
+        VoiceEvaluationError,
+        VoiceObservationCollectionError,
+        OSError,
+    ):
+        print("error: voice observation collection failed", file=sys.stderr)
+        return 2
+    print(
+        json.dumps(
+            {
+                "kind": "voice_observation_collection",
+                "schema_version": 1,
+                "sha256": output_sha256,
+                "valid": True,
+            },
+            sort_keys=True,
+        )
+    )
     return 0
 
 
@@ -706,6 +1035,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _build_parser().parse_args(argv)
     if args.command == "validate":
         return _validate(args.dataset)
+    if args.command == "validate-voice":
+        return _validate_voice(args.corpus_root, args.profile)
     if args.command == "evaluate":
         return _evaluate(
             args.dataset,
@@ -730,6 +1061,33 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return 2
         print(json.dumps(report, ensure_ascii=False, sort_keys=True))
         return 0 if report["passed"] else 1
+    if args.command == "evaluate-voice":
+        return _evaluate_voice(
+            args.corpus_root,
+            args.run,
+            args.observations,
+            args.baseline_run,
+            args.baseline_observations,
+            args.gates_config,
+            args.performance_evidence,
+        )
+    if args.command == "collect-voice-performance":
+        return _collect_voice_performance(
+            args.corpus_root,
+            args.run,
+            args.collection_plan,
+            args.native_collector,
+            args.output,
+        )
+    if args.command == "collect-voice-observations":
+        return _collect_voice_observations(
+            args.corpus_root,
+            args.run,
+            args.native_driver,
+            args.artifact_dir,
+            args.output,
+            args.hotwords_file,
+        )
     if args.command == "compare":
         return _compare(args.reports)
     if args.command == "capture":
