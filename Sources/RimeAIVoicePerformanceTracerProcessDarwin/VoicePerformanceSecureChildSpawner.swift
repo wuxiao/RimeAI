@@ -11,6 +11,31 @@ private func rimeaiSuspendedChildCSOps(
     _ size: Int
 ) -> Int32
 
+private func rimeaiIsCanonicalAbsoluteExecutablePath(
+    _ value: String
+) -> Bool {
+    guard value.utf8.count > 1,
+          value.utf8.count < Int(MAXPATHLEN),
+          value.first == "/",
+          value.last != "/",
+          value.utf8.elementsEqual(
+              value.precomposedStringWithCanonicalMapping.utf8
+          ),
+          !value.unicodeScalars.contains(where: {
+              $0.value < 0x20 || $0.value == 0x7F
+          })
+    else {
+        return false
+    }
+    return value.dropFirst().split(
+        separator: "/",
+        omittingEmptySubsequences: false
+    ).allSatisfy {
+        !$0.isEmpty && $0 != "." && $0 != ".."
+            && $0.utf8.count <= 255
+    }
+}
+
 public struct VoicePerformanceExpectedChildIdentity: Equatable, Sendable {
     public let executablePath: String
     public let executableSHA256: String
@@ -41,20 +66,7 @@ public struct VoicePerformanceExpectedChildIdentity: Equatable, Sendable {
     }
 
     private static func isCanonicalAbsolutePath(_ value: String) -> Bool {
-        guard value.utf8.elementsEqual(
-                  value.precomposedStringWithCanonicalMapping.utf8
-              ),
-              value.hasPrefix("/"),
-              value != "/",
-              !value.utf8.contains(0),
-              value.unicodeScalars.allSatisfy({ scalar in
-                  scalar.value >= 0x20 && scalar.value != 0x7F
-              }),
-              value.utf8.count < Int(MAXPATHLEN)
-        else {
-            return false
-        }
-        return URL(fileURLWithPath: value).standardizedFileURL.path == value
+        rimeaiIsCanonicalAbsoluteExecutablePath(value)
     }
 
     private static func isSigningIdentifier(_ value: String) -> Bool {
@@ -597,7 +609,9 @@ struct DarwinVoicePerformanceSecureChildSpawningSystem:
                 throw VoicePerformanceTracerProcessError
                     .processGenerationMismatch
             }
-        } catch {
+        } catch is VoicePerformanceTracerProcessError {
+            throw VoicePerformanceTracerProcessError.processGenerationMismatch
+        } catch is VoicePerformancePOSIXError {
             throw VoicePerformanceTracerProcessError.processGenerationMismatch
         }
     }
@@ -612,13 +626,18 @@ struct DarwinVoicePerformanceSecureChildSpawningSystem:
                 throw VoicePerformanceTracerProcessError
                     .processGenerationMismatch
             }
-        } catch {
+        } catch is VoicePerformanceTracerProcessError {
+            throw VoicePerformanceTracerProcessError
+                .processGenerationMismatch
+        } catch is VoicePerformancePOSIXError {
             throw VoicePerformanceTracerProcessError
                 .processGenerationMismatch
         }
         do {
             try attestationSystem.resume(pid: generation.pid)
-        } catch {
+        } catch is VoicePerformanceTracerProcessError {
+            throw VoicePerformanceTracerProcessError.processSpawnFailed
+        } catch is VoicePerformancePOSIXError {
             throw VoicePerformanceTracerProcessError.processSpawnFailed
         }
     }
@@ -819,7 +838,7 @@ struct DarwinVoicePerformanceSecureChildSpawningSystem:
                 where error.code == EINTR
             {
                 continue
-            } catch {
+            } catch is VoicePerformancePOSIXError {
                 throw VoicePerformanceTracerProcessError.processWaitFailed
             }
         }
@@ -880,7 +899,9 @@ struct DarwinVoicePerformanceSecureChildSpawningSystem:
                 pid: pid,
                 processGroup: processGroup
             )
-        } catch {
+        } catch is VoicePerformanceTracerProcessError {
+            throw VoicePerformanceTracerProcessError.processGroupFailure
+        } catch is VoicePerformancePOSIXError {
             throw VoicePerformanceTracerProcessError.processGroupFailure
         }
     }
@@ -927,7 +948,7 @@ struct DarwinVoicePerformanceSecureChildSpawningSystem:
                 where error.code == ECHILD
             {
                 return true
-            } catch {
+            } catch is VoicePerformancePOSIXError {
                 throw VoicePerformanceTracerProcessError.processWaitFailed
             }
         }
@@ -986,8 +1007,7 @@ private struct DarwinVoicePerformanceSuspendedChildAttestationSystem:
                   bytes: bytes[..<Int(count)].map(UInt8.init(bitPattern:)),
                   encoding: .utf8
               ),
-              path.hasPrefix("/"),
-              URL(fileURLWithPath: path).standardizedFileURL.path == path
+              rimeaiIsCanonicalAbsoluteExecutablePath(path)
         else {
             throw VoicePerformanceTracerProcessError
                 .processGenerationMismatch
@@ -1404,9 +1424,12 @@ private func withCStringVector<Result>(
     }
 }
 
-private func normalizedProcessError(_ error: Error)
-    -> VoicePerformanceTracerProcessError
-{
-    error as? VoicePerformanceTracerProcessError
-        ?? .processSpawnFailed
+private func normalizedProcessError(_ error: Error) -> Error {
+    if let processError = error as? VoicePerformanceTracerProcessError {
+        return processError
+    }
+    if error is VoicePerformancePOSIXError {
+        return VoicePerformanceTracerProcessError.processSpawnFailed
+    }
+    return error
 }

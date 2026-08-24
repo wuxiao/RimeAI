@@ -64,6 +64,81 @@ public struct VoicePerformanceMeasurementPolicy: Equatable, Sendable {
         case tracer
     }
 
+    /// The complete variable input needed to seal a tracer measurement policy.
+    /// Protocol authority, signing identifiers, policy mode, and the driver
+    /// policy digest are deliberately absent because construction owns them.
+    public struct TracerBuildInput: Equatable, Sendable {
+        public struct ExecutableIdentity: Equatable, Sendable {
+            public let executablePath: String
+            public let executableSHA256: String
+            public let cdHash: String
+
+            public init(
+                executablePath: String,
+                executableSHA256: String,
+                cdHash: String
+            ) {
+                self.executablePath = executablePath
+                self.executableSHA256 = executableSHA256
+                self.cdHash = cdHash
+            }
+        }
+
+        public struct VerifiedEvaluationArtifact: Equatable, Sendable {
+            public let directory: String
+            public let adapterID: String
+            public let artifactID: String
+            public let contentSHA256: String
+            public let maximumHotwords: UInt64
+
+            public init(
+                directory: String,
+                adapterID: String,
+                artifactID: String,
+                contentSHA256: String,
+                maximumHotwords: UInt64
+            ) {
+                self.directory = directory
+                self.adapterID = adapterID
+                self.artifactID = artifactID
+                self.contentSHA256 = contentSHA256
+                self.maximumHotwords = maximumHotwords
+            }
+        }
+
+        public let coldTrials: UInt64
+        public let controlSocketPath: String
+        public let controlSessionNonce: String
+        public let teamIdentifier: String
+        public let collector: ExecutableIdentity
+        public let driver: ExecutableIdentity
+        public let helper: ExecutableIdentity
+        public let evaluationArtifact: VerifiedEvaluationArtifact
+        public let rawReleasePolicySHA256: String
+
+        public init(
+            coldTrials: UInt64,
+            controlSocketPath: String,
+            controlSessionNonce: String,
+            teamIdentifier: String,
+            collector: ExecutableIdentity,
+            driver: ExecutableIdentity,
+            helper: ExecutableIdentity,
+            evaluationArtifact: VerifiedEvaluationArtifact,
+            rawReleasePolicySHA256: String
+        ) {
+            self.coldTrials = coldTrials
+            self.controlSocketPath = controlSocketPath
+            self.controlSessionNonce = controlSessionNonce
+            self.teamIdentifier = teamIdentifier
+            self.collector = collector
+            self.driver = driver
+            self.helper = helper
+            self.evaluationArtifact = evaluationArtifact
+            self.rawReleasePolicySHA256 = rawReleasePolicySHA256
+        }
+    }
+
     public struct CollectorIdentity: Equatable, Sendable {
         public let expectedExecutablePath: String
         public let expectedExecutableSHA256: String
@@ -120,6 +195,91 @@ public struct VoicePerformanceMeasurementPolicy: Equatable, Sendable {
         return SHA256.hash(data: input).map {
             String(format: "%02x", $0)
         }.joined()
+    }
+
+    /// Seals canonical tracer measurement-policy bytes from only verified,
+    /// build-specific inputs. Protocol identity, eligibility, signing IDs, and
+    /// the linked driver-policy digest are code-owned.
+    public static func tracerCanonicalData(
+        for input: TracerBuildInput
+    ) throws -> Data {
+        guard PerformanceControlSessionBinding.supportedTrials.contains(
+            input.coldTrials
+        ) else {
+            throw VoicePerformanceMeasurementPolicyError.invalidField(
+                .coldTrials
+            )
+        }
+        guard (1 ... 128).contains(
+            input.evaluationArtifact.maximumHotwords
+        ) else {
+            throw VoicePerformanceMeasurementPolicyError.invalidField(
+                .evaluationArtifactMaximumHotwords
+            )
+        }
+        let driverPolicyData = try SealedPerformanceControlDriverPolicy
+            .tracerCanonicalData()
+        let driverPolicySHA256 = SHA256.hash(data: driverPolicyData).map {
+            String(format: "%02x", $0)
+        }.joined()
+        let teamIdentifier = input.teamIdentifier
+        let data = canonicalData(
+            schemaVersion: schemaVersion,
+            enabled: true,
+            coldTrials: input.coldTrials,
+            controlProtocol: PerformanceControlProtocolContract.identity,
+            controlSocketPath: input.controlSocketPath,
+            controlSessionNonce: input.controlSessionNonce,
+            collector: CollectorIdentity(
+                expectedExecutablePath: input.collector.executablePath,
+                expectedExecutableSHA256: input.collector.executableSHA256,
+                expectedSigningIdentifier:
+                    requiredCollectorSigningIdentifier,
+                expectedTeamIdentifier: teamIdentifier,
+                expectedCDHash: input.collector.cdHash
+            ),
+            driver: DriverIdentity(
+                expectedExecutablePath: input.driver.executablePath,
+                expectedExecutableSHA256: input.driver.executableSHA256,
+                expectedSigningIdentifier: requiredDriverSigningIdentifier,
+                expectedTeamIdentifier: teamIdentifier,
+                expectedCDHash: input.driver.cdHash,
+                policySHA256: driverPolicySHA256
+            ),
+            evaluationArtifact: EvaluationArtifact(
+                directory: input.evaluationArtifact.directory,
+                adapterID: input.evaluationArtifact.adapterID,
+                artifactID: input.evaluationArtifact.artifactID,
+                contentSHA256: input.evaluationArtifact.contentSHA256,
+                maximumHotwords: input.evaluationArtifact.maximumHotwords
+            ),
+            helper: HelperIdentity(
+                expectedExecutablePath: input.helper.executablePath,
+                expectedExecutableSHA256: input.helper.executableSHA256,
+                expectedSigningIdentifier: requiredHelperSigningIdentifier,
+                expectedTeamIdentifier: teamIdentifier,
+                expectedCDHash: input.helper.cdHash
+            ),
+            releasePolicySHA256: input.rawReleasePolicySHA256
+        )
+        guard data.count <= maximumEncodedBytes,
+              !data.contains(0x0A),
+              !data.contains(0x0D)
+        else {
+            throw VoicePerformanceMeasurementPolicyError.invalidJSON
+        }
+        let decoded = try decodeCanonical(data)
+        guard decoded.schemaVersion == schemaVersion,
+              decoded.enabled,
+              decoded.qualification == .tracer,
+              !decoded.authenticatedProductionDriver,
+              decoded.controlProtocol
+                == PerformanceControlProtocolContract.identity,
+              decoded.driver.policySHA256 == driverPolicySHA256
+        else {
+            throw VoicePerformanceMeasurementPolicyError.invalidJSON
+        }
+        return data
     }
 
     public static func decodeCanonical(_ data: Data) throws -> Self {
@@ -478,6 +638,34 @@ public struct VoicePerformanceMeasurementPolicy: Equatable, Sendable {
     }
 
     private var canonicalData: Data {
+        Self.canonicalData(
+            schemaVersion: schemaVersion,
+            enabled: enabled,
+            coldTrials: coldTrials,
+            controlProtocol: controlProtocol,
+            controlSocketPath: controlSocketPath,
+            controlSessionNonce: controlSessionNonce,
+            collector: collector,
+            driver: driver,
+            evaluationArtifact: evaluationArtifact,
+            helper: helper,
+            releasePolicySHA256: releasePolicySHA256
+        )
+    }
+
+    private static func canonicalData(
+        schemaVersion: Int,
+        enabled: Bool,
+        coldTrials: UInt64,
+        controlProtocol: PerformanceControlProtocolIdentity,
+        controlSocketPath: String,
+        controlSessionNonce: String,
+        collector: CollectorIdentity,
+        driver: DriverIdentity,
+        evaluationArtifact: EvaluationArtifact,
+        helper: HelperIdentity,
+        releasePolicySHA256: String
+    ) -> Data {
         Data(MeasurementPolicyCanonicalJSON.object([
             "collector": .object([
                 "expected_cdhash": .string(collector.expectedCDHash),

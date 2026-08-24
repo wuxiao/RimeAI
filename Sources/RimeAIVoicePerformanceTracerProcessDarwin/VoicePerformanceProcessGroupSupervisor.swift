@@ -43,7 +43,9 @@ public struct VoicePerformanceLiveProcessGenerationReader: Sendable {
                     .processGenerationMismatch
             }
             return generation
-        } catch {
+        } catch is VoicePerformanceTracerProcessError {
+            throw VoicePerformanceTracerProcessError.processGenerationMismatch
+        } catch is VoicePerformancePOSIXError {
             throw VoicePerformanceTracerProcessError.processGenerationMismatch
         }
     }
@@ -58,6 +60,12 @@ enum VoicePerformanceWaitOutcome: Equatable, Sendable {
     case running
     case exited(code: Int32)
     case signaled(signal: Int32)
+}
+
+private enum VoicePerformanceGenerationWaitState: Equatable, Sendable {
+    case live
+    case exitPending
+    case terminated
 }
 
 protocol VoicePerformanceProcessGroupSystem: Sendable {
@@ -254,11 +262,37 @@ struct DarwinVoicePerformanceProcessGroupSystem:
         guard result == 0 else {
             throw VoicePerformancePOSIXError(code: errno)
         }
-        if information.si_pid == 0 { return .running }
-        if information.si_code == CLD_EXITED {
-            return .exited(code: information.si_status)
+        return try Self.waitOutcome(
+            requestedPID: pid,
+            observedPID: information.si_pid,
+            code: information.si_code,
+            status: information.si_status
+        )
+    }
+
+    static func waitOutcome(
+        requestedPID: pid_t,
+        observedPID: pid_t,
+        code: Int32,
+        status: Int32
+    ) throws -> VoicePerformanceWaitOutcome {
+        guard requestedPID > 0 else {
+            throw VoicePerformanceTracerProcessError.processWaitFailed
         }
-        return .signaled(signal: information.si_status)
+        if observedPID == 0 { return .running }
+        guard observedPID == requestedPID else {
+            throw VoicePerformanceTracerProcessError.processWaitFailed
+        }
+        switch code {
+        case CLD_EXITED:
+            return .exited(code: status)
+        case CLD_KILLED, CLD_DUMPED:
+            return .signaled(signal: status)
+        case CLD_STOPPED, CLD_TRAPPED, CLD_CONTINUED:
+            return .running
+        default:
+            throw VoicePerformanceTracerProcessError.processWaitFailed
+        }
     }
 
     func currentContinuousNanoseconds() throws -> UInt64 {
@@ -317,7 +351,9 @@ private struct VoicePerformanceSupervisorOperations {
                 return
             } catch let error as VoicePerformancePOSIXError where error.code == EINTR {
                 continue
-            } catch {
+            } catch is VoicePerformanceTracerProcessError {
+                throw VoicePerformanceTracerProcessError.processGroupFailure
+            } catch is VoicePerformancePOSIXError {
                 throw VoicePerformanceTracerProcessError.processGroupFailure
             }
         }
@@ -331,9 +367,39 @@ private struct VoicePerformanceSupervisorOperations {
                 return try system.generation(pid: pid)
             } catch let error as VoicePerformancePOSIXError where error.code == EINTR {
                 continue
-            } catch {
+            } catch is VoicePerformanceTracerProcessError {
+                throw VoicePerformanceTracerProcessError
+                    .processGenerationMismatch
+            } catch is VoicePerformancePOSIXError {
                 throw VoicePerformanceTracerProcessError.processGenerationMismatch
             }
+        }
+    }
+
+    /// A child can exit after a non-consuming waitid probe reports it running
+    /// but before proc_pid_rusage can confirm its live generation. Because the
+    /// parent still owns the unreaped child, repeated waitid observations keep
+    /// an authoritative PID anchor while the terminal event becomes visible.
+    func generationWaitState(
+        _ expected: VoicePerformanceSupervisedProcessGeneration
+    ) throws -> VoicePerformanceGenerationWaitState {
+        let observedGeneration = try probeGeneration(pid: expected.pid)
+        if observedGeneration == expected {
+            return .live
+        }
+        guard observedGeneration == nil else {
+            throw VoicePerformanceTracerProcessError
+                .processGenerationMismatch
+        }
+        let observedWait = try peek(pid: expected.pid)
+        switch observedWait {
+        case .running:
+            // proc_pid_rusage can stop seeing an exiting child before waitid
+            // publishes its terminal status. The unreaped direct-child wait
+            // anchor prevents PID reuse, so poll without accepting success.
+            return .exitPending
+        case .exited, .signaled:
+            return .terminated
         }
     }
 
@@ -343,7 +409,9 @@ private struct VoicePerformanceSupervisorOperations {
                 return try system.waitNonBlocking(pid: pid)
             } catch let error as VoicePerformancePOSIXError where error.code == EINTR {
                 continue
-            } catch {
+            } catch is VoicePerformanceTracerProcessError {
+                throw VoicePerformanceTracerProcessError.processWaitFailed
+            } catch is VoicePerformancePOSIXError {
                 throw VoicePerformanceTracerProcessError.processWaitFailed
             }
         }
@@ -355,7 +423,9 @@ private struct VoicePerformanceSupervisorOperations {
                 return try system.peekNonBlocking(pid: pid)
             } catch let error as VoicePerformancePOSIXError where error.code == EINTR {
                 continue
-            } catch {
+            } catch is VoicePerformanceTracerProcessError {
+                throw VoicePerformanceTracerProcessError.processWaitFailed
+            } catch is VoicePerformancePOSIXError {
                 throw VoicePerformanceTracerProcessError.processWaitFailed
             }
         }
@@ -371,7 +441,9 @@ private struct VoicePerformanceSupervisorOperations {
                 continue
             } catch let error as VoicePerformancePOSIXError where error.code == ESRCH {
                 return false
-            } catch {
+            } catch is VoicePerformanceTracerProcessError {
+                throw VoicePerformanceTracerProcessError.processGroupFailure
+            } catch is VoicePerformancePOSIXError {
                 throw VoicePerformanceTracerProcessError.processGroupFailure
             }
         }
@@ -395,7 +467,9 @@ private struct VoicePerformanceSupervisorOperations {
                 where error.code == ESRCH
             {
                 return false
-            } catch {
+            } catch is VoicePerformanceTracerProcessError {
+                throw VoicePerformanceTracerProcessError.processGroupFailure
+            } catch is VoicePerformancePOSIXError {
                 throw VoicePerformanceTracerProcessError.processGroupFailure
             }
         }
@@ -404,7 +478,9 @@ private struct VoicePerformanceSupervisorOperations {
     func currentNanoseconds() throws -> UInt64 {
         do {
             return try system.currentContinuousNanoseconds()
-        } catch {
+        } catch is VoicePerformanceTracerProcessError {
+            throw VoicePerformanceTracerProcessError.processWaitFailed
+        } catch is VoicePerformancePOSIXError {
             throw VoicePerformanceTracerProcessError.processWaitFailed
         }
     }
@@ -441,7 +517,9 @@ private struct VoicePerformanceSupervisorOperations {
             )
         } catch let error as VoicePerformancePOSIXError where error.code == EINTR {
             return
-        } catch {
+        } catch is VoicePerformanceTracerProcessError {
+            throw VoicePerformanceTracerProcessError.processWaitFailed
+        } catch is VoicePerformancePOSIXError {
             throw VoicePerformanceTracerProcessError.processWaitFailed
         }
     }
@@ -570,11 +648,9 @@ public final class VoicePerformanceCollectorDriverSupervisor {
             let observed = try operations.peek(pid: driver.pid)
             switch observed {
             case .running:
-                guard try operations.probeGeneration(pid: driver.pid) == driver
-                else {
-                    throw VoicePerformanceTracerProcessError
-                        .processGenerationMismatch
-                }
+                let generationState = try operations
+                    .generationWaitState(driver)
+                if generationState == .terminated { continue }
             case .exited(let code):
                 guard code == 0 else {
                     throw VoicePerformanceTracerProcessError
@@ -742,7 +818,9 @@ public final class VoicePerformanceCollectorDriverSupervisor {
                     throw VoicePerformanceTracerProcessError.processGroupFailure
                 }
                 return false
-            } catch {
+            } catch is VoicePerformanceTracerProcessError {
+                throw VoicePerformanceTracerProcessError.processGroupFailure
+            } catch is VoicePerformancePOSIXError {
                 throw VoicePerformanceTracerProcessError.processGroupFailure
             }
         }
@@ -826,7 +904,9 @@ public final class VoicePerformanceCollectorDriverSupervisor {
                         .processGenerationMismatch
                 }
                 return
-            } catch {
+            } catch is VoicePerformanceTracerProcessError {
+                throw VoicePerformanceTracerProcessError.processGroupFailure
+            } catch is VoicePerformancePOSIXError {
                 throw VoicePerformanceTracerProcessError.processGroupFailure
             }
         }
@@ -1077,7 +1157,10 @@ public final class VoicePerformanceDriverHelperSupervisor {
             let observed = try operations.peek(pid: helper.pid)
             switch observed {
             case .running:
-                try verifyPreparedHelperGeneration(helper)
+                let generationState = try preparedHelperGenerationWaitState(
+                    helper
+                )
+                if generationState == .terminated { continue }
                 try operations.sleep(until: deadline)
             case .exited(let code):
                 if code == 0 {
@@ -1139,6 +1222,18 @@ public final class VoicePerformanceDriverHelperSupervisor {
         }
     }
 
+    private func preparedHelperGenerationWaitState(
+        _ helper: VoicePerformanceSupervisedProcessGeneration
+    ) throws -> VoicePerformanceGenerationWaitState {
+        guard let ownership = helperOwnership,
+            ownership.generation == helper,
+            ownership.isPrepared
+        else {
+            throw VoicePerformanceTracerProcessError.processGenerationMismatch
+        }
+        return try operations.generationWaitState(helper)
+    }
+
     private func requireNoHelperDescendants(
         _ helper: VoicePerformanceSupervisedProcessGeneration
     ) throws {
@@ -1183,7 +1278,9 @@ public final class VoicePerformanceDriverHelperSupervisor {
                         .processGenerationMismatch
                 }
                 return false
-            } catch {
+            } catch is VoicePerformanceTracerProcessError {
+                throw VoicePerformanceTracerProcessError.processGroupFailure
+            } catch is VoicePerformancePOSIXError {
                 throw VoicePerformanceTracerProcessError.processGroupFailure
             }
         }

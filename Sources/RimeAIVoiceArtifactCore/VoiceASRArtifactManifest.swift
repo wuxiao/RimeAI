@@ -1439,7 +1439,9 @@ public struct VoiceASRArtifactManifest: Equatable, Sendable {
     private static func isCanonicalRelativePath(_ path: String) -> Bool {
         guard !path.isEmpty,
               path.utf8.count <= 512,
-              path == path.precomposedStringWithCanonicalMapping,
+              path.utf8.elementsEqual(
+                  path.precomposedStringWithCanonicalMapping.utf8
+              ),
               !path.hasPrefix("/"),
               !path.hasSuffix("/"),
               !path.contains("\\"),
@@ -1528,26 +1530,21 @@ public struct VoiceASRArtifactVerifier: VoiceASRArtifactVerifying, Sendable {
         else {
             throw VoiceASRArtifactError.invalidVerificationLimits
         }
+        let artifactPath = artifactDirectory.path
         guard artifactDirectory.isFileURL,
-              artifactDirectory.path == artifactDirectory.standardizedFileURL.path
+              Self.isCanonicalAbsolutePath(artifactPath)
         else {
             throw VoiceASRArtifactError.artifactRootMustBeDirectory
         }
 
-        let rootDescriptor = open(
-            artifactDirectory.path,
-            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
-        )
-        guard rootDescriptor >= 0 else {
-            if errno == ELOOP {
-                throw VoiceASRArtifactError.insecureFilesystemEntry(".")
-            }
-            throw VoiceASRArtifactError.artifactRootMustBeDirectory
-        }
+        let openedRoot = try Self.openRootByComponents(artifactPath)
+        let rootDescriptor = openedRoot.descriptor
         defer { close(rootDescriptor) }
         var rootStatus = stat()
         guard fstat(rootDescriptor, &rootStatus) == 0,
               rootStatus.st_mode & S_IFMT == S_IFDIR,
+              rootStatus.st_dev == openedRoot.namedStatus.st_dev,
+              rootStatus.st_ino == openedRoot.namedStatus.st_ino,
               rootStatus.st_uid == geteuid(),
               rootStatus.st_mode & mode_t(0o022) == 0,
               Self.hasNoExtendedACL(descriptor: rootDescriptor)
@@ -1657,6 +1654,37 @@ public struct VoiceASRArtifactVerifier: VoiceASRArtifactVerifying, Sendable {
         guard finalTree == tree else {
             throw VoiceASRArtifactError.insecureFilesystemEntry(".")
         }
+        var heldFinalStatus = stat()
+        guard fstat(rootDescriptor, &heldFinalStatus) == 0,
+              heldFinalStatus.st_mode & S_IFMT == S_IFDIR,
+              heldFinalStatus.st_dev == rootStatus.st_dev,
+              heldFinalStatus.st_ino == rootStatus.st_ino,
+              heldFinalStatus.st_uid == geteuid(),
+              heldFinalStatus.st_mode & mode_t(0o022) == 0,
+              Self.hasNoExtendedACL(descriptor: rootDescriptor)
+        else {
+            throw VoiceASRArtifactError.insecureFilesystemEntry(".")
+        }
+        let reboundRoot: OpenedRoot
+        do {
+            reboundRoot = try Self.openRootByComponents(artifactPath)
+        } catch {
+            throw VoiceASRArtifactError.insecureFilesystemEntry(".")
+        }
+        defer { close(reboundRoot.descriptor) }
+        var reboundStatus = stat()
+        guard fstat(reboundRoot.descriptor, &reboundStatus) == 0,
+              reboundStatus.st_mode & S_IFMT == S_IFDIR,
+              reboundStatus.st_dev == rootStatus.st_dev,
+              reboundStatus.st_ino == rootStatus.st_ino,
+              reboundStatus.st_dev == reboundRoot.namedStatus.st_dev,
+              reboundStatus.st_ino == reboundRoot.namedStatus.st_ino,
+              reboundStatus.st_uid == geteuid(),
+              reboundStatus.st_mode & mode_t(0o022) == 0,
+              Self.hasNoExtendedACL(descriptor: reboundRoot.descriptor)
+        else {
+            throw VoiceASRArtifactError.insecureFilesystemEntry(".")
+        }
 
         return VoiceASRVerifiedArtifact(
             artifactDirectory: artifactDirectory,
@@ -1677,9 +1705,105 @@ public struct VoiceASRArtifactVerifier: VoiceASRArtifactVerifying, Sendable {
         let bytes: Int64
     }
 
+    private struct OpenedRoot {
+        let descriptor: Int32
+        let namedStatus: stat
+    }
+
     private struct FileDigest {
         let sha256: String
         let bytes: Int64
+    }
+
+    private static func isCanonicalAbsolutePath(_ path: String) -> Bool {
+        guard path.utf8.count > 1,
+              path.utf8.count < 4_096,
+              path.first == "/",
+              path.last != "/",
+              path.utf8.elementsEqual(
+                  path.precomposedStringWithCanonicalMapping.utf8
+              ),
+              !path.unicodeScalars.contains(where: {
+                  $0.value < 0x20 || $0.value == 0x7F
+              })
+        else {
+            return false
+        }
+        return path.dropFirst().split(
+            separator: "/",
+            omittingEmptySubsequences: false
+        ).allSatisfy {
+            !$0.isEmpty && $0 != "." && $0 != ".."
+                && $0.utf8.count <= 255
+        }
+    }
+
+    private static func openRootByComponents(
+        _ path: String
+    ) throws -> OpenedRoot {
+        let components = path.dropFirst().split(
+            separator: "/",
+            omittingEmptySubsequences: false
+        ).map(String.init)
+        guard !components.isEmpty else {
+            throw VoiceASRArtifactError.artifactRootMustBeDirectory
+        }
+        var current = open(
+            "/",
+            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+        )
+        guard current >= 0 else {
+            throw VoiceASRArtifactError.artifactRootMustBeDirectory
+        }
+        do {
+            for (index, component) in components.enumerated() {
+                var named = stat()
+                let statusResult = component.withCString { pointer in
+                    fstatat(current, pointer, &named, AT_SYMLINK_NOFOLLOW)
+                }
+                guard statusResult == 0 else {
+                    throw VoiceASRArtifactError.artifactRootMustBeDirectory
+                }
+                guard named.st_mode & S_IFMT != S_IFLNK else {
+                    throw VoiceASRArtifactError.insecureFilesystemEntry(".")
+                }
+                guard named.st_mode & S_IFMT == S_IFDIR else {
+                    throw VoiceASRArtifactError.artifactRootMustBeDirectory
+                }
+                let next = component.withCString { pointer in
+                    openat(
+                        current,
+                        pointer,
+                        O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+                    )
+                }
+                guard next >= 0 else {
+                    throw VoiceASRArtifactError.insecureFilesystemEntry(".")
+                }
+                var opened = stat()
+                guard fstat(next, &opened) == 0,
+                      opened.st_mode & S_IFMT == S_IFDIR,
+                      opened.st_dev == named.st_dev,
+                      opened.st_ino == named.st_ino
+                else {
+                    close(next)
+                    throw VoiceASRArtifactError.insecureFilesystemEntry(".")
+                }
+                close(current)
+                current = next
+                if index == components.count - 1 {
+                    return OpenedRoot(
+                        descriptor: current,
+                        namedStatus: named
+                    )
+                }
+            }
+        } catch {
+            close(current)
+            throw error
+        }
+        close(current)
+        throw VoiceASRArtifactError.artifactRootMustBeDirectory
     }
 
     private func inspectTree(

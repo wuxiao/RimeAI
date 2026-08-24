@@ -29,8 +29,13 @@ if (( ${#library_files} != 1 )); then
 fi
 library_file=${library_files[1]}
 headers_dir=${library_file:h}/Headers
+if [[ ! -d "${headers_dir}" || -L "${headers_dir}" ]]; then
+  print -u2 "error: public librime Headers must be a real directory"
+  exit 1
+fi
 for header_name in rime_api.h rime_api_stdbool.h rime_api_deprecated.h; do
-  if [[ ! -f "${headers_dir}/${header_name}" ]]; then
+  if [[ ! -f "${headers_dir}/${header_name}" \
+    || -L "${headers_dir}/${header_name}" ]]; then
     print -u2 "error: public librime header is missing: ${header_name}"
     exit 1
   fi
@@ -70,6 +75,39 @@ if [[ -f "${artifact_lock}" ]]; then
   actual_source_lock_sha=$(
     shasum -a 256 "${source_lock}" | awk '{ print $1 }'
   )
+  header_lock_keys=(
+    rime_api
+    rime_api_deprecated
+    rime_api_stdbool
+  )
+  for header_key in "${header_lock_keys[@]}"; do
+    expected_header_name=$(
+      plutil -extract "public_headers.${header_key}.path" raw -o - \
+        "${artifact_lock}"
+    )
+    expected_header_sha=$(
+      plutil -extract "public_headers.${header_key}.sha256" raw -o - \
+        "${artifact_lock}"
+    )
+    artifact_header="${headers_dir}/${expected_header_name}"
+    canonical_header="${project_root}/ios/Native/include/${expected_header_name}"
+    if [[ ! -f "${artifact_header}" || -L "${artifact_header}" \
+      || ! -f "${canonical_header}" || -L "${canonical_header}" ]]; then
+      print -u2 \
+        "error: locked public librime header must be a real file: ${expected_header_name}"
+      exit 1
+    fi
+    actual_header_sha=$(shasum -a 256 "${artifact_header}" | awk '{ print $1 }')
+    canonical_header_sha=$(
+      shasum -a 256 "${canonical_header}" | awk '{ print $1 }'
+    )
+    if [[ "${actual_header_sha}" != "${expected_header_sha}" \
+      || "${canonical_header_sha}" != "${expected_header_sha}" ]]; then
+      print -u2 \
+        "error: public librime header does not match its lock: ${expected_header_name}"
+      exit 1
+    fi
+  done
   if [[ "${artifact_root:t}" != "${expected_artifact}" \
     || "${actual_library_path}" != "${expected_library_path}" \
     || "${actual_library_size}" != "${expected_library_size}" \

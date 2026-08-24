@@ -136,10 +136,63 @@ struct VoiceASRArtifactManifestTests {
         #expect(verified.verifiedPayloadBytes == 49)
     }
 
+    @Test("artifact root is opened by absolute components without symlinks")
+    func artifactRootRejectsSymlinkedAncestor() throws {
+        let privateTemporaryDirectory = URL(
+            fileURLWithPath: "/private/tmp",
+            isDirectory: true
+        )
+        let directory = try Self.makeValidArtifactDirectory(
+            parentDirectory: privateTemporaryDirectory
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        #expect(
+            try VoiceASRArtifactVerifier().verifyArtifact(at: directory)
+                .verifiedFileCount == 7
+        )
+
+        let symlinkedAncestor = URL(
+            fileURLWithPath: directory.path.replacingOccurrences(
+                of: "/private/tmp/",
+                with: "/tmp/",
+                options: [.anchored]
+            ),
+            isDirectory: true
+        )
+        #expect(
+            throws: VoiceASRArtifactError.insecureFilesystemEntry(".")
+        ) {
+            _ = try VoiceASRArtifactVerifier().verifyArtifact(
+                at: symlinkedAncestor
+            )
+        }
+
+        let decomposedParent = privateTemporaryDirectory
+            .appendingPathComponent(
+                "rimeai-e\u{301}-artifact-parent-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        try FileManager.default.createDirectory(
+            at: decomposedParent,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700]
+        )
+        defer { try? FileManager.default.removeItem(at: decomposedParent) }
+        let decomposedDirectory = try Self.makeValidArtifactDirectory(
+            parentDirectory: decomposedParent
+        )
+        #expect(throws: VoiceASRArtifactError.artifactRootMustBeDirectory) {
+            _ = try VoiceASRArtifactVerifier().verifyArtifact(
+                at: decomposedDirectory
+            )
+        }
+    }
+
     @Test("selector directory ID must match the verified manifest ID")
     func storeBindsSelectorIDToManifestID() throws {
         let artifact = try Self.makeValidArtifactDirectory()
-        let home = FileManager.default.temporaryDirectory.appendingPathComponent(
+        let home = Self.privateTemporaryDirectory.appendingPathComponent(
             "rimeai-voice-store-identity-\(UUID().uuidString)",
             isDirectory: true
         )
@@ -183,7 +236,7 @@ struct VoiceASRArtifactManifestTests {
     )
     func verifiedCurrentArtifactBuildsControlledProductDescriptor() throws {
         let artifact = try Self.makeValidArtifactDirectory()
-        let home = FileManager.default.temporaryDirectory.appendingPathComponent(
+        let home = Self.privateTemporaryDirectory.appendingPathComponent(
             "rimeai-voice-lease-\(UUID().uuidString)",
             isDirectory: true
         )
@@ -255,7 +308,7 @@ struct VoiceASRArtifactManifestTests {
         let second = try Self.makeValidArtifactDirectory(
             artifactID: secondID.rawValue
         )
-        let home = FileManager.default.temporaryDirectory.appendingPathComponent(
+        let home = Self.privateTemporaryDirectory.appendingPathComponent(
             "rimeai-voice-load-lock-\(UUID().uuidString)",
             isDirectory: true
         )
@@ -316,7 +369,7 @@ struct VoiceASRArtifactManifestTests {
     @Test("product descriptor rejects a backend probe from another generation")
     func productDescriptorBindsBackendProbeGeneration() throws {
         let artifact = try Self.makeValidArtifactDirectory()
-        let home = FileManager.default.temporaryDirectory.appendingPathComponent(
+        let home = Self.privateTemporaryDirectory.appendingPathComponent(
             "rimeai-voice-generation-\(UUID().uuidString)",
             isDirectory: true
         )
@@ -368,7 +421,7 @@ struct VoiceASRArtifactManifestTests {
 
     @Test("backend load cannot begin without a selected artifact")
     func verifiedCurrentArtifactRequiresCurrentSelector() throws {
-        let home = FileManager.default.temporaryDirectory.appendingPathComponent(
+        let home = Self.privateTemporaryDirectory.appendingPathComponent(
             "rimeai-voice-no-current-\(UUID().uuidString)",
             isDirectory: true
         )
@@ -1177,9 +1230,13 @@ struct VoiceASRArtifactManifestTests {
     }
 
     private static func makeValidArtifactDirectory(
-        artifactID: String = "sherpa-zipformer-zh-en-int8-v1"
+        artifactID: String = "sherpa-zipformer-zh-en-int8-v1",
+        parentDirectory: URL = URL(
+            fileURLWithPath: "/private/tmp",
+            isDirectory: true
+        )
     ) throws -> URL {
-        let root = FileManager.default.temporaryDirectory
+        let root = parentDirectory
             .appendingPathComponent(
                 "rimeai-voice-artifact-\(UUID().uuidString)",
                 isDirectory: true
@@ -1256,6 +1313,10 @@ struct VoiceASRArtifactManifestTests {
             #expect(chmod(file.path, mode_t(0o600)) == 0)
         }
         return root
+    }
+
+    private static var privateTemporaryDirectory: URL {
+        URL(fileURLWithPath: "/private/tmp", isDirectory: true)
     }
 
     private static func encodedJSONString(_ value: String) throws -> String {

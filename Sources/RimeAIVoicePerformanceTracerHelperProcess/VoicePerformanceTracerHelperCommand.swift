@@ -16,6 +16,7 @@ public enum VoicePerformanceTracerHelperCommandError:
     case peerDisconnectedEarly
     case unexpectedFrameAfterReady
     case transportFailed
+    case internalFailure
 }
 
 public enum VoicePerformanceTracerHelperConnectionError:
@@ -136,9 +137,11 @@ public enum VoicePerformanceTracerHelperCommand {
             releasePolicySHA256 = try PerformanceControlSHA256(
                 policy.releasePolicySHA256
             )
-        } catch {
+        } catch is PerformanceControlError {
             throw VoicePerformanceTracerHelperCommandError
                 .invalidVerifiedBundle
+        } catch {
+            throw VoicePerformanceTracerHelperCommandError.internalFailure
         }
 
         try requireUnexpired(arguments.deadline, runtime: runtime)
@@ -156,8 +159,12 @@ public enum VoicePerformanceTracerHelperCommand {
         let facade: any VoicePerformanceTracerHelperFacade
         do {
             facade = try runtime.makeFacade(measurementPolicy: policy)
-        } catch {
+        } catch let error as VoicePerformanceTracerHelperCommandError {
+            throw error
+        } catch is PerformanceControlError {
             throw VoicePerformanceTracerHelperCommandError.invalidFrame
+        } catch {
+            throw VoicePerformanceTracerHelperCommandError.internalFailure
         }
         guard !facade.authenticatedProductionDriver else {
             facade.cancel()
@@ -428,7 +435,7 @@ public enum VoicePerformanceTracerHelperCommand {
 
     private static func normalize(
         _ error: Error
-    ) -> VoicePerformanceTracerHelperCommandError {
+    ) -> Error {
         if let command =
             error as? VoicePerformanceTracerHelperCommandError
         {
@@ -439,13 +446,22 @@ public enum VoicePerformanceTracerHelperCommand {
         {
             switch connection {
             case .peerDisconnected:
-                return .peerDisconnectedEarly
+                return VoicePerformanceTracerHelperCommandError
+                    .peerDisconnectedEarly
             case .timedOut:
-                return .deadlineExpired
+                return VoicePerformanceTracerHelperCommandError
+                    .deadlineExpired
             case .failed:
-                return .transportFailed
+                return VoicePerformanceTracerHelperCommandError
+                    .transportFailed
             }
         }
-        return .invalidFrame
+        if error is PerformanceControlError
+            || error is PerformanceControlSessionBindingError
+            || error is VoicePerformanceTracerProcessError
+        {
+            return VoicePerformanceTracerHelperCommandError.invalidFrame
+        }
+        return error
     }
 }

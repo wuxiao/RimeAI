@@ -30,6 +30,7 @@ public enum VoicePerformanceTracerCollectorProcessError:
     case resultDurabilityFailed = "E_RESULT_DURABILITY"
     case resultInstallationIndeterminate = "E_RESULT_INDETERMINATE"
     case cleanupFailed = "E_CLEANUP"
+    case internalFailure = "E_INTERNAL"
 
     public var code: String { rawValue }
     public var description: String { rawValue }
@@ -148,9 +149,14 @@ public final class VoicePerformanceTracerCollectorProcess {
                 context = try runtime.verifyCollectorBundle(
                     declaredPath: arguments.tracerBundlePath
                 )
-            } catch {
+            } catch VoicePerformanceTracerProcessError
+                .invalidTracerBundle
+            {
                 throw VoicePerformanceTracerCollectorProcessError
                     .invalidTracerBundle
+            } catch {
+                throw VoicePerformanceTracerCollectorProcessError
+                    .internalFailure
             }
             guard context.outerPath == arguments.tracerBundlePath,
                   !context.authenticatedProductionDriver,
@@ -175,9 +181,12 @@ public final class VoicePerformanceTracerCollectorProcess {
                     measurementPolicy: context.measurementPolicy,
                     driverPolicy: context.driverPolicy
                 )
-            } catch {
+            } catch is VoicePerformanceTracerCollectorError {
                 throw VoicePerformanceTracerCollectorProcessError
                     .invalidTracerBundle
+            } catch {
+                throw VoicePerformanceTracerCollectorProcessError
+                    .internalFailure
             }
 
             let deadline: VoicePerformanceTracerCollectorGlobalDeadline
@@ -189,9 +198,12 @@ public final class VoicePerformanceTracerCollectorProcess {
                 }
             } catch let error as VoicePerformanceTracerCollectorProcessError {
                 throw error
-            } catch {
+            } catch is VoicePerformanceTracerProcessError {
                 throw VoicePerformanceTracerCollectorProcessError
                     .deadlineFailure
+            } catch {
+                throw VoicePerformanceTracerCollectorProcessError
+                    .internalFailure
             }
 
             do {
@@ -204,9 +216,15 @@ public final class VoicePerformanceTracerCollectorProcess {
                 }
             } catch let error as VoicePerformanceTracerCollectorProcessError {
                 throw error
-            } catch {
+            } catch is VoicePerformanceTracerTransportError {
                 throw VoicePerformanceTracerCollectorProcessError
                     .transportFailure
+            } catch is VoicePerformanceTracerProcessError {
+                throw VoicePerformanceTracerCollectorProcessError
+                    .transportFailure
+            } catch {
+                throw VoicePerformanceTracerCollectorProcessError
+                    .internalFailure
             }
 
             let driverExecutable = context.measurementPolicy.driver
@@ -244,9 +262,12 @@ public final class VoicePerformanceTracerCollectorProcess {
                         processGroupID: generation.processGroupID
                     )
                 )
-            } catch {
+            } catch is VoicePerformanceTracerTransportError {
                 throw VoicePerformanceTracerCollectorProcessError
                     .transportFailure
+            } catch {
+                throw VoicePerformanceTracerCollectorProcessError
+                    .internalFailure
             }
 
             let result: VoicePerformanceTracerResult
@@ -255,9 +276,15 @@ public final class VoicePerformanceTracerCollectorProcess {
                     request,
                     deadline: deadline.collectorDeadline
                 )
-            } catch {
+            } catch VoicePerformanceTracerCollectorError.internalFailure {
+                throw VoicePerformanceTracerCollectorProcessError
+                    .internalFailure
+            } catch is VoicePerformanceTracerCollectorError {
                 throw VoicePerformanceTracerCollectorProcessError
                     .collectionFailed
+            } catch {
+                throw VoicePerformanceTracerCollectorProcessError
+                    .internalFailure
             }
             guard !result.authenticatedProductionDriver,
                   result.driverAttestation.pid == generation.pid,
@@ -270,9 +297,12 @@ public final class VoicePerformanceTracerCollectorProcess {
 
             do {
                 try runtime.waitForSucceededDriver(before: deadline)
-            } catch {
+            } catch is VoicePerformanceTracerProcessError {
                 throw VoicePerformanceTracerCollectorProcessError
                     .driverExitFailed
+            } catch {
+                throw VoicePerformanceTracerCollectorProcessError
+                    .internalFailure
             }
 
             do {
@@ -282,9 +312,12 @@ public final class VoicePerformanceTracerCollectorProcess {
                 }
             } catch let error as VoicePerformanceTracerCollectorProcessError {
                 throw error
-            } catch {
+            } catch is VoicePerformanceTracerProcessError {
                 throw VoicePerformanceTracerCollectorProcessError
                     .deadlineFailure
+            } catch {
+                throw VoicePerformanceTracerCollectorProcessError
+                    .internalFailure
             }
 
             let canonical: Data
@@ -298,9 +331,12 @@ public final class VoicePerformanceTracerCollectorProcess {
                 }
             } catch let error as VoicePerformanceTracerCollectorProcessError {
                 throw error
-            } catch {
+            } catch is VoicePerformanceTracerCollectorError {
                 throw VoicePerformanceTracerCollectorProcessError
                     .resultCanonicalizationFailed
+            } catch {
+                throw VoicePerformanceTracerCollectorProcessError
+                    .internalFailure
             }
 
             do {
@@ -310,9 +346,12 @@ public final class VoicePerformanceTracerCollectorProcess {
                 }
             } catch let error as VoicePerformanceTracerCollectorProcessError {
                 throw error
-            } catch {
+            } catch is VoicePerformanceTracerProcessError {
                 throw VoicePerformanceTracerCollectorProcessError
                     .deadlineFailure
+            } catch {
+                throw VoicePerformanceTracerCollectorProcessError
+                    .internalFailure
             }
 
             closeTransportOnce()
@@ -341,12 +380,18 @@ public final class VoicePerformanceTracerCollectorProcess {
             if driverOwnershipAcquired {
                 do {
                     try runtime.terminateDriverGroupAndReap()
-                } catch {
+                } catch is VoicePerformanceTracerProcessError {
                     if primary == .resultInstallationIndeterminate {
                         throw primary
                     }
                     throw VoicePerformanceTracerCollectorProcessError
                         .cleanupFailed
+                } catch {
+                    if primary == .resultInstallationIndeterminate {
+                        throw primary
+                    }
+                    throw VoicePerformanceTracerCollectorProcessError
+                        .internalFailure
                 }
             }
             throw primary
@@ -359,7 +404,7 @@ public final class VoicePerformanceTracerCollectorProcess {
         if let error = error as? VoicePerformanceTracerCollectorProcessError {
             return error
         }
-        return .collectionFailed
+        return .internalFailure
     }
 
     private static func resultPathOverlapsProtectedInput(
@@ -406,7 +451,7 @@ public final class VoicePerformanceTracerCollectorProcess {
         fallback: VoicePerformanceTracerCollectorProcessError
     ) -> VoicePerformanceTracerCollectorProcessError {
         guard let error = error as? VoicePerformanceTracerProcessError else {
-            return fallback
+            return .internalFailure
         }
         return switch error {
         case .invalidArguments:

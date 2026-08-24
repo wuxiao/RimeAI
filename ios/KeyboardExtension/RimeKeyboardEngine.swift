@@ -6,6 +6,57 @@ struct RimeKeyboardCandidate: Sendable {
     let index: Int
 }
 
+enum RimeKeyboardSelectionOutcome: Sendable {
+    case complete
+    case partial
+}
+
+struct RimeKeyboardSelection: Equatable, Sendable {
+    let committedText: String
+    let historyInput: String
+    let remainingComposition: String?
+
+    init?(
+        outcome: RimeKeyboardSelectionOutcome,
+        originalComposition: String,
+        committedText: String,
+        remainingComposition: String
+    ) {
+        guard let transition = CandidateSelectionTransition(
+            originalInput: originalComposition,
+            committedText: committedText,
+            remainingInput: remainingComposition
+        ) else {
+            return nil
+        }
+        switch outcome {
+        case .complete:
+            guard transition.remainingInput == nil else {
+                return nil
+            }
+        case .partial:
+            guard transition.remainingInput != nil else {
+                return nil
+            }
+        }
+        self.committedText = transition.committedText
+        historyInput = transition.historyInput
+        self.remainingComposition = transition.remainingInput
+    }
+
+    static func outcome(fromNativeResult result: Int32) ->
+        RimeKeyboardSelectionOutcome?
+    {
+        if result == Int32(RAI_CANDIDATE_SELECTION_COMPLETE) {
+            return .complete
+        }
+        if result == Int32(RAI_CANDIDATE_SELECTION_PARTIAL) {
+            return .partial
+        }
+        return nil
+    }
+}
+
 enum RimeKeyboardEngineError: Error, LocalizedError, Sendable {
     case resource(String)
     case engine(String)
@@ -147,11 +198,11 @@ final class RimeKeyboardEngine: @unchecked Sendable {
         }
     }
 
-    func commit(
+    func select(
         pinyin: String,
-        candidateIndex: Int,
+        candidate: RimeKeyboardCandidate,
         completion: @escaping @Sendable (
-            Result<String, RimeKeyboardEngineError>
+            Result<RimeKeyboardSelection, RimeKeyboardEngineError>
         ) -> Void
     ) {
         queue.async { [self] in
@@ -159,25 +210,48 @@ final class RimeKeyboardEngine: @unchecked Sendable {
                 completion(.failure(.engine("librime 尚未就绪")))
                 return
             }
-            var committed = [CChar](repeating: 0, count: 4096)
+            var selected = [CChar](repeating: 0, count: 4096)
+            var remaining = [CChar](repeating: 0, count: 4096)
             var error = [CChar](repeating: 0, count: 512)
-            let result = committed.withUnsafeMutableBufferPointer {
-                committedBuffer in
-                error.withUnsafeMutableBufferPointer { errorBuffer in
-                    pinyin.withCString { input in
-                        rai_engine_commit_candidate(
-                            engine,
-                            input,
-                            candidateIndex,
-                            committedBuffer.baseAddress,
-                            committedBuffer.count,
-                            errorBuffer.baseAddress,
-                            errorBuffer.count
-                        )
+            let result = selected.withUnsafeMutableBufferPointer {
+                selectedBuffer in
+                remaining.withUnsafeMutableBufferPointer { remainingBuffer in
+                    error.withUnsafeMutableBufferPointer { errorBuffer in
+                        pinyin.withCString { input in
+                            candidate.text.withCString { expected in
+                                rai_engine_select_candidate(
+                                    engine,
+                                    input,
+                                    candidate.index,
+                                    expected,
+                                    selectedBuffer.baseAddress,
+                                    selectedBuffer.count,
+                                    remainingBuffer.baseAddress,
+                                    remainingBuffer.count,
+                                    errorBuffer.baseAddress,
+                                    errorBuffer.count
+                                )
+                            }
+                        }
                     }
                 }
             }
-            guard result >= 0 else {
+            guard let outcome = RimeKeyboardSelection.outcome(
+                      fromNativeResult: result
+                  ),
+                  let selection = RimeKeyboardSelection(
+                      outcome: outcome,
+                      originalComposition: pinyin,
+                      committedText: Self.message(
+                          from: selected,
+                          fallback: ""
+                      ),
+                      remainingComposition: Self.message(
+                          from: remaining,
+                          fallback: ""
+                      )
+                  )
+            else {
                 completion(
                     .failure(
                         .engine(
@@ -190,10 +264,7 @@ final class RimeKeyboardEngine: @unchecked Sendable {
                 )
                 return
             }
-            let text = committed.withUnsafeBufferPointer { pointer in
-                String(cString: pointer.baseAddress!)
-            }
-            completion(.success(text))
+            completion(.success(selection))
         }
     }
 

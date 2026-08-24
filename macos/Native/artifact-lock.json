@@ -3,6 +3,20 @@
   "artifact": "RimeAIMacRuntime.xcframework",
   "deployment_target": "macOS 14.0",
   "architecture": "arm64",
+  "public_headers": {
+    "rime_api": {
+      "path": "rime_api.h",
+      "sha256": "6eb5629162c44761e7b878f1b122f464de5c8685bd3cd5ac1e8519badc6d6424"
+    },
+    "rime_api_deprecated": {
+      "path": "rime_api_deprecated.h",
+      "sha256": "21625c4e16480a4540939299a002f21b11150bb10b69f5331e1580875ac63341"
+    },
+    "rime_api_stdbool": {
+      "path": "rime_api_stdbool.h",
+      "sha256": "f5a64254e98c1c12ce6628f5d540bcd4e4b542ec287b4873c0b0ce4ed1bece99"
+    }
+  },
   "source_lock_sha256": "38ac17c6e11b4a7262e747fd5bbb0e52e221c3870f75e47a5dea23c37897f618",
   "info_plist_sha256": "687c6bca5ccfc9abc95631558606bb0a7fdebf4cf84fcba05118dd082fedf18a",
   "library": {

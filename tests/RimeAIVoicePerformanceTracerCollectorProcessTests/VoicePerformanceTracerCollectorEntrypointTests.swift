@@ -71,6 +71,8 @@ struct VoicePerformanceTracerCollectorEntrypointTests {
              70, "rimeai-voice-performance-tracer:E_INTERNAL\n"),
             (VoicePerformanceTracerCollectorProcessError.cleanupFailed,
              70, "rimeai-voice-performance-tracer:E_INTERNAL\n"),
+            (VoicePerformanceTracerCollectorProcessError.internalFailure,
+             70, "rimeai-voice-performance-tracer:E_INTERNAL\n"),
             (EntrypointFixtureError.sensitiveDescription,
              70, "rimeai-voice-performance-tracer:E_INTERNAL\n"),
         ]

@@ -43,6 +43,19 @@ struct RimeAISettingsStoreTests {
         #expect(store.contextPolicy == .standard)
         #expect(store.disabledAIApplications.isEmpty)
         #expect(store.disabledContextApplications.isEmpty)
+        #expect(store.voiceShortcut == .default)
+    }
+
+    @Test("voice shortcut persists as a validated value")
+    func voiceShortcutPersistence() throws {
+        let (store, defaults) = makeStore()
+        let custom = try #require(
+            VoiceDictationShortcut(keyCode: 0, modifiers: [.option, .shift])
+        )
+
+        store.voiceShortcut = custom
+
+        #expect(RimeAISettingsStore(defaults: defaults).voiceShortcut == custom)
     }
 
     @Test("cloud history ignores local application and context policies")
@@ -227,12 +240,15 @@ struct RimeAISettingsStoreTests {
     }
 
     @Test("reset removes product settings but preserves privacy defaults")
-    func reset() {
+    func reset() throws {
         let (store, _) = makeStore()
         store.aiEnabled = false
         store.offlineLockEnabled = false
         store.cloudConfigured = true
         store.voiceEnabled = true
+        store.voiceShortcut = try #require(
+            VoiceDictationShortcut(keyCode: 12, modifiers: [.option, .shift])
+        )
         store.voiceRimeHotwordsEnabled = true
         store.cloudModelID = "glm-5.3"
         store.contextPolicy = .smart
@@ -248,6 +264,7 @@ struct RimeAISettingsStoreTests {
         #expect(store.offlineLockEnabled)
         #expect(!store.cloudConfigured)
         #expect(!store.voiceEnabled)
+        #expect(store.voiceShortcut == .default)
         #expect(!store.voiceRimeHotwordsEnabled)
         #expect(
             store.cloudModelID
@@ -259,15 +276,396 @@ struct RimeAISettingsStoreTests {
     }
 
     @Test("voice hotword consent is explicit and exported")
-    func voiceHotwordConsentIsExplicitAndExported() {
+    func voiceHotwordConsentIsExplicitAndExported() throws {
         let (store, _) = makeStore()
+        let shortcut = try #require(
+            VoiceDictationShortcut(keyCode: 12, modifiers: [.option, .shift])
+        )
 
         #expect(!store.voiceRimeHotwordsEnabled)
         store.voiceRimeHotwordsEnabled = true
+        store.voiceShortcut = shortcut
 
         let snapshot = store.exportSnapshot()
-        #expect(snapshot.schemaVersion == 5)
+        #expect(snapshot.schemaVersion == 6)
         #expect(snapshot.voiceEnabled == false)
         #expect(snapshot.voiceRimeHotwordsEnabled)
+        #expect(snapshot.voiceShortcut == shortcut)
+    }
+
+    @Test("schema 5 exports migrate a missing voice shortcut to the default")
+    func schemaFiveVoiceShortcutMigration() throws {
+        let legacy = RimeAISettingsExport(
+            schemaVersion: 5,
+            aiEnabled: true,
+            offlineLockEnabled: true,
+            contextPolicy: .standard,
+            disabledAIApplications: [],
+            disabledContextApplications: [],
+            diagnostics: [:]
+        )
+        let encoded = try JSONEncoder().encode(legacy)
+        var object = try #require(
+            JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        )
+        object.removeValue(forKey: "voiceShortcut")
+
+        let decoded = try JSONDecoder().decode(
+            RimeAISettingsExport.self,
+            from: JSONSerialization.data(withJSONObject: object)
+        )
+
+        #expect(decoded.schemaVersion == 5)
+        #expect(decoded.voiceShortcut == .default)
+    }
+
+    @Test("validated import applies settings once without importing diagnostics")
+    func validatedImportIsBatched() throws {
+        let (store, _) = makeStore()
+        store.record(.resultShown)
+        let shortcut = try #require(
+            VoiceDictationShortcut(keyCode: 12, modifiers: [.control, .shift])
+        )
+        let changes = NotificationCounter()
+        let observer = NotificationCenter.default.addObserver(
+            forName: .rimeAISettingsDidChange,
+            object: store,
+            queue: nil
+        ) { _ in
+            changes.increment()
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+        let snapshot = RimeAISettingsExport(
+            inputPreferences: RimeAIInputPreferences(
+                characterSet: .traditional,
+                characterWidth: .full,
+                punctuationStyle: .western
+            ),
+            aiEnabled: true,
+            offlineLockEnabled: true,
+            cloudConfigured: true,
+            voiceEnabled: true,
+            voiceShortcut: shortcut,
+            voiceRimeHotwordsEnabled: true,
+            contextPolicy: .smart,
+            disabledAIApplications: ["com.example.NoAI"],
+            disabledContextApplications: ["com.example.NoContext"],
+            diagnostics: ["forged_policy": 999]
+        )
+
+        try store.applyImport(snapshot, hasCloudCredential: true)
+
+        #expect(changes.currentValue == 1)
+        #expect(store.inputPreferences == snapshot.inputPreferences)
+        #expect(store.cloudConfigured)
+        #expect(store.voiceEnabled)
+        #expect(store.voiceShortcut == shortcut)
+        #expect(store.voiceRimeHotwordsEnabled)
+        #expect(store.contextPolicy == .smart)
+        #expect(store.disabledAIApplications == ["com.example.NoAI"])
+        #expect(store.disabledContextApplications == ["com.example.NoContext"])
+        #expect(store.diagnosticCount(.resultShown) == 1)
+        #expect(store.diagnosticSnapshot()["forged_policy"] == nil)
+    }
+
+    @Test("authority-invalid imports are rejected atomically")
+    func invalidImportAuthorityIsAtomic() {
+        let validArguments = (
+            aiEnabled: true,
+            offlineLockEnabled: true,
+            contextPolicy: ContextPolicy.standard,
+            disabledAIApplications: [String](),
+            disabledContextApplications: [String](),
+            diagnostics: [String: Int]()
+        )
+        let invalidImports: [(RimeAISettingsExport, RimeAISettingsImportError)] = [
+            (
+                RimeAISettingsExport(
+                    schemaVersion: 4,
+                    aiEnabled: validArguments.aiEnabled,
+                    offlineLockEnabled: validArguments.offlineLockEnabled,
+                    contextPolicy: validArguments.contextPolicy,
+                    disabledAIApplications: validArguments.disabledAIApplications,
+                    disabledContextApplications:
+                        validArguments.disabledContextApplications,
+                    diagnostics: validArguments.diagnostics
+                ),
+                .unsupportedSchemaVersion(4)
+            ),
+            (
+                RimeAISettingsExport(
+                    aiEnabled: validArguments.aiEnabled,
+                    offlineLockEnabled: false,
+                    contextPolicy: validArguments.contextPolicy,
+                    disabledAIApplications: validArguments.disabledAIApplications,
+                    disabledContextApplications:
+                        validArguments.disabledContextApplications,
+                    diagnostics: validArguments.diagnostics
+                ),
+                .offlineLockRequired
+            ),
+            (
+                RimeAISettingsExport(
+                    aiEnabled: validArguments.aiEnabled,
+                    offlineLockEnabled: validArguments.offlineLockEnabled,
+                    cloudProvider: "untrusted-provider",
+                    contextPolicy: validArguments.contextPolicy,
+                    disabledAIApplications: validArguments.disabledAIApplications,
+                    disabledContextApplications:
+                        validArguments.disabledContextApplications,
+                    diagnostics: validArguments.diagnostics
+                ),
+                .unsupportedCloudProvider
+            ),
+            (
+                RimeAISettingsExport(
+                    aiEnabled: validArguments.aiEnabled,
+                    offlineLockEnabled: validArguments.offlineLockEnabled,
+                    cloudEndpoint: "https://example.invalid/",
+                    contextPolicy: validArguments.contextPolicy,
+                    disabledAIApplications: validArguments.disabledAIApplications,
+                    disabledContextApplications:
+                        validArguments.disabledContextApplications,
+                    diagnostics: validArguments.diagnostics
+                ),
+                .unsupportedCloudEndpoint
+            ),
+            (
+                RimeAISettingsExport(
+                    aiEnabled: validArguments.aiEnabled,
+                    offlineLockEnabled: validArguments.offlineLockEnabled,
+                    cloudModelID: "untrusted-model",
+                    contextPolicy: validArguments.contextPolicy,
+                    disabledAIApplications: validArguments.disabledAIApplications,
+                    disabledContextApplications:
+                        validArguments.disabledContextApplications,
+                    diagnostics: validArguments.diagnostics
+                ),
+                .unsupportedCloudModelID
+            ),
+            (
+                RimeAISettingsExport(
+                    aiEnabled: validArguments.aiEnabled,
+                    offlineLockEnabled: validArguments.offlineLockEnabled,
+                    cloudConfigured: true,
+                    contextPolicy: validArguments.contextPolicy,
+                    disabledAIApplications: validArguments.disabledAIApplications,
+                    disabledContextApplications:
+                        validArguments.disabledContextApplications,
+                    diagnostics: validArguments.diagnostics
+                ),
+                .cloudCredentialRequired
+            ),
+        ]
+
+        for (snapshot, expectedError) in invalidImports {
+            let (store, _) = makeStore()
+            store.aiEnabled = false
+            let before = store.exportSnapshot()
+            let changes = NotificationCounter()
+            let observer = NotificationCenter.default.addObserver(
+                forName: .rimeAISettingsDidChange,
+                object: store,
+                queue: nil
+            ) { _ in
+                changes.increment()
+            }
+            defer { NotificationCenter.default.removeObserver(observer) }
+
+            #expect(throws: expectedError) {
+                try store.applyImport(snapshot, hasCloudCredential: false)
+            }
+            #expect(store.exportSnapshot() == before)
+            #expect(changes.currentValue == 0)
+        }
+    }
+
+    @Test("imports reject unreachable voice state and oversized app policies")
+    func invalidImportedPolicyIsAtomic() {
+        let tooManyApplications = (0 ... 256).map { "com.example.app\($0)" }
+        let invalidImports: [(RimeAISettingsExport, RimeAISettingsImportError)] = [
+            (
+                RimeAISettingsExport(
+                    aiEnabled: false,
+                    offlineLockEnabled: true,
+                    voiceEnabled: true,
+                    contextPolicy: .standard,
+                    disabledAIApplications: [],
+                    disabledContextApplications: [],
+                    diagnostics: [:]
+                ),
+                .voiceRequiresAI
+            ),
+            (
+                RimeAISettingsExport(
+                    aiEnabled: true,
+                    offlineLockEnabled: true,
+                    contextPolicy: .standard,
+                    disabledAIApplications: tooManyApplications,
+                    disabledContextApplications: [],
+                    diagnostics: [:]
+                ),
+                .applicationPolicyLimitExceeded
+            ),
+            (
+                RimeAISettingsExport(
+                    aiEnabled: true,
+                    offlineLockEnabled: true,
+                    contextPolicy: .standard,
+                    disabledAIApplications: [String(repeating: "a", count: 256)],
+                    disabledContextApplications: [],
+                    diagnostics: [:]
+                ),
+                .applicationPolicyLimitExceeded
+            ),
+            (
+                RimeAISettingsExport(
+                    aiEnabled: true,
+                    offlineLockEnabled: true,
+                    contextPolicy: .standard,
+                    disabledAIApplications: ["com.example.good\ncom.evil"],
+                    disabledContextApplications: [],
+                    diagnostics: [:]
+                ),
+                .applicationPolicyLimitExceeded
+            ),
+        ]
+
+        for (snapshot, expectedError) in invalidImports {
+            let (store, _) = makeStore()
+            store.contextPolicy = .smart
+            let before = store.exportSnapshot()
+            let changes = NotificationCounter()
+            let observer = NotificationCenter.default.addObserver(
+                forName: .rimeAISettingsDidChange,
+                object: store,
+                queue: nil
+            ) { _ in
+                changes.increment()
+            }
+            defer { NotificationCenter.default.removeObserver(observer) }
+
+            #expect(throws: expectedError) {
+                try store.applyImport(snapshot, hasCloudCredential: false)
+            }
+            #expect(store.exportSnapshot() == before)
+            #expect(changes.currentValue == 0)
+        }
+    }
+
+    @Test("every legal export can be imported with retained hotword consent")
+    func exportedSettingsRoundTrip() throws {
+        let (source, _) = makeStore()
+        source.voiceRimeHotwordsEnabled = true
+        let exported = source.exportSnapshot()
+        #expect(!exported.voiceEnabled)
+        #expect(exported.voiceRimeHotwordsEnabled)
+
+        let (destination, _) = makeStore()
+        try destination.applyImport(
+            exported,
+            hasCloudCredential: false
+        )
+
+        #expect(destination.exportSnapshot() == exported)
+    }
+
+    @Test("malformed or oversized import documents cannot mutate settings")
+    func invalidImportDocumentIsAtomic() throws {
+        let (store, _) = makeStore()
+        store.contextPolicy = .smart
+        let before = store.exportSnapshot()
+        let changes = NotificationCounter()
+        let observer = NotificationCenter.default.addObserver(
+            forName: .rimeAISettingsDidChange,
+            object: store,
+            queue: nil
+        ) { _ in
+            changes.increment()
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+
+        var object = try #require(
+            JSONSerialization.jsonObject(
+                with: JSONEncoder().encode(before)
+            ) as? [String: Any]
+        )
+        object["voiceShortcut"] = ["keyCode": 49, "modifiers": 6]
+        let unsafeShortcut = try JSONSerialization.data(withJSONObject: object)
+
+        #expect(throws: RimeAISettingsImportError.invalidDocument) {
+            try store.applyImport(
+                unsafeShortcut,
+                hasCloudCredential: false
+            )
+        }
+        #expect(throws: RimeAISettingsImportError.documentTooLarge) {
+            try store.applyImport(
+                Data(
+                    repeating: 0,
+                    count: RimeAISettingsStore.maxImportDocumentBytes + 1
+                ),
+                hasCloudCredential: false
+            )
+        }
+        #expect(store.exportSnapshot() == before)
+        #expect(changes.currentValue == 0)
+    }
+
+    @Test("restore defaults is one settings change and preserves learned data")
+    func restoreDefaultsPreservesNonSettingsData() throws {
+        let (store, _) = makeStore()
+        store.aiEnabled = false
+        store.cloudConfigured = true
+        store.voiceEnabled = true
+        store.voiceRimeHotwordsEnabled = true
+        store.voiceShortcut = try #require(
+            VoiceDictationShortcut(keyCode: 12, modifiers: [.option, .shift])
+        )
+        store.contextPolicy = .smart
+        store.disabledAIApplications = ["com.example.NoAI"]
+        store.record(.resultShown)
+        store.learnPersonalEnglishTokens(["retained"])
+        let changes = NotificationCounter()
+        let observer = NotificationCenter.default.addObserver(
+            forName: .rimeAISettingsDidChange,
+            object: store,
+            queue: nil
+        ) { _ in
+            changes.increment()
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+
+        store.restoreDefaults()
+
+        #expect(changes.currentValue == 1)
+        #expect(store.aiEnabled)
+        #expect(!store.cloudConfigured)
+        #expect(!store.voiceEnabled)
+        #expect(!store.voiceRimeHotwordsEnabled)
+        #expect(store.voiceShortcut == .default)
+        #expect(store.contextPolicy == .standard)
+        #expect(store.disabledAIApplications.isEmpty)
+        #expect(store.diagnosticCount(.resultShown) == 1)
+        #expect(store.personalEnglishTokens == ["retained"])
+    }
+
+    @Test("settings import errors provide actionable localized messages")
+    func importErrorsAreLocalized() {
+        let errors: [RimeAISettingsImportError] = [
+            .invalidDocument,
+            .documentTooLarge,
+            .unsupportedSchemaVersion(7),
+            .offlineLockRequired,
+            .unsupportedCloudProvider,
+            .unsupportedCloudEndpoint,
+            .unsupportedCloudModelID,
+            .cloudCredentialRequired,
+            .voiceRequiresAI,
+            .applicationPolicyLimitExceeded,
+        ]
+        for error in errors {
+            #expect(error.errorDescription?.isEmpty == false)
+        }
     }
 }

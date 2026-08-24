@@ -7,6 +7,9 @@ options:
 settings:
   base:
     CLANG_CXX_LANGUAGE_STANDARD: c++17
+    OTHER_CPLUSPLUSFLAGS:
+      - "$(inherited)"
+      - "-Wno-documentation-deprecated-sync"
     SWIFT_VERSION: "6.0"
 targets:
   RimeAIInputMethod:

@@ -5,6 +5,35 @@ import Testing
 
 @Suite("Darwin performance-control peer attestation")
 struct DarwinPerformanceControlPeerAuthenticatorTests {
+    @Test(
+        "expected identity accepts an existing physical private-tmp path without rebasing"
+    )
+    func expectedIdentityAcceptsPhysicalPrivateTemporaryPath() throws {
+        let root = "/private/tmp/rimeai-peer-auth-\(UUID().uuidString)"
+        try FileManager.default.createDirectory(
+            atPath: root,
+            withIntermediateDirectories: false
+        )
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let executablePath = root + "/performance-driver"
+        try #require(
+            FileManager.default.createFile(
+                atPath: executablePath,
+                contents: Data([0xCF, 0xFA, 0xED, 0xFE])
+            )
+        )
+
+        let identity = try expectedPeerIdentity(
+            executablePath: executablePath
+        )
+
+        #expect(
+            identity.expectedExecutablePath.utf8.elementsEqual(
+                executablePath.utf8
+            )
+        )
+    }
+
     @Test("expected peer identity preserves an exact canonical identity")
     func expectedPeerIdentityPreservesExactCanonicalIdentity() throws {
         let identity = try PerformanceControlExpectedPeerIdentity(
@@ -33,6 +62,58 @@ struct DarwinPerformanceControlPeerAuthenticatorTests {
         #expect(identity.expectedCDHash == String(repeating: "b", count: 40))
     }
 
+    @Test("live and signed paths cannot substitute aliases or non-NFC bytes")
+    func livePeerPathsRequireByteExactAuthority() throws {
+        let expectedPath =
+            "/private/tmp/Rim\u{00E9}AI/performance-driver"
+        let observedPaths = [
+            "/tmp/Rim\u{00E9}AI/performance-driver",
+            "/private/tmp/Rime\u{301}AI/performance-driver",
+        ]
+
+        for observedPath in observedPaths {
+            let system = FakeDarwinPerformanceControlPeerSystem()
+            system.path = observedPath
+            system.signature = makeCodeIdentity(
+                executablePath: observedPath
+            )
+
+            #expect(
+                throws: PerformanceControlPeerAuthenticationError
+                    .authenticationFailed
+            ) {
+                try DarwinPerformanceControlPeerAuthenticator(
+                    system: system
+                ).authenticate(
+                    connectedSocket: 42,
+                    expected: try expectedPeerIdentity(
+                        executablePath: expectedPath
+                    )
+                )
+            }
+        }
+
+        let signedPathMismatch = FakeDarwinPerformanceControlPeerSystem()
+        signedPathMismatch.path = expectedPath
+        signedPathMismatch.signature = makeCodeIdentity(
+            executablePath:
+                "/private/tmp/Rime\u{301}AI/performance-driver"
+        )
+        #expect(
+            throws: PerformanceControlPeerAuthenticationError
+                .authenticationFailed
+        ) {
+            try DarwinPerformanceControlPeerAuthenticator(
+                system: signedPathMismatch
+            ).authenticate(
+                connectedSocket: 42,
+                expected: try expectedPeerIdentity(
+                    executablePath: expectedPath
+                )
+            )
+        }
+    }
+
     @Test("expected identity rejects noncanonical or injectable fields")
     func expectedIdentityRejectsNoncanonicalOrInjectableFields() {
         let validPath =
@@ -44,6 +125,16 @@ struct DarwinPerformanceControlPeerAuthenticatorTests {
         let invalidCases: [(String, String, String, String, String)] = [
             ("relative/driver", validSHA256, validSigningID, validTeamID, validCDHash),
             ("/Applications/../tmp/driver", validSHA256, validSigningID, validTeamID, validCDHash),
+            ("/Applications/./driver", validSHA256, validSigningID, validTeamID, validCDHash),
+            ("/Applications//driver", validSHA256, validSigningID, validTeamID, validCDHash),
+            ("/Applications/driver/", validSHA256, validSigningID, validTeamID, validCDHash),
+            (
+                "/" + String(repeating: "a", count: Int(NAME_MAX) + 1),
+                validSHA256,
+                validSigningID,
+                validTeamID,
+                validCDHash
+            ),
             ("/tmp/e\u{301}", validSHA256, validSigningID, validTeamID, validCDHash),
             ("/tmp/driver\nname", validSHA256, validSigningID, validTeamID, validCDHash),
             ("/tmp/driver\u{7f}name", validSHA256, validSigningID, validTeamID, validCDHash),
@@ -339,9 +430,17 @@ struct DarwinPerformanceControlPeerAuthenticatorTests {
 private func expectedPeerIdentity()
     throws -> PerformanceControlExpectedPeerIdentity
 {
+    try expectedPeerIdentity(
+        executablePath:
+            "/Applications/RimeAI.app/Contents/MacOS/performance-driver"
+    )
+}
+
+private func expectedPeerIdentity(
+    executablePath: String
+) throws -> PerformanceControlExpectedPeerIdentity {
     try PerformanceControlExpectedPeerIdentity(
-        expectedExecutablePath:
-            "/Applications/RimeAI.app/Contents/MacOS/performance-driver",
+        expectedExecutablePath: executablePath,
         expectedExecutableSHA256: String(repeating: "a", count: 64),
         expectedSigningIdentifier:
             "fun.wwcn.rimeai.voice-performance-driver",

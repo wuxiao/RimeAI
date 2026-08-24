@@ -1,19 +1,5 @@
 import Foundation
 
-public enum RimeAICloudConfiguration {
-    public static let provider = "wwcn New API Gateway"
-    public static let endpoint = URL(
-        string: "https://newapi.wwcn.fun/v1"
-    )!
-    public static let rankingModelIDs = [
-        "glm-5.3",
-    ]
-    public static let defaultRankingModelID = rankingModelIDs[0]
-    public static let embeddingModelID = "text-embedding-v4"
-    public static let embeddingDimensions = 512
-    public static let credentialKey = "RIMEAI_CLOUD_API_KEY"
-}
-
 public enum CloudCredentialError: Error, Equatable, Sendable {
     case invalidAPIKey
     case ioFailure(Int32)

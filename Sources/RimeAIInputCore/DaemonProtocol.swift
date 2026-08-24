@@ -162,6 +162,7 @@ public struct DaemonHelloResponse: Codable, Sendable {
             && type == "hello"
             && status == "ok"
             && protocolVersion == 1
+            && offlineLock == true
             && capabilities.contains("decision-reasons")
             && capabilities.contains("long-input-reasons")
     }
@@ -175,6 +176,143 @@ public struct DaemonHelloResponse: Codable, Sendable {
         case modelArtifactID = "model_artifact_id"
         case offlineLock = "offline_lock"
         case modelArtifacts = "model_artifacts"
+    }
+}
+
+struct DaemonClientConnectionState: Equatable, Sendable {
+    enum Phase: Equatable, Sendable {
+        case disconnected
+        case connecting
+        case awaitingHello
+        case ready
+    }
+
+    private(set) var generation: UInt64 = 0
+    private(set) var phase: Phase = .disconnected
+
+    var canSendApplicationFrames: Bool {
+        phase == .ready
+    }
+
+    func canAcceptApplicationFrame(generation: UInt64) -> Bool {
+        generation == self.generation && phase == .ready
+    }
+
+    mutating func beginConnection() -> UInt64 {
+        generation &+= 1
+        phase = .connecting
+        return generation
+    }
+
+    mutating func transportBecameReady(generation: UInt64) -> Bool {
+        guard generation == self.generation, phase == .connecting else {
+            return false
+        }
+        phase = .awaitingHello
+        return true
+    }
+
+    mutating func acceptHello(
+        _ response: DaemonHelloResponse,
+        generation: UInt64
+    ) -> Bool {
+        guard generation == self.generation,
+              phase == .awaitingHello,
+              response.isCompatible
+        else {
+            return false
+        }
+        phase = .ready
+        return true
+    }
+
+    mutating func invalidate(generation: UInt64) -> Bool {
+        guard generation == self.generation, phase != .disconnected else {
+            return false
+        }
+        phase = .disconnected
+        return true
+    }
+
+    func shouldExpireConnection(generation: UInt64) -> Bool {
+        generation == self.generation && phase == .connecting
+    }
+
+    func shouldExpireHello(generation: UInt64) -> Bool {
+        generation == self.generation && phase == .awaitingHello
+    }
+}
+
+struct DaemonClientReadyWaitState: Equatable, Sendable {
+    private(set) var generation: UInt64?
+
+    mutating func arm(generation: UInt64) {
+        self.generation = generation
+    }
+
+    mutating func consumeReady(
+        generation: UInt64,
+        connectionState: DaemonClientConnectionState
+    ) -> Bool {
+        guard self.generation == generation,
+              connectionState.canAcceptApplicationFrame(
+                  generation: generation
+              )
+        else {
+            return false
+        }
+        self.generation = nil
+        return true
+    }
+
+    mutating func consumeFailure(generation: UInt64) -> Bool {
+        guard self.generation == generation else {
+            return false
+        }
+        self.generation = nil
+        return true
+    }
+}
+
+struct DaemonClientOutboundFrame: Equatable, Sendable {
+    let requestID: String?
+    let data: Data
+}
+
+struct DaemonClientOutboundQueue: Equatable, Sendable {
+    private(set) var frames: [DaemonClientOutboundFrame] = []
+
+    var isEmpty: Bool { frames.isEmpty }
+
+    mutating func enqueueApplication(requestID: String, data: Data) {
+        frames.append(
+            DaemonClientOutboundFrame(requestID: requestID, data: data)
+        )
+    }
+
+    mutating func enqueueControl(data: Data) {
+        frames.append(DaemonClientOutboundFrame(requestID: nil, data: data))
+    }
+
+    mutating func drain() -> [DaemonClientOutboundFrame] {
+        let result = frames
+        frames.removeAll(keepingCapacity: true)
+        return result
+    }
+
+    mutating func removeAll() {
+        frames.removeAll(keepingCapacity: false)
+    }
+
+    mutating func cancelRequest(
+        requestID: String,
+        protocolReady: Bool
+    ) -> Bool {
+        let hadBufferedApplication = frames.contains {
+            $0.requestID == requestID
+        }
+        frames.removeAll { $0.requestID == requestID }
+        return hadBufferedApplication ? false : protocolReady
     }
 }
 

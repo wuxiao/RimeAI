@@ -1,5 +1,31 @@
 import UIKit
 
+struct RimeKeyboardPendingFirstSelection: Equatable, Sendable {
+    let composition: String
+    let requestRevision: Int
+
+    init?(composition: String, requestRevision: Int) {
+        guard !composition.isEmpty else {
+            return nil
+        }
+        self.composition = composition
+        self.requestRevision = requestRevision
+    }
+
+    func candidate(
+        for composition: String,
+        requestRevision: Int,
+        from candidates: [RimeKeyboardCandidate]
+    ) -> RimeKeyboardCandidate? {
+        guard self.composition == composition,
+              self.requestRevision == requestRevision
+        else {
+            return nil
+        }
+        return candidates.first
+    }
+}
+
 private final class WeightedKeyRowView: UIView {
     private let buttons: [UIButton]
     private let weights: [CGFloat]
@@ -64,6 +90,8 @@ final class KeyboardViewController: UIInputViewController {
     private let candidateStack = UIStackView()
     private var heightConstraint: NSLayoutConstraint?
     private var composition = ""
+    private var currentCandidates: [RimeKeyboardCandidate] = []
+    private var pendingFirstSelection: RimeKeyboardPendingFirstSelection?
     private var requestRevision = 0
     private var isEngineReady = false
     private var engineVersion = "unknown"
@@ -147,6 +175,7 @@ final class KeyboardViewController: UIInputViewController {
         statusLabel.textColor = .secondaryLabel
         statusLabel.adjustsFontForContentSizeCategory = true
         statusLabel.accessibilityLabel = "RimeAI 状态"
+        statusLabel.accessibilityIdentifier = "rime-keyboard-status"
         statusLabel.heightAnchor.constraint(equalToConstant: 18).isActive = true
         return statusLabel
     }
@@ -208,7 +237,8 @@ final class KeyboardViewController: UIInputViewController {
     private func makeFunctionRow() -> UIView {
         let globe = makeFunctionKey(
             systemImageName: "globe",
-            accessibilityLabel: "下一个键盘"
+            accessibilityLabel: "下一个键盘",
+            accessibilityIdentifier: "rime-key-next-keyboard"
         )
         globe.addTarget(
             self,
@@ -218,7 +248,8 @@ final class KeyboardViewController: UIInputViewController {
 
         let delete = makeFunctionKey(
             systemImageName: "delete.left",
-            accessibilityLabel: "删除"
+            accessibilityLabel: "删除",
+            accessibilityIdentifier: "rime-key-delete"
         )
         delete.addAction(
             UIAction { [weak self] _ in
@@ -229,7 +260,8 @@ final class KeyboardViewController: UIInputViewController {
 
         let space = makeFunctionKey(
             title: "空格",
-            accessibilityLabel: "空格"
+            accessibilityLabel: "空格",
+            accessibilityIdentifier: "rime-key-space"
         )
         space.addAction(
             UIAction { [weak self] _ in
@@ -240,7 +272,8 @@ final class KeyboardViewController: UIInputViewController {
 
         let enter = makeFunctionKey(
             systemImageName: "return",
-            accessibilityLabel: "换行"
+            accessibilityLabel: "换行",
+            accessibilityIdentifier: "rime-key-return"
         )
         enter.addAction(
             UIAction { [weak self] _ in
@@ -258,7 +291,8 @@ final class KeyboardViewController: UIInputViewController {
     private func makeLetterKey(_ letter: String) -> UIButton {
         let button = makeFunctionKey(
             title: letter,
-            accessibilityLabel: letter
+            accessibilityLabel: letter,
+            accessibilityIdentifier: "rime-key-letter-\(letter)"
         )
         button.addAction(
             UIAction { [weak self] _ in
@@ -272,7 +306,8 @@ final class KeyboardViewController: UIInputViewController {
     private func makeFunctionKey(
         title: String? = nil,
         systemImageName: String? = nil,
-        accessibilityLabel: String
+        accessibilityLabel: String,
+        accessibilityIdentifier: String
     ) -> UIButton {
         var configuration = UIButton.Configuration.filled()
         configuration.title = title
@@ -299,6 +334,7 @@ final class KeyboardViewController: UIInputViewController {
 
         let button = UIButton(configuration: configuration)
         button.accessibilityLabel = accessibilityLabel
+        button.accessibilityIdentifier = accessibilityIdentifier
         button.clipsToBounds = true
         button.contentHorizontalAlignment = .center
         button.contentVerticalAlignment = .center
@@ -332,7 +368,7 @@ final class KeyboardViewController: UIInputViewController {
         button.accessibilityLabel = candidate.text
         button.addAction(
             UIAction { [weak self] _ in
-                self?.commit(candidateIndex: candidate.index)
+                self?.commit(candidate: candidate)
             },
             for: .touchUpInside
         )
@@ -366,7 +402,7 @@ final class KeyboardViewController: UIInputViewController {
         if let original, isActionable {
             button.addAction(
                 UIAction { [weak self] _ in
-                    self?.commit(candidateIndex: original.index)
+                    self?.commit(candidate: original)
                 },
                 for: .touchUpInside
             )
@@ -419,6 +455,7 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func appendLetter(_ letter: String) {
+        pendingFirstSelection = nil
         composition.append(letter)
         refreshCandidates()
     }
@@ -428,6 +465,7 @@ final class KeyboardViewController: UIInputViewController {
             textDocumentProxy.deleteBackward()
             return
         }
+        pendingFirstSelection = nil
         composition.removeLast()
         refreshCandidates()
     }
@@ -437,7 +475,15 @@ final class KeyboardViewController: UIInputViewController {
             textDocumentProxy.insertText(" ")
             return
         }
-        commit(candidateIndex: 0)
+        guard let candidate = currentCandidates.first else {
+            pendingFirstSelection = RimeKeyboardPendingFirstSelection(
+                composition: composition,
+                requestRevision: requestRevision
+            )
+            statusLabel.text = "候选尚未就绪，稍后自动选择"
+            return
+        }
+        commit(candidate: candidate)
     }
 
     private func handleEnter() {
@@ -445,7 +491,15 @@ final class KeyboardViewController: UIInputViewController {
             textDocumentProxy.insertText("\n")
             return
         }
-        commit(candidateIndex: 0)
+        guard let candidate = currentCandidates.first else {
+            pendingFirstSelection = RimeKeyboardPendingFirstSelection(
+                composition: composition,
+                requestRevision: requestRevision
+            )
+            statusLabel.text = "候选尚未就绪，稍后自动选择"
+            return
+        }
+        commit(candidate: candidate)
     }
 
     private func refreshCandidates() {
@@ -469,6 +523,18 @@ final class KeyboardViewController: UIInputViewController {
                 }
                 switch result {
                 case let .success(candidates):
+                    let pendingCandidate =
+                        self.pendingFirstSelection?.candidate(
+                            for: requestedComposition,
+                            requestRevision: revision,
+                            from: candidates
+                        )
+                    self.pendingFirstSelection = nil
+                    self.currentCandidates = candidates
+                    if let pendingCandidate {
+                        self.commit(candidate: pendingCandidate)
+                        return
+                    }
                     if let ranker = self.semanticRanker {
                         let context = String(
                             (self.textDocumentProxy.documentContextBeforeInput ?? "")
@@ -507,6 +573,7 @@ final class KeyboardViewController: UIInputViewController {
                         count: candidates.count
                     )
                 case let .failure(error):
+                    self.pendingFirstSelection = nil
                     self.statusLabel.text = error.localizedDescription
                 }
             }
@@ -528,25 +595,32 @@ final class KeyboardViewController: UIInputViewController {
         return "librime \(engineVersion) · \(count) 个候选 · \(modelStatus) · 离线"
     }
 
-    private func commit(candidateIndex: Int) {
+    private func commit(candidate: RimeKeyboardCandidate) {
         guard !composition.isEmpty, isEngineReady else {
             return
         }
         let requestedComposition = composition
-        engine.commit(
+        pendingFirstSelection = nil
+        requestRevision += 1
+        let selectionRevision = requestRevision
+        engine.select(
             pinyin: requestedComposition,
-            candidateIndex: candidateIndex
+            candidate: candidate
         ) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self,
+                      selectionRevision == self.requestRevision,
                       requestedComposition == self.composition
                 else {
                     return
                 }
                 switch result {
-                case let .success(text):
-                    self.textDocumentProxy.insertText(text)
-                    self.composition = ""
+                case let .success(selection):
+                    self.textDocumentProxy.insertText(
+                        selection.committedText
+                    )
+                    self.composition =
+                        selection.remainingComposition ?? ""
                     self.refreshCandidates()
                 case let .failure(error):
                     self.statusLabel.text = error.localizedDescription
@@ -556,6 +630,7 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func removeCandidates() {
+        currentCandidates = []
         for view in candidateStack.arrangedSubviews {
             candidateStack.removeArrangedSubview(view)
             view.removeFromSuperview()

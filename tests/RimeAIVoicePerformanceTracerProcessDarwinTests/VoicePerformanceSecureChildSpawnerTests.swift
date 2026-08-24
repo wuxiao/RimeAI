@@ -1,4 +1,5 @@
 import Darwin
+import Foundation
 import Testing
 @testable import RimeAIVoicePerformanceTracerProcessDarwin
 
@@ -146,7 +147,8 @@ struct VoicePerformanceSecureChildSpawnerTests {
         let bundle = "/Applications/RimeAI Voice Performance.bundle"
         let generation = generation(pid: 3_151, start: 31_051, group: 3_151)
         let spawnSystem = RecordingSecureSpawnSystem(next: generation)
-        spawnSystem.attestationError = .processGenerationMismatch
+        spawnSystem.attestationError = VoicePerformanceTracerProcessError
+            .processGenerationMismatch
         let processSystem = SecureSpawnSupervisorSystem(
             currentPID: 3_150,
             generations: [generation.pid: generation]
@@ -178,7 +180,8 @@ struct VoicePerformanceSecureChildSpawnerTests {
         let bundle = "/Applications/RimeAI Voice Performance.bundle"
         let generation = generation(pid: 3_152, start: 31_052, group: 3_152)
         let spawnSystem = RecordingSecureSpawnSystem(next: generation)
-        spawnSystem.resumeError = .processSpawnFailed
+        spawnSystem.resumeError = VoicePerformanceTracerProcessError
+            .processSpawnFailed
         let processSystem = SecureSpawnSupervisorSystem(
             currentPID: 3_150,
             generations: [generation.pid: generation]
@@ -207,11 +210,137 @@ struct VoicePerformanceSecureChildSpawnerTests {
         #expect(supervisor.driverGeneration == nil)
     }
 
+    @Test("opaque attestation failure survives successful raw child cleanup")
+    func opaqueAttestationFailureIsPreservedAfterCleanup() throws {
+        let bundle = "/Applications/RimeAI Voice Performance.bundle"
+        let generation = generation(pid: 3_157, start: 31_057, group: 3_157)
+        let unexpected = SecureSpawnUnexpectedError(
+            description: "spawn-attestation-secret-110f"
+        )
+        let spawnSystem = RecordingSecureSpawnSystem(next: generation)
+        spawnSystem.attestationError = unexpected
+        let supervisor = VoicePerformanceCollectorDriverSupervisor(
+            system: SecureSpawnSupervisorSystem(
+                currentPID: 3_150,
+                generations: [generation.pid: generation]
+            )
+        )
+        let request = try VoicePerformanceDriverSpawnRequest(
+            tracerBundlePath: bundle,
+            expectedChildIdentity: try expectedDriverIdentity(bundle),
+            deadline: .init(nanoseconds: 55_300)
+        )
+
+        #expect(throws: unexpected) {
+            try VoicePerformanceSecureChildSpawner(system: spawnSystem)
+                .spawnDriver(request: request, supervisedBy: supervisor)
+        }
+        #expect(spawnSystem.aborted == [generation])
+        #expect(supervisor.driverGeneration == nil)
+    }
+
+    @Test("opaque resume failure survives successful supervisor cleanup")
+    func opaqueResumeFailureIsPreservedAfterCleanup() throws {
+        let bundle = "/Applications/RimeAI Voice Performance.bundle"
+        let generation = generation(pid: 3_158, start: 31_058, group: 3_158)
+        let unexpected = SecureSpawnUnexpectedError(
+            description: "spawn-resume-secret-4a2d"
+        )
+        let spawnSystem = RecordingSecureSpawnSystem(next: generation)
+        spawnSystem.resumeError = unexpected
+        let processSystem = SecureSpawnSupervisorSystem(
+            currentPID: 3_150,
+            generations: [generation.pid: generation]
+        )
+        processSystem.waitOutcomes = [.exited(code: 0)]
+        let supervisor = VoicePerformanceCollectorDriverSupervisor(
+            system: processSystem
+        )
+        let request = try VoicePerformanceDriverSpawnRequest(
+            tracerBundlePath: bundle,
+            expectedChildIdentity: try expectedDriverIdentity(bundle),
+            deadline: .init(nanoseconds: 55_400)
+        )
+
+        #expect(throws: unexpected) {
+            try VoicePerformanceSecureChildSpawner(system: spawnSystem)
+                .spawnDriver(request: request, supervisedBy: supervisor)
+        }
+        #expect(spawnSystem.aborted.isEmpty)
+        #expect(supervisor.driverGeneration == nil)
+    }
+
+    @Test("cleanup failure overrides an opaque primary spawn failure")
+    func cleanupFailureOverridesOpaquePrimary() throws {
+        let bundle = "/Applications/RimeAI Voice Performance.bundle"
+        let generation = generation(pid: 3_159, start: 31_059, group: 3_159)
+        let spawnSystem = RecordingSecureSpawnSystem(next: generation)
+        spawnSystem.attestationError = SecureSpawnUnexpectedError(
+            description: "spawn-primary-secret-c48a"
+        )
+        spawnSystem.abortError = VoicePerformanceTracerProcessError
+            .processWaitFailed
+        let supervisor = VoicePerformanceCollectorDriverSupervisor(
+            system: SecureSpawnSupervisorSystem(
+                currentPID: 3_150,
+                generations: [generation.pid: generation]
+            )
+        )
+        let request = try VoicePerformanceDriverSpawnRequest(
+            tracerBundlePath: bundle,
+            expectedChildIdentity: try expectedDriverIdentity(bundle),
+            deadline: .init(nanoseconds: 55_500)
+        )
+
+        #expect(throws: VoicePerformanceTracerProcessError.processCleanupFailed) {
+            try VoicePerformanceSecureChildSpawner(system: spawnSystem)
+                .spawnDriver(request: request, supervisedBy: supervisor)
+        }
+        #expect(spawnSystem.aborted == [generation])
+    }
+
     @Test("production spawn flags always start the child suspended")
     func productionFlagsIncludeStartSuspended() {
         #expect(
             DarwinVoicePerformanceSecureChildSpawningSystem.spawnFlags
                 & Int16(POSIX_SPAWN_START_SUSPENDED) != 0
+        )
+    }
+
+    @Test("expected child identity preserves a physical private-tmp path")
+    func expectedChildIdentityAcceptsPhysicalPrivateTemporaryPath() throws {
+        let root = URL(
+            fileURLWithPath: "/private/tmp",
+            isDirectory: true
+        ).appendingPathComponent(
+            "rimeai-spawn-path-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: root,
+            withIntermediateDirectories: false
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+        let executable = root.appendingPathComponent("driver")
+        #expect(
+            FileManager.default.createFile(
+                atPath: executable.path,
+                contents: Data()
+            )
+        )
+        #expect(executable.standardizedFileURL.path != executable.path)
+
+        let identity = try VoicePerformanceExpectedChildIdentity(
+            executablePath: executable.path,
+            executableSHA256: String(repeating: "a", count: 64),
+            signingIdentifier:
+                "fun.wwcn.rimeai.voice-performance-driver",
+            teamIdentifier: "A1B2C3D4E5",
+            cdHash: String(repeating: "b", count: 40)
+        )
+
+        #expect(
+            identity.executablePath.utf8.elementsEqual(executable.path.utf8)
         )
     }
 
@@ -513,6 +642,64 @@ struct VoicePerformanceSecureChildSpawnerTests {
         #expect(attestation.resumedPIDs == [generation.pid])
     }
 
+    @Test("concrete suspended attestation preserves opaque system failures")
+    func productionAttestationPreservesOpaqueSystemFailure() throws {
+        let bundle = "/Applications/RimeAI Voice Performance.bundle"
+        let identity = try expectedDriverIdentity(bundle)
+        let generation = generation(pid: 3_160, start: 31_060, group: 3_160)
+        let unexpected = SecureSpawnUnexpectedError(
+            description: "concrete-attestation-secret-df02"
+        )
+        let attestation = ScriptedSuspendedChildAttestationSystem(
+            effectiveUserID: 501,
+            generations: [generation, generation],
+            executablePaths: [identity.executablePath, identity.executablePath],
+            codeIdentity: validCodeIdentity(identity),
+            fileIdentity: validFileIdentity(identity),
+            unexpectedErrorAtEvent: "generation",
+            unexpectedError: unexpected
+        )
+        let specification = VoicePerformanceSecureSpawnSpecification(
+            executablePath: identity.executablePath,
+            arguments: [identity.executablePath],
+            processGroup: .new,
+            expectedChildIdentity: identity
+        )
+
+        #expect(throws: unexpected) {
+            try DarwinVoicePerformanceSecureChildSpawningSystem(
+                attestationSystem: attestation
+            ).attestSuspendedChild(generation, specification: specification)
+        }
+        #expect(attestation.resumedPIDs.isEmpty)
+    }
+
+    @Test("concrete resume preserves opaque generation probe failures")
+    func productionResumePreservesOpaqueSystemFailure() throws {
+        let bundle = "/Applications/RimeAI Voice Performance.bundle"
+        let identity = try expectedDriverIdentity(bundle)
+        let generation = generation(pid: 3_161, start: 31_061, group: 3_161)
+        let unexpected = SecureSpawnUnexpectedError(
+            description: "concrete-resume-secret-7d26"
+        )
+        let attestation = ScriptedSuspendedChildAttestationSystem(
+            effectiveUserID: 501,
+            generations: [generation],
+            executablePaths: [],
+            codeIdentity: validCodeIdentity(identity),
+            fileIdentity: validFileIdentity(identity),
+            unexpectedErrorAtEvent: "generation",
+            unexpectedError: unexpected
+        )
+
+        #expect(throws: unexpected) {
+            try DarwinVoicePerformanceSecureChildSpawningSystem(
+                attestationSystem: attestation
+            ).resumeSuspendedChild(generation)
+        }
+        #expect(attestation.resumedPIDs.isEmpty)
+    }
+
     @Test("wrong atomic pgrp is aborted before supervisor adoption")
     func wrongSpawnGroupIsAborted() throws {
         let bundle = "/Applications/RimeAI Voice Performance.bundle"
@@ -548,7 +735,8 @@ struct VoicePerformanceSecureChildSpawnerTests {
         let bundle = "/Applications/RimeAI Voice Performance.bundle"
         let wrong = generation(pid: 3_211, start: 32_101, group: 3_210)
         let spawnSystem = RecordingSecureSpawnSystem(next: wrong)
-        spawnSystem.abortError = .processWaitFailed
+        spawnSystem.abortError = VoicePerformanceTracerProcessError
+            .processWaitFailed
         let processSystem = SecureSpawnSupervisorSystem(
             currentPID: 3_210,
             generations: [3_211: wrong]
@@ -859,9 +1047,9 @@ private final class RecordingSecureSpawnSystem:
     let next: VoicePerformanceSupervisedProcessGeneration
     var specifications: [VoicePerformanceSecureSpawnSpecification] = []
     var aborted: [VoicePerformanceSupervisedProcessGeneration] = []
-    var abortError: VoicePerformanceTracerProcessError?
-    var attestationError: VoicePerformanceTracerProcessError?
-    var resumeError: VoicePerformanceTracerProcessError?
+    var abortError: Error?
+    var attestationError: Error?
+    var resumeError: Error?
     var events: [String] = []
 
     init(next: VoicePerformanceSupervisedProcessGeneration) {
@@ -1040,6 +1228,8 @@ private final class ScriptedSuspendedChildAttestationSystem:
     var executablePaths: [String]
     let codeIdentity: VoicePerformanceSuspendedChildCodeIdentity
     let fileIdentity: VoicePerformanceSuspendedExecutableFileIdentity
+    let unexpectedErrorAtEvent: String?
+    let unexpectedError: SecureSpawnUnexpectedError?
     var events: [String] = []
     var resumedPIDs: [Int32] = []
 
@@ -1048,19 +1238,26 @@ private final class ScriptedSuspendedChildAttestationSystem:
         generations: [VoicePerformanceSupervisedProcessGeneration],
         executablePaths: [String],
         codeIdentity: VoicePerformanceSuspendedChildCodeIdentity,
-        fileIdentity: VoicePerformanceSuspendedExecutableFileIdentity
+        fileIdentity: VoicePerformanceSuspendedExecutableFileIdentity,
+        unexpectedErrorAtEvent: String? = nil,
+        unexpectedError: SecureSpawnUnexpectedError? = nil
     ) {
         self.effectiveUserID = effectiveUserID
         self.generations = generations
         self.executablePaths = executablePaths
         self.codeIdentity = codeIdentity
         self.fileIdentity = fileIdentity
+        self.unexpectedErrorAtEvent = unexpectedErrorAtEvent
+        self.unexpectedError = unexpectedError
     }
 
     func generation(pid: Int32) throws
         -> VoicePerformanceSupervisedProcessGeneration?
     {
         events.append("generation")
+        if unexpectedErrorAtEvent == "generation", let unexpectedError {
+            throw unexpectedError
+        }
         return generations.isEmpty ? nil : generations.removeFirst()
     }
 
@@ -1093,4 +1290,13 @@ private final class ScriptedSuspendedChildAttestationSystem:
         events.append("resume")
         resumedPIDs.append(pid)
     }
+}
+
+private struct SecureSpawnUnexpectedError:
+    Error,
+    Equatable,
+    Sendable,
+    CustomStringConvertible
+{
+    let description: String
 }

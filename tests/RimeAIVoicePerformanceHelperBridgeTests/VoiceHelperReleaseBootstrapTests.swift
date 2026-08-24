@@ -535,7 +535,7 @@ struct VoiceHelperReleaseBootstrapTests {
     }
 
     @Test
-    func selectedFactoryFailureHasOneFixedErrorAndNoFallback() throws {
+    func opaqueSelectedFactoryFailureIsPreservedAndHasNoFallback() throws {
         let catalog = releaseApprovedCatalog()
         var appleCount = 0
         var productCount = 0
@@ -563,9 +563,7 @@ struct VoiceHelperReleaseBootstrapTests {
             ticket: "ticket-1"
         )
 
-        #expect(
-            throws: VoiceHelperInternalTracerLoadError.engineLoadFailed
-        ) {
+        #expect(throws: ReleaseBootstrapTestFailure.productFactoryFailed) {
             _ = try prepared.completeBeginBoundaryAcknowledgement(
                 sessionID: "session-1",
                 generation: 7,

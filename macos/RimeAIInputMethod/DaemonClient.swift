@@ -9,6 +9,9 @@ extension Notification.Name {
 
 final class DaemonClient: @unchecked Sendable {
     typealias Completion = @Sendable (SemanticInferenceResult?) -> Void
+    typealias ReadyCompletion = @MainActor @Sendable (
+        Result<Void, Error>
+    ) -> Void
 
     static let shared = DaemonClient()
 
@@ -21,9 +24,13 @@ final class DaemonClient: @unchecked Sendable {
     private let decoder = JSONDecoder()
     private let socketPath: String
     private var connection: NWConnection?
-    private var isReady = false
+    private var connectionState = DaemonClientConnectionState()
+    private var readyWaitState = DaemonClientReadyWaitState()
+    private var readyCompletion: ReadyCompletion?
+    private var connectionTimeout: DispatchWorkItem?
+    private var helloTimeout: DispatchWorkItem?
     private var receiveBuffer = Data()
-    private var outbound: [Data] = []
+    private var outbound = DaemonClientOutboundQueue()
     private var pending: [String: PendingRequest] = [:]
     private var circuitBreaker = FailureCircuitBreaker()
     private var modelArtifactID = "尚未连接"
@@ -70,7 +77,10 @@ final class DaemonClient: @unchecked Sendable {
                 finish(requestID: request.requestID, result: nil)
                 return
             }
-            outbound.append(payload)
+            outbound.enqueueApplication(
+                requestID: request.requestID,
+                data: payload
+            )
             ensureConnection()
             flushOutbound()
             queue.asyncAfter(
@@ -92,16 +102,48 @@ final class DaemonClient: @unchecked Sendable {
         }
     }
 
+    func invalidateCurrentGeneration(
+        completion: @escaping @MainActor @Sendable () -> Void
+    ) {
+        queue.async { [self] in
+            tearDownConnection(
+                failPending: true,
+                recordFailure: false,
+                status: "已失效旧连接"
+            )
+            DispatchQueue.main.async {
+                completion()
+            }
+        }
+    }
+
+    func connectWhenReady(completion: @escaping ReadyCompletion) {
+        queue.async { [self] in
+            tearDownConnection(
+                failPending: true,
+                recordFailure: false,
+                status: "正在建立新的认证连接"
+            )
+            let generation = ensureConnection()
+            readyWaitState.arm(generation: generation)
+            readyCompletion = completion
+        }
+    }
+
     func cancel(requestID: String) {
         queue.async { [self] in
             guard pending.removeValue(forKey: requestID) != nil else {
                 return
             }
-            if let payload = encodeLine(
+            let shouldSendCancel = outbound.cancelRequest(
+                requestID: requestID,
+                protocolReady: connectionState.canSendApplicationFrames
+            )
+            if shouldSendCancel,
+               let payload = encodeLine(
                 DaemonCancelRequest(requestID: requestID)
             ) {
-                outbound.append(payload)
-                ensureConnection()
+                outbound.enqueueControl(data: payload)
                 flushOutbound()
             }
         }
@@ -117,10 +159,15 @@ final class DaemonClient: @unchecked Sendable {
         }
     }
 
-    private func ensureConnection() {
+    @discardableResult
+    private func ensureConnection() -> UInt64 {
         guard connection == nil else {
-            return
+            return connectionState.generation
         }
+        let generation = connectionState.beginConnection()
+        modelArtifactID = "尚未连接"
+        modelArtifacts = []
+        daemonOfflineLock = false
         let connection = NWConnection(
             to: .unix(path: socketPath),
             using: .tcp
@@ -132,37 +179,66 @@ final class DaemonClient: @unchecked Sendable {
                 return
             }
             self.queue.async {
-                self.handle(state: state, connection: connection)
+                self.handle(
+                    state: state,
+                    connection: connection,
+                    generation: generation
+                )
             }
         }
+        armConnectionTimeout(
+            on: connection,
+            generation: generation
+        )
         connection.start(queue: queue)
+        return generation
     }
 
     private func handle(
         state: NWConnection.State,
-        connection: NWConnection
+        connection: NWConnection,
+        generation: UInt64
     ) {
-        guard self.connection === connection else {
+        guard self.connection === connection,
+              connectionState.generation == generation
+        else {
             return
         }
         switch state {
         case .ready:
-            isReady = true
-            if let hello = encodeLine(
+            cancelConnectionTimeout()
+            guard connectionState.transportBecameReady(
+                generation: generation
+            ), let hello = encodeLine(
                 DaemonHelloRequest(
                     clientID: Bundle.main.bundleIdentifier
                         ?? "fun.wwcn.inputmethod.RimeAI"
                 )
-            ) {
-                outbound.insert(hello, at: 0)
+            ) else {
+                tearDownConnection(
+                    failPending: true,
+                    recordFailure: true,
+                    status: "握手编码失败",
+                    generation: generation
+                )
+                return
             }
-            flushOutbound()
-            receiveNext(on: connection)
+            sendHandshake(
+                hello,
+                on: connection,
+                generation: generation
+            )
+            armHelloTimeout(
+                on: connection,
+                generation: generation
+            )
+            receiveNext(on: connection, generation: generation)
         case .failed, .cancelled:
             tearDownConnection(
                 failPending: true,
                 recordFailure: true,
-                status: "连接失败"
+                status: "连接失败",
+                generation: generation
             )
         default:
             break
@@ -170,23 +246,35 @@ final class DaemonClient: @unchecked Sendable {
     }
 
     private func flushOutbound() {
-        guard isReady, let connection else {
+        guard connectionState.canSendApplicationFrames,
+              let connection
+        else {
             return
         }
-        let frames = outbound
-        outbound.removeAll(keepingCapacity: true)
+        let generation = connectionState.generation
+        let frames = outbound.drain()
         for frame in frames {
             connection.send(
-                content: frame,
-                completion: .contentProcessed { [weak self] error in
-                    guard error != nil else {
+                content: frame.data,
+                completion: .contentProcessed {
+                    [weak self, weak connection] error in
+                    guard error != nil,
+                          let self,
+                          let connection
+                    else {
                         return
                     }
-                    self?.queue.async {
-                        self?.tearDownConnection(
+                    self.queue.async {
+                        guard self.connection === connection,
+                              self.connectionState.generation == generation
+                        else {
+                            return
+                        }
+                        self.tearDownConnection(
                             failPending: true,
                             recordFailure: true,
-                            status: "发送失败"
+                            status: "发送失败",
+                            generation: generation
                         )
                     }
                 }
@@ -194,7 +282,104 @@ final class DaemonClient: @unchecked Sendable {
         }
     }
 
-    private func receiveNext(on connection: NWConnection) {
+    private func sendHandshake(
+        _ data: Data,
+        on connection: NWConnection,
+        generation: UInt64
+    ) {
+        connection.send(
+            content: data,
+            completion: .contentProcessed {
+                [weak self, weak connection] error in
+                guard error != nil,
+                      let self,
+                      let connection
+                else {
+                    return
+                }
+                self.queue.async {
+                    guard self.connection === connection,
+                          self.connectionState.generation == generation
+                    else {
+                        return
+                    }
+                    self.tearDownConnection(
+                        failPending: true,
+                        recordFailure: true,
+                        status: "握手发送失败",
+                        generation: generation
+                    )
+                }
+            }
+        )
+    }
+
+    private func armHelloTimeout(
+        on connection: NWConnection,
+        generation: UInt64
+    ) {
+        cancelHelloTimeout()
+        let work = DispatchWorkItem { [weak self, weak connection] in
+            guard let self,
+                  let connection,
+                  self.connection === connection,
+                  self.connectionState.shouldExpireHello(
+                      generation: generation
+                  )
+            else {
+                return
+            }
+            self.tearDownConnection(
+                failPending: true,
+                recordFailure: true,
+                status: "握手超时",
+                generation: generation
+            )
+        }
+        helloTimeout = work
+        queue.asyncAfter(deadline: .now() + .seconds(3), execute: work)
+    }
+
+    private func armConnectionTimeout(
+        on connection: NWConnection,
+        generation: UInt64
+    ) {
+        cancelConnectionTimeout()
+        let work = DispatchWorkItem { [weak self, weak connection] in
+            guard let self,
+                  let connection,
+                  self.connection === connection,
+                  self.connectionState.shouldExpireConnection(
+                      generation: generation
+                  )
+            else {
+                return
+            }
+            self.tearDownConnection(
+                failPending: true,
+                recordFailure: true,
+                status: "连接建立超时",
+                generation: generation
+            )
+        }
+        connectionTimeout = work
+        queue.asyncAfter(deadline: .now() + .seconds(3), execute: work)
+    }
+
+    private func cancelConnectionTimeout() {
+        connectionTimeout?.cancel()
+        connectionTimeout = nil
+    }
+
+    private func cancelHelloTimeout() {
+        helloTimeout?.cancel()
+        helloTimeout = nil
+    }
+
+    private func receiveNext(
+        on connection: NWConnection,
+        generation: UInt64
+    ) {
         connection.receive(
             minimumIncompleteLength: 1,
             maximumLength: 65_536
@@ -203,27 +388,42 @@ final class DaemonClient: @unchecked Sendable {
                 return
             }
             self.queue.async {
-                guard self.connection === connection else {
+                guard self.connection === connection,
+                      self.connectionState.generation == generation
+                else {
                     return
                 }
                 if let data, !data.isEmpty {
                     self.receiveBuffer.append(data)
-                    self.processCompleteLines()
+                    self.processCompleteLines(generation: generation)
+                }
+                // Parsing can synchronously invalidate this generation. Do not
+                // let an EOF/error delivered in the same receive callback tear
+                // it down (and fail its waiters) a second time.
+                guard self.connection === connection,
+                      self.connectionState.generation == generation,
+                      self.connectionState.phase != .disconnected
+                else {
+                    return
                 }
                 if error != nil || isComplete {
                     self.tearDownConnection(
                         failPending: true,
                         recordFailure: true,
-                        status: "连接中断"
+                        status: "连接中断",
+                        generation: generation
                     )
                     return
                 }
-                self.receiveNext(on: connection)
+                self.receiveNext(
+                    on: connection,
+                    generation: generation
+                )
             }
         }
     }
 
-    private func processCompleteLines() {
+    private func processCompleteLines(generation: UInt64) {
         let newline = UInt8(ascii: "\n")
         while let index = receiveBuffer.firstIndex(of: newline) {
             let line = Data(receiveBuffer[..<index])
@@ -231,34 +431,56 @@ final class DaemonClient: @unchecked Sendable {
             guard !line.isEmpty else {
                 continue
             }
-            process(line: line)
+            process(line: line, generation: generation)
         }
         if receiveBuffer.count > 1_048_576 {
             tearDownConnection(
                 failPending: true,
                 recordFailure: true,
-                status: "协议帧过大"
+                status: "协议帧过大",
+                generation: generation
             )
         }
     }
 
-    private func process(line: Data) {
-        if let hello = try? decoder.decode(
-            DaemonHelloResponse.self,
-            from: line
-        ) {
-            if !hello.isCompatible {
+    private func process(line: Data, generation: UInt64) {
+        if connectionState.phase == .awaitingHello {
+            guard let hello = try? decoder.decode(
+                DaemonHelloResponse.self,
+                from: line
+            ), connectionState.acceptHello(
+                hello,
+                generation: generation
+            ) else {
                 tearDownConnection(
                     failPending: true,
                     recordFailure: true,
-                    status: "协议不兼容"
+                    status: "协议不兼容",
+                    generation: generation
                 )
                 return
             }
+            cancelHelloTimeout()
             modelArtifactID = hello.modelArtifactID
             modelArtifacts = hello.modelArtifacts ?? []
-            daemonOfflineLock = hello.offlineLock == true
+            daemonOfflineLock = true
+            flushOutbound()
             publishStatus("就绪")
+            completeReadyWaiter(
+                generation: generation,
+                result: .success(())
+            )
+            return
+        }
+        guard connectionState.canAcceptApplicationFrame(
+            generation: generation
+        ) else {
+            tearDownConnection(
+                failPending: true,
+                recordFailure: true,
+                status: "握手未完成",
+                generation: generation
+            )
             return
         }
         guard let result = try? decoder.decode(
@@ -269,7 +491,8 @@ final class DaemonClient: @unchecked Sendable {
             tearDownConnection(
                 failPending: true,
                 recordFailure: true,
-                status: "响应格式错误"
+                status: "响应格式错误",
+                generation: generation
             )
             return
         }
@@ -283,7 +506,8 @@ final class DaemonClient: @unchecked Sendable {
             tearDownConnection(
                 failPending: true,
                 recordFailure: true,
-                status: "响应协议错误"
+                status: "响应协议错误",
+                generation: generation
             )
             return
         }
@@ -314,10 +538,16 @@ final class DaemonClient: @unchecked Sendable {
                 ? "请求超时"
                 : "熔断冷却中"
         )
-        if let payload = encodeLine(
-            DaemonCancelRequest(requestID: requestID)
-        ) {
-            outbound.append(payload)
+        let shouldSendCancel = outbound.cancelRequest(
+            requestID: requestID,
+            protocolReady: connectionState.canSendApplicationFrames
+        )
+        if shouldSendCancel,
+           let payload = encodeLine(
+               DaemonCancelRequest(requestID: requestID)
+           )
+        {
+            outbound.enqueueControl(data: payload)
             flushOutbound()
         }
         DispatchQueue.main.async {
@@ -340,13 +570,29 @@ final class DaemonClient: @unchecked Sendable {
     private func tearDownConnection(
         failPending: Bool,
         recordFailure: Bool,
-        status: String
+        status: String,
+        generation: UInt64? = nil
     ) {
+        let invalidatedGeneration = generation
+            ?? connectionState.generation
+        if let generation {
+            guard connectionState.invalidate(generation: generation) else {
+                return
+            }
+        } else {
+            _ = connectionState.invalidate(
+                generation: connectionState.generation
+            )
+        }
+        cancelConnectionTimeout()
+        cancelHelloTimeout()
         let oldConnection = connection
         connection = nil
-        isReady = false
         receiveBuffer.removeAll(keepingCapacity: false)
-        outbound.removeAll(keepingCapacity: false)
+        outbound.removeAll()
+        modelArtifactID = "尚未连接"
+        modelArtifacts = []
+        daemonOfflineLock = false
         oldConnection?.stateUpdateHandler = nil
         oldConnection?.cancel()
         if recordFailure {
@@ -357,6 +603,10 @@ final class DaemonClient: @unchecked Sendable {
                 ? status
                 : "熔断冷却中"
         )
+        completeReadyWaiter(
+            generation: invalidatedGeneration,
+            result: .failure(readinessError(status: status))
+        )
         if failPending {
             let requests = pending.values
             pending.removeAll(keepingCapacity: false)
@@ -366,6 +616,42 @@ final class DaemonClient: @unchecked Sendable {
                 }
             }
         }
+    }
+
+    private func completeReadyWaiter(
+        generation: UInt64,
+        result: Result<Void, Error>
+    ) {
+        let shouldComplete: Bool
+        switch result {
+        case .success:
+            shouldComplete = readyWaitState.consumeReady(
+                generation: generation,
+                connectionState: connectionState
+            )
+        case .failure:
+            shouldComplete = readyWaitState.consumeFailure(
+                generation: generation
+            )
+        }
+        guard shouldComplete, let completion = readyCompletion else {
+            return
+        }
+        readyCompletion = nil
+        DispatchQueue.main.async {
+            completion(result)
+        }
+    }
+
+    private func readinessError(status: String) -> NSError {
+        NSError(
+            domain: "fun.wwcn.inputmethod.RimeAI.daemon-readiness",
+            code: 1,
+            userInfo: [
+                NSLocalizedDescriptionKey:
+                    "Daemon 未通过本代协议握手：\(status)",
+            ]
+        )
     }
 
     private func publishStatus(_ status: String) {

@@ -487,6 +487,31 @@ struct DarwinPerformanceControlUnixTransportTests {
     }
 
     @Test(
+        "listener close reports an authoritative unlink failure",
+        .enabled(
+            if: fileSystemUnixSocketsAvailable,
+            "host sandbox must permit filesystem AF_UNIX bind"
+        )
+    )
+    func listenerCloseReportsUnlinkFailure() throws {
+        let fixture = try SocketDirectoryFixture()
+        defer { fixture.remove() }
+        let fileSystem = FailingUnlinkUnixFileSystem()
+        let listener = try DarwinPerformanceControlUnixListener(
+            socketPath: fixture.socketPath,
+            authenticator: RecordingAuthenticator(),
+            fileSystem: fileSystem
+        )
+        try listener.start()
+
+        #expect(!listener.close())
+        #expect(fileSystem.unlinkCallCount == 1)
+        #expect(FileManager.default.fileExists(atPath: fixture.socketPath))
+        #expect(!listener.close())
+        #expect(fileSystem.unlinkCallCount == 1)
+    }
+
+    @Test(
         "a preexisting socket is neither replaced nor deleted",
         .enabled(
             if: fileSystemUnixSocketsAvailable,
@@ -657,6 +682,67 @@ struct DarwinPerformanceControlUnixTransportTests {
         #expect(authenticator.callCount == 1)
         var byte: UInt8 = 0
         #expect(Darwin.read(acceptedPair[1], &byte, 1) == 0)
+    }
+
+    @Test("adopted listener closes the fd but preserves an opaque authenticator error")
+    func adoptedListenerPreservesOpaqueAuthenticationError() throws {
+        var listenerPair = [Int32](repeating: -1, count: 2)
+        var acceptedPair = [Int32](repeating: -1, count: 2)
+        #expect(socketpair(AF_UNIX, SOCK_STREAM, 0, &listenerPair) == 0)
+        #expect(socketpair(AF_UNIX, SOCK_STREAM, 0, &acceptedPair) == 0)
+        defer {
+            _ = Darwin.close(listenerPair[1])
+            _ = Darwin.close(acceptedPair[1])
+        }
+        let unexpected = SensitiveTransportUnexpectedError(
+            description: "listener-auth-secret-64a9"
+        )
+        let listener = try DarwinPerformanceControlUnixListener(
+            testingSocketPath: "/private/var/empty/control.sock",
+            adoptingListeningDescriptor: listenerPair[0],
+            authenticator: OpaqueThrowingAuthenticator(error: unexpected),
+            system: SingleAcceptUnixSystem(accepted: acceptedPair[0])
+        )
+        defer { listener.close() }
+
+        #expect(throws: unexpected) {
+            _ = try listener.acceptAuthenticated(
+                expectedPeer: expectedPeerIdentity(),
+                deadline: ContinuousClock().now.advanced(by: .seconds(1))
+            )
+        }
+        var byte: UInt8 = 0
+        #expect(Darwin.read(acceptedPair[1], &byte, 1) == 0)
+    }
+
+    @Test(
+        "client closes its fd but preserves an opaque authenticator error",
+        .enabled(
+            if: fileSystemUnixSocketsAvailable,
+            "host sandbox must permit filesystem AF_UNIX bind"
+        )
+    )
+    func clientPreservesOpaqueAuthenticationError() throws {
+        let fixture = try SocketDirectoryFixture()
+        defer { fixture.remove() }
+        let listener = try DarwinPerformanceControlUnixListener(
+            socketPath: fixture.socketPath,
+            authenticator: RecordingAuthenticator()
+        )
+        try listener.start()
+        defer { listener.close() }
+        let unexpected = SensitiveTransportUnexpectedError(
+            description: "client-auth-secret-785c"
+        )
+
+        #expect(throws: unexpected) {
+            _ = try DarwinPerformanceControlUnixClient.connectAuthenticated(
+                socketPath: fixture.socketPath,
+                expectedCollector: expectedPeerIdentity(),
+                deadline: ContinuousClock().now.advanced(by: .seconds(1)),
+                authenticator: OpaqueThrowingAuthenticator(error: unexpected)
+            )
+        }
     }
 
     @Test("adopted listener authenticates before any framed I/O")
@@ -897,6 +983,32 @@ private final class RecordingUnixFileSystem:
     }
 }
 
+private final class FailingUnlinkUnixFileSystem:
+    DarwinPerformanceControlUnixFileSystem,
+    @unchecked Sendable
+{
+    private let lock = NSLock()
+    private let live = LiveDarwinPerformanceControlUnixFileSystem()
+    private var unlinkCalls = 0
+
+    func entryStatus(parentDescriptor: Int32, name: String) throws -> stat? {
+        try live.entryStatus(parentDescriptor: parentDescriptor, name: name)
+    }
+
+    func unlinkEntry(parentDescriptor: Int32, name: String) -> Int32 {
+        lock.lock()
+        unlinkCalls += 1
+        lock.unlock()
+        return -1
+    }
+
+    var unlinkCallCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return unlinkCalls
+    }
+}
+
 private func socketStatus(device: dev_t, inode: ino_t) -> stat {
     var status = stat()
     status.st_dev = device
@@ -1004,6 +1116,31 @@ private final class RecordingAuthenticator:
                 .authenticationFailed
         }
         return attestedPeer()
+    }
+}
+
+private struct SensitiveTransportUnexpectedError:
+    Error,
+    Equatable,
+    Sendable,
+    CustomStringConvertible
+{
+    let description: String
+}
+
+private struct OpaqueThrowingAuthenticator:
+    DarwinPerformanceControlTransportAuthenticating,
+    Sendable
+{
+    let error: SensitiveTransportUnexpectedError
+
+    func authenticate(
+        connectedSocket: Int32,
+        expected: PerformanceControlExpectedPeerIdentity,
+        gate: DarwinPerformanceControlAuthenticationGate
+    ) throws -> PerformanceControlAttestedPeer {
+        try gate.check()
+        throw error
     }
 }
 

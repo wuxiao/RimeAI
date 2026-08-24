@@ -45,6 +45,14 @@ let package = Package(
             targets: ["RimeAIVoicePerformanceTracerProcessDarwin"]
         ),
         .library(
+            name: "RimeAIVoicePerformanceTracerBundleBuilder",
+            targets: ["RimeAIVoicePerformanceTracerBundleBuilder"]
+        ),
+        .library(
+            name: "RimeAIVoiceEvaluationArtifactSealer",
+            targets: ["RimeAIVoiceEvaluationArtifactSealer"]
+        ),
+        .library(
             name: "RimeAIVoicePerformanceTracerCollectorProcess",
             targets: ["RimeAIVoicePerformanceTracerCollectorProcess"]
         ),
@@ -72,6 +80,18 @@ let package = Package(
             name: "rimeai-voice-performance-helper",
             targets: [
                 "RimeAIVoicePerformanceTracerHelperExecutable"
+            ]
+        ),
+        .executable(
+            name: "rimeai-voice-performance-tracer-bundle-builder",
+            targets: [
+                "RimeAIVoicePerformanceTracerBundleBuilderExecutable"
+            ]
+        ),
+        .executable(
+            name: "rimeai-voice-evaluation-artifact-sealer",
+            targets: [
+                "RimeAIVoiceEvaluationArtifactSealerExecutable"
             ]
         ),
         .executable(
@@ -129,10 +149,19 @@ let package = Package(
             sources: ["main.swift"]
         ),
         .target(
+            name: "RimeAISherpaOnnxSafeC",
+            dependencies: ["SherpaOnnxMacOS", "OnnxruntimeMacOS"],
+            publicHeadersPath: "include",
+            linkerSettings: [
+                .linkedLibrary("c++"),
+            ]
+        ),
+        .target(
             name: "RimeAIVoiceHelperEngine",
             dependencies: [
                 "RimeAIInputCore",
                 "RimeAIVoiceArtifactCore",
+                "RimeAISherpaOnnxSafeC",
                 "SherpaOnnxMacOS",
                 "OnnxruntimeMacOS",
             ],
@@ -197,6 +226,23 @@ let package = Package(
             ]
         ),
         .target(
+            name: "RimeAIVoicePerformanceTracerBundleBuilder",
+            dependencies: [
+                "RimeAIInputCore",
+                "RimeAIVoiceArtifactCore",
+                "RimeAIVoicePerformanceControlCore",
+                "RimeAIVoicePerformanceTracerProcessDarwin",
+            ],
+            linkerSettings: [
+                .linkedFramework("Security"),
+            ]
+        ),
+        .target(
+            name: "RimeAIVoiceEvaluationArtifactSealer",
+            dependencies: ["RimeAIVoiceArtifactCore"],
+            resources: [.process("Resources")]
+        ),
+        .target(
             name: "RimeAIVoicePerformanceTracerCollectorProcess",
             dependencies: [
                 "RimeAIVoicePerformanceCollector",
@@ -245,6 +291,16 @@ let package = Package(
             ]
         ),
         .executableTarget(
+            name: "RimeAIVoicePerformanceTracerBundleBuilderExecutable",
+            dependencies: [
+                "RimeAIVoicePerformanceTracerBundleBuilder"
+            ]
+        ),
+        .executableTarget(
+            name: "RimeAIVoiceEvaluationArtifactSealerExecutable",
+            dependencies: ["RimeAIVoiceEvaluationArtifactSealer"]
+        ),
+        .executableTarget(
             name: "RimeAIVoicePerformanceCollectorCLI",
             dependencies: ["RimeAIVoicePerformanceCollector"]
         ),
@@ -278,6 +334,7 @@ let package = Package(
             dependencies: [
                 "RimeAIInputCore",
                 "RimeAIVoiceArtifactCore",
+                "RimeAISherpaOnnxSafeC",
                 "RimeAIVoiceHelperEngine",
             ]
         ),
@@ -327,6 +384,24 @@ let package = Package(
                 "RimeAIVoicePerformanceTracerProcessDarwin",
             ],
             path: "tests/RimeAIVoicePerformanceTracerProcessDarwinTests"
+        ),
+        .testTarget(
+            name: "RimeAIVoicePerformanceTracerBundleBuilderTests",
+            dependencies: [
+                "RimeAIVoiceArtifactCore",
+                "RimeAIVoicePerformanceControlCore",
+                "RimeAIVoicePerformanceTracerBundleBuilder",
+                "RimeAIVoicePerformanceTracerProcessDarwin",
+            ],
+            path: "tests/RimeAIVoicePerformanceTracerBundleBuilderTests"
+        ),
+        .testTarget(
+            name: "RimeAIVoiceEvaluationArtifactSealerTests",
+            dependencies: [
+                "RimeAIVoiceArtifactCore",
+                "RimeAIVoiceEvaluationArtifactSealer",
+            ],
+            path: "tests/RimeAIVoiceEvaluationArtifactSealerTests"
         ),
         .testTarget(
             name: "RimeAIVoicePerformanceTracerCollectorProcessTests",

@@ -91,6 +91,62 @@ struct VoicePerformanceTracerHelperProcessTests {
         #expect(runtime.commandBundle?.driverPolicy == nil)
     }
 
+    @Test("known bundle rejection prevents the signed parse and command")
+    func knownVerificationRejectionRemainsAuthority() throws {
+        let fixture = try HelperProcessFixture(coldTrials: 2, trial: 1)
+        let runtime = RecordingHelperProcessRuntime(
+            verifyError: VoicePerformanceTracerProcessError
+                .invalidTracerBundle
+        )
+
+        #expect(
+            throws: VoicePerformanceTracerHelperProcessError
+                .invalidTracerBundle
+        ) {
+            try VoicePerformanceTracerHelperProcess(runtime: runtime).run(
+                argv: fixture.argv,
+                currentExecutablePath: fixture.executablePath
+            )
+        }
+        #expect(runtime.events == [
+            .parse(policyColdTrials: 32), .verify,
+        ])
+    }
+
+    @Test("unexpected verification errors reach the entrypoint as internal")
+    func unexpectedVerificationErrorIsInternalAndRedacted() throws {
+        let fixture = try HelperProcessFixture(coldTrials: 2, trial: 1)
+        let secret = "helper-verify-secret-61c4"
+        let runtime = RecordingHelperProcessRuntime(
+            verifyError: SensitiveHelperUnexpectedError(secret)
+        )
+        var diagnostics: [String] = []
+
+        let status = VoicePerformanceTracerHelperEntrypoint.run(
+            arguments: fixture.argv,
+            resolveCurrentExecutablePath: { fixture.executablePath },
+            runProcess: { arguments, executablePath in
+                try VoicePerformanceTracerHelperProcess(
+                    runtime: runtime
+                ).run(
+                    argv: arguments,
+                    currentExecutablePath: executablePath
+                )
+            },
+            writeDiagnostic: { diagnostics.append($0) }
+        )
+
+        #expect(status == 70)
+        #expect(
+            diagnostics
+                == ["rimeai-voice-performance-helper:E_INTERNAL\n"]
+        )
+        #expect(diagnostics.allSatisfy { !$0.contains(secret) })
+        #expect(runtime.events == [
+            .parse(policyColdTrials: 32), .verify,
+        ])
+    }
+
     @Test("helper rejects every free policy or resource override")
     func rejectsFreeAuthorityFlags() throws {
         let fixture = try HelperProcessFixture(coldTrials: 2, trial: 1)
@@ -147,11 +203,14 @@ private final class RecordingHelperProcessRuntime:
     private(set) var commandBundle:
         VerifiedPerformanceTracerBundleContext?
     let verifiedBundle: VerifiedPerformanceTracerBundleContext?
+    let verifyError: Error?
 
     init(
-        verifiedBundle: VerifiedPerformanceTracerBundleContext? = nil
+        verifiedBundle: VerifiedPerformanceTracerBundleContext? = nil,
+        verifyError: Error? = nil
     ) {
         self.verifiedBundle = verifiedBundle
+        self.verifyError = verifyError
     }
 
     func parseArguments(
@@ -172,6 +231,7 @@ private final class RecordingHelperProcessRuntime:
     ) throws -> VerifiedPerformanceTracerBundleContext {
         events.append(.verify)
         verifiedPath = declaredPath
+        if let verifyError { throw verifyError }
         guard let verifiedBundle else {
             throw HelperProcessFixtureError.failure
         }
@@ -190,6 +250,17 @@ private final class RecordingHelperProcessRuntime:
 
 private enum HelperProcessFixtureError: Error {
     case failure
+}
+
+private struct SensitiveHelperUnexpectedError:
+    Error,
+    CustomStringConvertible
+{
+    let description: String
+
+    init(_ description: String) {
+        self.description = description
+    }
 }
 
 private struct HelperProcessFixture {

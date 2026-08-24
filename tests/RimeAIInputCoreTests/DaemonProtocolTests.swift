@@ -2,26 +2,269 @@ import Foundation
 import Testing
 @testable import RimeAIInputCore
 
+private func daemonHelloResponse(
+    capabilities: [String] = [
+        "offline-lock",
+        "decision-reasons",
+        "long-input-reasons",
+    ],
+    offlineLock: Bool = true
+) throws -> DaemonHelloResponse {
+    let object: [String: Any] = [
+        "schema_version": 1,
+        "type": "hello",
+        "status": "ok",
+        "protocol_version": 1,
+        "capabilities": capabilities,
+        "model_artifact_id": "fixture",
+        "offline_lock": offlineLock,
+    ]
+    return try JSONDecoder().decode(
+        DaemonHelloResponse.self,
+        from: JSONSerialization.data(withJSONObject: object)
+    )
+}
+
 @Test
-func daemonHandshakeRequiresStructuredDecisionReasons() throws {
-    func response(capabilities: [String]) throws -> DaemonHelloResponse {
-        let object: [String: Any] = [
-            "schema_version": 1,
-            "type": "hello",
-            "status": "ok",
-            "protocol_version": 1,
-            "capabilities": capabilities,
-            "model_artifact_id": "fixture",
-            "offline_lock": true,
-        ]
-        return try JSONDecoder().decode(
-            DaemonHelloResponse.self,
-            from: JSONSerialization.data(withJSONObject: object)
-        )
-    }
+func daemonTransportReadinessDoesNotAuthorizeApplicationFrames() {
+    var state = DaemonClientConnectionState()
+
+    let generation = state.beginConnection()
+    #expect(!state.canSendApplicationFrames)
+    let becameTransportReady = state.transportBecameReady(
+        generation: generation
+    )
+    #expect(becameTransportReady)
+    #expect(state.phase == .awaitingHello)
+    #expect(!state.canSendApplicationFrames)
+}
+
+@Test
+func daemonProtocolReadinessRequiresCompatibleOfflineHello() throws {
+    var state = DaemonClientConnectionState()
+    let generation = state.beginConnection()
+    _ = state.transportBecameReady(generation: generation)
+
+    let rejected = state.acceptHello(
+        try daemonHelloResponse(offlineLock: false),
+        generation: generation
+    )
+    #expect(!rejected)
+    #expect(state.phase == .awaitingHello)
+    #expect(!state.canSendApplicationFrames)
+
+    let accepted = state.acceptHello(
+        try daemonHelloResponse(),
+        generation: generation
+    )
+    #expect(accepted)
+    #expect(state.phase == .ready)
+    #expect(state.canSendApplicationFrames)
+}
+
+@Test
+func daemonRejectsApplicationFramesUntilHelloCompletes() throws {
+    var state = DaemonClientConnectionState()
+    let generation = state.beginConnection()
+    _ = state.transportBecameReady(generation: generation)
+
+    #expect(!state.canAcceptApplicationFrame(generation: generation))
+
+    _ = state.acceptHello(
+        try daemonHelloResponse(),
+        generation: generation
+    )
+    #expect(state.canAcceptApplicationFrame(generation: generation))
+}
+
+@Test
+func staleDaemonGenerationCannotInvalidateCurrentConnection() {
+    var state = DaemonClientConnectionState()
+    let staleGeneration = state.beginConnection()
+    let currentGeneration = state.beginConnection()
+
+    let staleInvalidation = state.invalidate(
+        generation: staleGeneration
+    )
+    #expect(!staleInvalidation)
+    #expect(state.generation == currentGeneration)
+    #expect(state.phase == .connecting)
+
+    let currentInvalidation = state.invalidate(
+        generation: currentGeneration
+    )
+    #expect(currentInvalidation)
+    #expect(state.phase == .disconnected)
+    let duplicateInvalidation = state.invalidate(
+        generation: currentGeneration
+    )
+    #expect(!duplicateInvalidation)
+}
+
+@Test
+func daemonHelloTimeoutOnlyExpiresTheAwaitingGeneration() throws {
+    var state = DaemonClientConnectionState()
+    let timedOutGeneration = state.beginConnection()
+    _ = state.transportBecameReady(generation: timedOutGeneration)
+
+    let shouldExpire = state.shouldExpireHello(
+        generation: timedOutGeneration
+    )
+    #expect(shouldExpire)
+    #expect(state.phase == .awaitingHello)
+    let timeoutInvalidated = state.invalidate(
+        generation: timedOutGeneration
+    )
+    #expect(timeoutInvalidated)
+    #expect(state.phase == .disconnected)
+
+    let readyGeneration = state.beginConnection()
+    _ = state.transportBecameReady(generation: readyGeneration)
+    _ = state.acceptHello(
+        try daemonHelloResponse(),
+        generation: readyGeneration
+    )
+    let readyShouldExpire = state.shouldExpireHello(
+        generation: readyGeneration
+    )
+    #expect(!readyShouldExpire)
+    #expect(state.phase == .ready)
+}
+
+@Test
+func daemonConnectionTimeoutOnlyExpiresTheConnectingGeneration() {
+    var state = DaemonClientConnectionState()
+    let staleGeneration = state.beginConnection()
+    let connectingGeneration = state.beginConnection()
 
     #expect(
-        try response(
+        !state.shouldExpireConnection(generation: staleGeneration)
+    )
+    #expect(
+        state.shouldExpireConnection(generation: connectingGeneration)
+    )
+
+    _ = state.transportBecameReady(generation: connectingGeneration)
+    #expect(
+        !state.shouldExpireConnection(generation: connectingGeneration)
+    )
+    #expect(state.shouldExpireHello(generation: connectingGeneration))
+}
+
+@Test
+func daemonReadyWaitOnlyConsumesCurrentProtocolReadyGeneration() throws {
+    var connectionState = DaemonClientConnectionState()
+    let staleGeneration = connectionState.beginConnection()
+    _ = connectionState.transportBecameReady(generation: staleGeneration)
+    var waitState = DaemonClientReadyWaitState()
+    waitState.arm(generation: staleGeneration)
+
+    let currentGeneration = connectionState.beginConnection()
+    _ = connectionState.transportBecameReady(generation: currentGeneration)
+    _ = connectionState.acceptHello(
+        try daemonHelloResponse(),
+        generation: currentGeneration
+    )
+    let staleReady = waitState.consumeReady(
+        generation: staleGeneration,
+        connectionState: connectionState
+    )
+    #expect(!staleReady)
+    #expect(waitState.generation == staleGeneration)
+
+    waitState.arm(generation: currentGeneration)
+    let currentReady = waitState.consumeReady(
+        generation: currentGeneration,
+        connectionState: connectionState
+    )
+    #expect(currentReady)
+    #expect(waitState.generation == nil)
+}
+
+@Test
+func daemonReadyWaitFailureOnlyConsumesItsBoundGeneration() {
+    var waitState = DaemonClientReadyWaitState()
+    waitState.arm(generation: 9)
+
+    let staleFailure = waitState.consumeFailure(generation: 8)
+    #expect(!staleFailure)
+    #expect(waitState.generation == 9)
+
+    let currentFailure = waitState.consumeFailure(generation: 9)
+    #expect(currentFailure)
+    #expect(waitState.generation == nil)
+    let duplicateFailure = waitState.consumeFailure(generation: 9)
+    #expect(!duplicateFailure)
+}
+
+@Test
+func cancellingBeforeHelloDiscardsBufferedInferenceWithoutSendingCancel() {
+    var outbound = DaemonClientOutboundQueue()
+    outbound.enqueueApplication(
+        requestID: "request-before-hello",
+        data: Data("inference".utf8)
+    )
+
+    let shouldSendCancel = outbound.cancelRequest(
+        requestID: "request-before-hello",
+        protocolReady: false
+    )
+
+    #expect(!shouldSendCancel)
+    #expect(outbound.isEmpty)
+    #expect(outbound.drain().isEmpty)
+}
+
+@Test
+func expiringBeforeHelloRemovesOnlyTheStaleBufferedInference() {
+    var outbound = DaemonClientOutboundQueue()
+    outbound.enqueueApplication(
+        requestID: "expired-before-hello",
+        data: Data("expired".utf8)
+    )
+    outbound.enqueueApplication(
+        requestID: "still-live-before-hello",
+        data: Data("live".utf8)
+    )
+
+    let shouldSendCancel = outbound.cancelRequest(
+        requestID: "expired-before-hello",
+        protocolReady: false
+    )
+
+    #expect(!shouldSendCancel)
+    #expect(
+        outbound.drain() == [
+            DaemonClientOutboundFrame(
+                requestID: "still-live-before-hello",
+                data: Data("live".utf8)
+            ),
+        ]
+    )
+}
+
+@Test
+func cancellingAfterInferenceWasSentRequiresAControlFrame() {
+    var outbound = DaemonClientOutboundQueue()
+    outbound.enqueueApplication(
+        requestID: "request-after-hello",
+        data: Data("inference".utf8)
+    )
+    _ = outbound.drain()
+
+    let shouldSendCancel = outbound.cancelRequest(
+        requestID: "request-after-hello",
+        protocolReady: true
+    )
+
+    #expect(shouldSendCancel)
+    #expect(outbound.isEmpty)
+}
+
+@Test
+func daemonHandshakeRequiresStructuredDecisionReasons() throws {
+    #expect(
+        try daemonHelloResponse(
             capabilities: [
                 "offline-lock",
                 "decision-reasons",
@@ -30,7 +273,19 @@ func daemonHandshakeRequiresStructuredDecisionReasons() throws {
         ).isCompatible
     )
     #expect(
-        try !response(capabilities: ["offline-lock"]).isCompatible
+        try !daemonHelloResponse(
+            capabilities: ["offline-lock"]
+        ).isCompatible
+    )
+    #expect(
+        try !daemonHelloResponse(
+            capabilities: [
+                "offline-lock",
+                "decision-reasons",
+                "long-input-reasons",
+            ],
+            offlineLock: false
+        ).isCompatible
     )
 }
 

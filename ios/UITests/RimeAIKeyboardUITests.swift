@@ -19,7 +19,7 @@ final class RimeAIKeyboardUITests: XCTestCase {
 
         dismissKeyboardTutorialIfPresent(in: app, timeout: 1)
 
-        let rimeStatus = app.staticTexts["RimeAI 状态"]
+        let rimeStatus = app.staticTexts["rime-keyboard-status"]
         let switcherNames = [
             "Emoji",
             "Next keyboard",
@@ -70,7 +70,7 @@ final class RimeAIKeyboardUITests: XCTestCase {
         add(layoutScreenshot)
 
         for letter in ["n", "i", "h", "a", "o"] {
-            let key = app.buttons[letter]
+            let key = app.buttons["rime-key-letter-\(letter)"]
             XCTAssertTrue(key.waitForExistence(timeout: 2))
             key.tap()
         }
@@ -108,7 +108,7 @@ final class RimeAIKeyboardUITests: XCTestCase {
 
     private func assertKeyboardLayout(in app: XCUIApplication) {
         let rows = ["qwertyuiop", "asdfghjkl", "zxcvbnm"].map { row in
-            row.map { app.buttons[String($0)] }
+            row.map { app.buttons["rime-key-letter-\($0)"] }
         }
         for key in rows.flatMap({ $0 }) {
             XCTAssertTrue(key.exists)
@@ -126,7 +126,12 @@ final class RimeAIKeyboardUITests: XCTestCase {
             assertNoHorizontalOverlap(row)
         }
 
-        let functionKeys = ["下一个键盘", "删除", "空格", "换行"].map {
+        let functionKeys = [
+            "rime-key-next-keyboard",
+            "rime-key-delete",
+            "rime-key-space",
+            "rime-key-return",
+        ].map {
             app.buttons[$0]
         }
         for key in functionKeys {

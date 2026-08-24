@@ -63,9 +63,14 @@ public final class VoicePerformanceTracerDriverProcess {
             verifiedBundle = try runtime.verifyDriverBundle(
                 declaredPath: arguments.tracerBundlePath
             )
-        } catch {
+        } catch VoicePerformanceTracerProcessError
+            .invalidTracerBundle
+        {
             throw VoicePerformanceTracerDriverProcessError
                 .invalidTracerBundle
+        } catch {
+            throw VoicePerformanceTracerDriverProcessError
+                .internalFailure
         }
 
         do {
@@ -120,6 +125,8 @@ public final class VoicePerformanceTracerDriverProcess {
             .helperFailed
         case .transportFailed:
             .transportFailed
+        case .internalFailure:
+            .internalFailure
         }
     }
 }

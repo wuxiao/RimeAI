@@ -6,6 +6,33 @@
     "ios-arm64",
     "ios-arm64-simulator"
   ],
+  "public_headers": {
+    "rime_api": {
+      "path": "rime_api.h",
+      "sha256": "6eb5629162c44761e7b878f1b122f464de5c8685bd3cd5ac1e8519badc6d6424"
+    },
+    "rime_api_deprecated": {
+      "path": "rime_api_deprecated.h",
+      "sha256": "21625c4e16480a4540939299a002f21b11150bb10b69f5331e1580875ac63341"
+    },
+    "rime_api_stdbool": {
+      "path": "rime_api_stdbool.h",
+      "sha256": "f5a64254e98c1c12ce6628f5d540bcd4e4b542ec287b4873c0b0ce4ed1bece99"
+    }
+  },
+  "info_plist_sha256": "de7805d48f735275acdf3cf99d4f55f640936d3d2be9968098f0389c29613699",
+  "libraries": {
+    "ios-arm64": {
+      "path": "ios-arm64/libRimeAINative.a",
+      "size_bytes": 15605072,
+      "sha256": "ac1bf6380d4bd25a4b177288d2664f6afdbb65bcec94d199bc790d52af93d653"
+    },
+    "ios-arm64-simulator": {
+      "path": "ios-arm64-simulator/libRimeAINative.a",
+      "size_bytes": 11882608,
+      "sha256": "72970e85d19e68d446605ceced8bd1751f1504a503471e0d58cc0f2bd0ab4fd6"
+    }
+  },
   "librime": {
     "version": "1.17.0",
     "revision": "33e78140250125871856cdc5b42ddc6a5fcd3cd4",

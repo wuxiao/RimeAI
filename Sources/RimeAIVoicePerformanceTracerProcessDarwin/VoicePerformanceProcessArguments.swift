@@ -1,6 +1,20 @@
 import Foundation
 
 public enum VoicePerformanceTracerBundleLayout: Sendable {
+    public static let outerBundleName =
+        "RimeAIVoicePerformanceTracer.bundle"
+    public static let collectorAppName =
+        "RimeAIVoicePerformanceCollector.app"
+    public static let driverAppName =
+        "RimeAIVoicePerformanceDriver.app"
+    public static let helperAppName =
+        "RimeAIVoicePerformanceHelper.app"
+    public static let measurementPolicyResourceRelativePath =
+        "Contents/Resources/VoicePerformanceMeasurementPolicy.json"
+    public static let driverPolicyResourceRelativePath =
+        "Contents/Resources/VoicePerformanceDriverPolicy.json"
+    public static let helperReleasePolicyResourceRelativePath =
+        "Contents/Helpers/RimeAIVoicePerformanceHelper.app/Contents/Resources/VoiceReleasePolicy.plist"
     public static let collectorExecutableSuffix =
         "/Contents/Helpers/RimeAIVoicePerformanceCollector.app/Contents/MacOS/rimeai-voice-performance-tracer"
     public static let driverExecutableSuffix =

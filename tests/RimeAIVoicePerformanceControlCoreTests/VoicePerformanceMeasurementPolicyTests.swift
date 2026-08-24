@@ -5,6 +5,127 @@ import Testing
 
 @Suite("Sealed voice performance measurement policy v2")
 struct VoicePerformanceMeasurementPolicyTests {
+    @Test("tracer construction emits exact coupled canonical policies")
+    func tracerConstructionIsExactCoupledAndRoundTrips() throws {
+        let driverData = try SealedPerformanceControlDriverPolicy
+            .tracerCanonicalData()
+        let measurementData = try VoicePerformanceMeasurementPolicy
+            .tracerCanonicalData(for: tracerBuildInput())
+        let expected = Data(
+            (#"{"cold_trials":7,"collector":{"expected_cdhash":""#
+                + String(repeating: "d", count: 40)
+                + #"","expected_executable_path":"/usr/local/libexec/rimeai-voice-performance-collector","expected_executable_sha256":""#
+                + String(repeating: "c", count: 64)
+                + #"","expected_signing_identifier":"fun.wwcn.rimeai.voice-performance-collector","expected_team_identifier":"TEAMID1234"},"control_protocol":{"id":"rimeai-performance-control-v2","sha256":"b7784bd825b63851ad02bf376020e41f6949f8d51f076da222ff8b6b383dfad3"},"control_session_nonce":""#
+                + String(repeating: "b", count: 64)
+                + #"","control_socket_path":"/private/tmp/rimeai-performance.sock","driver":{"expected_cdhash":""#
+                + String(repeating: "f", count: 40)
+                + #"","expected_executable_path":"/usr/local/bin/rimeai-voice-performance-driver","expected_executable_sha256":""#
+                + String(repeating: "e", count: 64)
+                + #"","expected_signing_identifier":"fun.wwcn.rimeai.voice-performance-driver","expected_team_identifier":"TEAMID1234","policy_sha256":"8360421ae61e4eab5bb6f2e7b033c77721f630b5a3e7f5022b8ceea90214ae0b"},"enabled":true,"evaluation_artifact":{"adapter_id":"sherpa-onnx","artifact_id":"voice-model","content_sha256":""#
+                + String(repeating: "4", count: 64)
+                + #"","directory":"/private/tmp/rimeai-evaluation-artifact","maximum_hotwords":64},"helper":{"expected_cdhash":""#
+                + String(repeating: "3", count: 40)
+                + #"","expected_executable_path":"/usr/local/libexec/rimeai-voice-helper","expected_executable_sha256":""#
+                + String(repeating: "1", count: 64)
+                + #"","expected_signing_identifier":"fun.wwcn.rimeai.voice-helper","expected_team_identifier":"TEAMID1234"},"release_policy_sha256":""#
+                + String(repeating: "2", count: 64)
+                + #"","schema_version":2}"#).utf8
+        )
+
+        #expect(measurementData == expected)
+        #expect(
+            measurementData.count
+                <= VoicePerformanceMeasurementPolicy.maximumEncodedBytes
+        )
+        #expect(!measurementData.contains(0x0A))
+        #expect(!measurementData.contains(0x0D))
+
+        let decoded = try VoicePerformanceMeasurementPolicy.decodeCanonical(
+            measurementData
+        )
+        #expect(decoded.schemaVersion == 2)
+        #expect(decoded.enabled)
+        #expect(decoded.qualification == .tracer)
+        #expect(!decoded.authenticatedProductionDriver)
+        #expect(
+            decoded.controlProtocol
+                == PerformanceControlProtocolContract.identity
+        )
+        #expect(
+            decoded.driver.policySHA256
+                == sha256Hex(driverData)
+        )
+        #expect(
+            decoded.collector.expectedSigningIdentifier
+                == VoicePerformanceMeasurementPolicy
+                    .requiredCollectorSigningIdentifier
+        )
+        #expect(
+            decoded.driver.expectedSigningIdentifier
+                == VoicePerformanceMeasurementPolicy
+                    .requiredDriverSigningIdentifier
+        )
+        #expect(
+            decoded.helper.expectedSigningIdentifier
+                == VoicePerformanceMeasurementPolicy
+                    .requiredHelperSigningIdentifier
+        )
+        #expect(decoded.collector.expectedTeamIdentifier == "TEAMID1234")
+        #expect(decoded.driver.expectedTeamIdentifier == "TEAMID1234")
+        #expect(decoded.helper.expectedTeamIdentifier == "TEAMID1234")
+    }
+
+    @Test("tracer construction rejects out-of-range trials without trapping")
+    func tracerConstructionRejectsOutOfRangeTrialsWithoutTrapping() {
+        #expect(
+            throws: VoicePerformanceMeasurementPolicyError.invalidField(
+                .coldTrials
+            )
+        ) {
+            try VoicePerformanceMeasurementPolicy.tracerCanonicalData(
+                for: tracerBuildInput(coldTrials: .max)
+            )
+        }
+    }
+
+    @Test("tracer construction rejects out-of-range hotwords without trapping")
+    func tracerConstructionRejectsOutOfRangeHotwordsWithoutTrapping() {
+        #expect(
+            throws: VoicePerformanceMeasurementPolicyError.invalidField(
+                .evaluationArtifactMaximumHotwords
+            )
+        ) {
+            try VoicePerformanceMeasurementPolicy.tracerCanonicalData(
+                for: tracerBuildInput(maximumHotwords: .max)
+            )
+        }
+    }
+
+    @Test("tracer construction validates every caller-owned authority value")
+    func tracerConstructionValidatesCallerOwnedAuthority() {
+        #expect(
+            throws: VoicePerformanceMeasurementPolicyError.invalidField(
+                .collectorExpectedTeamIdentifier
+            )
+        ) {
+            try VoicePerformanceMeasurementPolicy.tracerCanonicalData(
+                for: tracerBuildInput(teamIdentifier: "teamid1234")
+            )
+        }
+        #expect(
+            throws: VoicePerformanceMeasurementPolicyError.invalidField(
+                .collectorExpectedExecutableSHA256
+            )
+        ) {
+            try VoicePerformanceMeasurementPolicy.tracerCanonicalData(
+                for: tracerBuildInput(
+                    collectorSHA256: String(repeating: "C", count: 64)
+                )
+            )
+        }
+    }
+
     @Test("canonical schema-v2 policy derives the complete tracer contract")
     func canonicalPolicyDecodesAsTracerOnlyAuthority() throws {
         let policy = try VoicePerformanceMeasurementPolicy.decodeCanonical(
@@ -738,6 +859,45 @@ private func canonicalPolicyData() -> Data {
             + #"","expected_signing_identifier":"fun.wwcn.rimeai.voice-helper","expected_team_identifier":"TEAMID1234"},"release_policy_sha256":""#
             + String(repeating: "2", count: 64)
             + #"","schema_version":2}"#).utf8
+    )
+}
+
+private func tracerBuildInput(
+    coldTrials: UInt64 = 7,
+    teamIdentifier: String = "TEAMID1234",
+    collectorSHA256: String = String(repeating: "c", count: 64),
+    maximumHotwords: UInt64 = 64
+) -> VoicePerformanceMeasurementPolicy.TracerBuildInput {
+    VoicePerformanceMeasurementPolicy.TracerBuildInput(
+        coldTrials: coldTrials,
+        controlSocketPath: "/private/tmp/rimeai-performance.sock",
+        controlSessionNonce: String(repeating: "b", count: 64),
+        teamIdentifier: teamIdentifier,
+        collector: .init(
+            executablePath:
+                "/usr/local/libexec/rimeai-voice-performance-collector",
+            executableSHA256: collectorSHA256,
+            cdHash: String(repeating: "d", count: 40)
+        ),
+        driver: .init(
+            executablePath:
+                "/usr/local/bin/rimeai-voice-performance-driver",
+            executableSHA256: String(repeating: "e", count: 64),
+            cdHash: String(repeating: "f", count: 40)
+        ),
+        helper: .init(
+            executablePath: "/usr/local/libexec/rimeai-voice-helper",
+            executableSHA256: String(repeating: "1", count: 64),
+            cdHash: String(repeating: "3", count: 40)
+        ),
+        evaluationArtifact: .init(
+            directory: "/private/tmp/rimeai-evaluation-artifact",
+            adapterID: "sherpa-onnx",
+            artifactID: "voice-model",
+            contentSHA256: String(repeating: "4", count: 64),
+            maximumHotwords: maximumHotwords
+        ),
+        rawReleasePolicySHA256: String(repeating: "2", count: 64)
     )
 }
 

@@ -37,3 +37,5 @@ packages = ["rimeai_eval", "rimeai_daemon", "rimeai_cloud_broker"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+asyncio_default_fixture_loop_scope = "function"
+filterwarnings = ["error"]

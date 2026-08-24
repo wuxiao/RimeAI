@@ -57,6 +57,69 @@ struct VoiceASRArtifactPublisherTests {
         try fixture.expectPrivateTree(at: release)
     }
 
+    @Test("a symlinked source ancestor is rejected during publisher copy")
+    func symlinkedSourceAncestorIsRejected() throws {
+        let fixture = try PublisherFixture()
+        defer { fixture.remove() }
+        let source = try fixture.makeArtifactSource()
+        let aliasPath = source.path.replacingOccurrences(
+            of: "/private/tmp/",
+            with: "/tmp/"
+        )
+        #expect(aliasPath != source.path)
+        let alias = URL(fileURLWithPath: aliasPath, isDirectory: true)
+        let verified = try VoiceASRArtifactVerifier().verifyArtifact(at: source)
+        let publisher = fixture.publisher(
+            approval: fixture.approval(for: verified),
+            verifier: SymlinkAliasAcceptingVerifier(
+                alias: alias,
+                physicalSource: source
+            )
+        )
+
+        #expect(
+            throws: VoiceASRArtifactError.insecureFilesystemEntry(".")
+        ) {
+            try publisher.publishLocalArtifact(from: alias)
+        }
+        #expect(
+            !FileManager.default.fileExists(
+                atPath: fixture.layout.voiceASRReleaseDirectory(
+                    for: fixture.artifactID
+                ).path
+            )
+        )
+    }
+
+    @Test("a decomposed source path is rejected before verification")
+    func decomposedSourcePathIsRejectedBeforeVerification() throws {
+        let fixture = try PublisherFixture()
+        defer { fixture.remove() }
+        let source = try fixture.makeArtifactSource()
+        let verified = try VoiceASRArtifactVerifier().verifyArtifact(at: source)
+        let decomposedPath = source.path + "/e\u{301}"
+        let decomposed = URL(
+            fileURLWithPath: decomposedPath,
+            isDirectory: true
+        )
+        #expect(decomposed.path.utf8.elementsEqual(decomposedPath.utf8))
+        #expect(
+            !decomposedPath.utf8.elementsEqual(
+                decomposedPath.precomposedStringWithCanonicalMapping.utf8
+            )
+        )
+        let publisher = fixture.publisher(
+            approval: fixture.approval(for: verified),
+            verifier: UnexpectedSourceVerifier()
+        )
+
+        #expect(
+            throws: VoiceASRArtifactPublisherError.sourceMustBeLocalDirectory
+        ) {
+            try publisher.publishLocalArtifact(from: decomposed)
+        }
+    }
+
     @Test("trust approval binds digest, adapter, model, license, and source")
     func trustApprovalBindsReleaseMetadata() throws {
         let fixture = try PublisherFixture()
@@ -367,6 +430,15 @@ private final class PublishOutcomeBox: @unchecked Sendable {
 
 private enum PublisherVerifierFailure: Error, Equatable {
     case rejectedStaging
+    case unexpectedSourceVerification
+}
+
+private struct UnexpectedSourceVerifier: VoiceASRArtifactVerifying {
+    func verifyArtifact(
+        at artifactDirectory: URL
+    ) throws -> VoiceASRVerifiedArtifact {
+        throw PublisherVerifierFailure.unexpectedSourceVerification
+    }
 }
 
 private struct RejectStagedArtifactVerifier: VoiceASRArtifactVerifying {
@@ -385,6 +457,31 @@ private struct RejectStagedArtifactVerifier: VoiceASRArtifactVerifying {
     }
 }
 
+private struct SymlinkAliasAcceptingVerifier: VoiceASRArtifactVerifying {
+    let alias: URL
+    let physicalSource: URL
+
+    func verifyArtifact(
+        at artifactDirectory: URL
+    ) throws -> VoiceASRVerifiedArtifact {
+        guard artifactDirectory == alias else {
+            return try VoiceASRArtifactVerifier().verifyArtifact(
+                at: artifactDirectory
+            )
+        }
+        let verified = try VoiceASRArtifactVerifier().verifyArtifact(
+            at: physicalSource
+        )
+        return VoiceASRVerifiedArtifact(
+            artifactDirectory: artifactDirectory,
+            manifest: verified.manifest,
+            contentSHA256: verified.contentSHA256,
+            verifiedFileCount: verified.verifiedFileCount,
+            verifiedPayloadBytes: verified.verifiedPayloadBytes
+        )
+    }
+}
+
 private struct PublisherFixture {
     let home: URL
     let layout: RimeAIProductDataLayout
@@ -393,10 +490,11 @@ private struct PublisherFixture {
     )!
 
     init() throws {
-        home = FileManager.default.temporaryDirectory.appendingPathComponent(
-            "rimeai-voice-publisher-\(UUID().uuidString)",
-            isDirectory: true
-        )
+        home = URL(fileURLWithPath: "/private/tmp", isDirectory: true)
+            .appendingPathComponent(
+                "rimeai-voice-publisher-\(UUID().uuidString)",
+                isDirectory: true
+            )
         try FileManager.default.createDirectory(
             at: home,
             withIntermediateDirectories: false,

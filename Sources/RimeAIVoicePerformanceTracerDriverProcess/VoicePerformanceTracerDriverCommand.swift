@@ -16,6 +16,7 @@ public enum VoicePerformanceTracerDriverCommandError:
     case helperGenerationReuse
     case helperFailed
     case transportFailed
+    case internalFailure
 }
 
 public enum VoicePerformanceTracerDriverConnectionError:
@@ -136,9 +137,11 @@ public enum VoicePerformanceTracerDriverCommand {
                 teamIdentifier: policy.helper.expectedTeamIdentifier,
                 cdHash: policy.helper.expectedCDHash
             )
-        } catch {
+        } catch is PerformanceControlError {
             throw VoicePerformanceTracerDriverCommandError
                 .invalidVerifiedBundle
+        } catch {
+            throw VoicePerformanceTracerDriverCommandError.internalFailure
         }
 
         try requireUnexpired(arguments.deadline, runtime: runtime)
@@ -167,8 +170,16 @@ public enum VoicePerformanceTracerDriverCommand {
             throw error
         } catch VoicePerformanceTracerDriverConnectionError.timedOut {
             throw VoicePerformanceTracerDriverCommandError.deadlineExpired
-        } catch {
+        } catch is VoicePerformanceTracerDriverConnectionError {
             throw VoicePerformanceTracerDriverCommandError.transportFailed
+        } catch PerformanceControlTransportError.operationTimedOut {
+            throw VoicePerformanceTracerDriverCommandError.deadlineExpired
+        } catch is PerformanceControlTransportError {
+            throw VoicePerformanceTracerDriverCommandError.transportFailed
+        } catch is VoicePerformanceTracerProcessError {
+            throw VoicePerformanceTracerDriverCommandError.transportFailed
+        } catch {
+            throw VoicePerformanceTracerDriverCommandError.internalFailure
         }
 
         var activeHelper: VoicePerformanceSupervisedProcessGeneration?
@@ -290,9 +301,12 @@ public enum VoicePerformanceTracerDriverCommand {
                 {
                     throw VoicePerformanceTracerDriverCommandError
                         .deadlineExpired
-                } catch {
+                } catch is VoicePerformanceTracerProcessError {
                     throw VoicePerformanceTracerDriverCommandError
                         .helperFailed
+                } catch {
+                    throw VoicePerformanceTracerDriverCommandError
+                        .internalFailure
                 }
                 activeHelper = nil
             }
@@ -304,24 +318,40 @@ public enum VoicePerformanceTracerDriverCommand {
                     try runtime.terminateHelperAndReap(
                         expected: activeHelper
                     )
-                } catch {
+                } catch is VoicePerformanceTracerProcessError {
                     throw VoicePerformanceTracerDriverCommandError
                         .helperFailed
+                } catch {
+                    throw VoicePerformanceTracerDriverCommandError
+                        .internalFailure
                 }
             }
-            if let commandError =
-                error as? VoicePerformanceTracerDriverCommandError
-            {
-                throw commandError
-            }
-            if error as? VoicePerformanceTracerDriverConnectionError
-                == .timedOut
-            {
-                throw VoicePerformanceTracerDriverCommandError
-                    .deadlineExpired
-            }
-            throw VoicePerformanceTracerDriverCommandError.transportFailed
+            throw normalize(error)
         }
+    }
+
+    private static func normalize(
+        _ error: Error
+    ) -> VoicePerformanceTracerDriverCommandError {
+        if let command =
+            error as? VoicePerformanceTracerDriverCommandError
+        {
+            return command
+        }
+        if let connection =
+            error as? VoicePerformanceTracerDriverConnectionError
+        {
+            return connection == .timedOut
+                ? .deadlineExpired
+                : .transportFailed
+        }
+        if error is VoicePerformanceTracerProcessError
+            || error is PerformanceControlError
+            || error is PerformanceControlSessionBindingError
+        {
+            return .transportFailed
+        }
+        return .internalFailure
     }
 
     private static func requireUnexpired(

@@ -4,7 +4,9 @@ import RimeAIVoicePerformanceTracerProcessDarwin
 import Testing
 
 @testable import RimeAIVoicePerformanceCollector
+@testable import RimeAIVoicePerformanceControlDarwin
 @testable import RimeAIVoicePerformanceTracerCollectorProcess
+@testable import RimeAIVoicePerformanceTracerDarwin
 
 @Suite("Voice performance tracer collector process")
 struct VoicePerformanceTracerCollectorProcessTests {
@@ -260,6 +262,40 @@ struct VoicePerformanceTracerCollectorProcessTests {
         #expect(runtime.writeCount == 0)
     }
 
+    @Test("unexpected verification failures reach the entrypoint as internal")
+    func unexpectedVerificationFailureIsInternalAndRedacted() throws {
+        let fixture = try CollectorProcessFixture()
+        let runtime = ScriptedCollectorProcessRuntime(fixture: fixture)
+        let secret = "collector-verify-secret-7f31"
+        runtime.verifyFailure = SensitiveUnexpectedError(secret)
+        var diagnostics: [String] = []
+
+        let status = VoicePerformanceTracerCollectorEntrypoint.run(
+            arguments: fixture.collectorArguments,
+            resolveCurrentExecutablePath: {
+                fixture.collectorExecutablePath
+            },
+            runProcess: { arguments, executablePath in
+                try VoicePerformanceTracerCollectorProcess(
+                    runtime: runtime
+                ).run(
+                    argv: arguments,
+                    currentExecutablePath: executablePath
+                )
+            },
+            writeDiagnostic: { diagnostics.append($0) }
+        )
+
+        #expect(status == 70)
+        #expect(
+            diagnostics
+                == ["rimeai-voice-performance-tracer:E_INTERNAL\n"]
+        )
+        #expect(diagnostics.allSatisfy { !$0.contains(secret) })
+        #expect(runtime.events == [.parse, .verify, .close])
+        #expect(runtime.writeCount == 0)
+    }
+
     @Test("launch preparation failure is cleaned before the runtime throws")
     func launchPreparationFailureCleansInternally() throws {
         let fixture = try CollectorProcessFixture()
@@ -359,6 +395,83 @@ struct VoicePerformanceTracerCollectorProcessTests {
         #expect(runtime.events.suffix(2) == [.close, .terminate])
         #expect(runtime.events.contains(.collect))
         #expect(!runtime.events.contains(.waitForDriver))
+        #expect(runtime.writeCount == 0)
+    }
+
+    @Test("unexpected collection failures reach the entrypoint as internal")
+    func unexpectedCollectionFailureIsInternalAndRedacted() throws {
+        let fixture = try CollectorProcessFixture()
+        let runtime = ScriptedCollectorProcessRuntime(fixture: fixture)
+        let secret = "collector-collect-secret-a919"
+        runtime.collectFailure = SensitiveUnexpectedError(secret)
+        var diagnostics: [String] = []
+
+        let status = VoicePerformanceTracerCollectorEntrypoint.run(
+            arguments: fixture.collectorArguments,
+            resolveCurrentExecutablePath: {
+                fixture.collectorExecutablePath
+            },
+            runProcess: { arguments, executablePath in
+                try VoicePerformanceTracerCollectorProcess(
+                    runtime: runtime
+                ).run(
+                    argv: arguments,
+                    currentExecutablePath: executablePath
+                )
+            },
+            writeDiagnostic: { diagnostics.append($0) }
+        )
+
+        #expect(status == 70)
+        #expect(
+            diagnostics
+                == ["rimeai-voice-performance-tracer:E_INTERNAL\n"]
+        )
+        #expect(diagnostics.allSatisfy { !$0.contains(secret) })
+        #expect(runtime.events.suffix(2) == [.close, .terminate])
+        #expect(runtime.writeCount == 0)
+    }
+
+    @Test("unexpected Darwin adapter failures reach the entrypoint as internal")
+    func unexpectedDarwinAdapterFailureIsInternalAndRedacted() throws {
+        let fixture = try CollectorProcessFixture()
+        let secret = "collector-darwin-adapter-secret-0d41"
+        let listener = UnexpectedDarwinControlListener(
+            error: SensitiveUnexpectedError(secret)
+        )
+        let transport = DarwinVoicePerformanceTracerTransport(
+            controlSocketPath: fixture.measurementPolicy.controlSocketPath,
+            listener: listener,
+            processSystem: InertDarwinTracerProcessSystem()
+        )
+        let runtime = ScriptedCollectorProcessRuntime(fixture: fixture)
+        runtime.collectorTransport = transport
+        var diagnostics: [String] = []
+
+        let status = VoicePerformanceTracerCollectorEntrypoint.run(
+            arguments: fixture.collectorArguments,
+            resolveCurrentExecutablePath: {
+                fixture.collectorExecutablePath
+            },
+            runProcess: { arguments, executablePath in
+                try VoicePerformanceTracerCollectorProcess(
+                    runtime: runtime
+                ).run(
+                    argv: arguments,
+                    currentExecutablePath: executablePath
+                )
+            },
+            writeDiagnostic: { diagnostics.append($0) }
+        )
+
+        #expect(status == 70)
+        #expect(
+            diagnostics
+                == ["rimeai-voice-performance-tracer:E_INTERNAL\n"]
+        )
+        #expect(diagnostics.allSatisfy { !$0.contains(secret) })
+        #expect(listener.didClose)
+        #expect(runtime.events.suffix(2) == [.close, .terminate])
         #expect(runtime.writeCount == 0)
     }
 
@@ -862,6 +975,64 @@ private struct CollectorProcessFixture {
     }
 }
 
+private struct SensitiveUnexpectedError: Error, CustomStringConvertible {
+    let description: String
+
+    init(_ description: String) {
+        self.description = description
+    }
+}
+
+private final class UnexpectedDarwinControlListener:
+    DarwinVoicePerformanceTracerControlListening,
+    @unchecked Sendable
+{
+    private let error: any Error
+    private let lock = NSLock()
+    private(set) var didClose = false
+
+    init(error: any Error) {
+        self.error = error
+    }
+
+    func acceptControlConnection(
+        expectedPeer: PerformanceControlExpectedPeerIdentity,
+        deadline: ContinuousClock.Instant
+    ) throws -> any DarwinVoicePerformanceTracerControlConnection {
+        throw error
+    }
+
+    @discardableResult
+    func close() -> Bool {
+        lock.lock()
+        didClose = true
+        lock.unlock()
+        return true
+    }
+}
+
+private struct InertDarwinTracerProcessSystem:
+    DarwinVoicePerformanceTracerProcessSystem
+{
+    var now: ContinuousClock.Instant { ContinuousClock().now }
+
+    func probe(processIdentifier: Int32) throws
+        -> DarwinVoicePerformanceTracerProcessProbe
+    {
+        throw SensitiveUnexpectedError("unused process probe")
+    }
+
+    func probeBSDInfo(processIdentifier: Int32) throws
+        -> DarwinVoicePerformanceTracerBSDProbe
+    {
+        throw SensitiveUnexpectedError("unused BSD probe")
+    }
+
+    func wait(for duration: Duration) throws {
+        throw SensitiveUnexpectedError("unused process wait")
+    }
+}
+
 private final class ScriptedCollectorProcessRuntime:
     VoicePerformanceTracerCollectorProcessRuntime
 {
@@ -889,6 +1060,7 @@ private final class ScriptedCollectorProcessRuntime:
     var launchInternalCleanupCount = 0
     var bindFailure: Error?
     var collectFailure: Error?
+    var collectorTransport: (any VoicePerformanceTracerTransport)?
     var collectedResult: VoicePerformanceTracerResult?
     var waitFailure: Error?
     var writeFailure: Error?
@@ -984,6 +1156,7 @@ private final class ScriptedCollectorProcessRuntime:
         events.append(.bind)
         boundDriver = identity
         if let bindFailure { throw bindFailure }
+        try collectorTransport?.bindLaunchedDriver(identity)
     }
 
     func collect(
@@ -994,6 +1167,11 @@ private final class ScriptedCollectorProcessRuntime:
         collectedRequest = request
         collectedDeadline = deadline
         if let collectFailure { throw collectFailure }
+        if let collectorTransport {
+            return try VoicePerformanceTracerCollector(
+                transport: collectorTransport
+            ).collect(request, deadline: deadline)
+        }
         if let collectedResult { return collectedResult }
         throw ScriptedFailure.unimplemented
     }
@@ -1008,6 +1186,7 @@ private final class ScriptedCollectorProcessRuntime:
 
     func closeTransport() {
         events.append(.close)
+        collectorTransport?.close()
     }
 
     func terminateDriverGroupAndReap() throws {

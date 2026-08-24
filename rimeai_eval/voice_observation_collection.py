@@ -957,13 +957,12 @@ def _enforce_running_output_bound(path: Path) -> None:
 
 
 def _stop_native_driver(process: subprocess.Popen) -> None:
+    signal_error: Optional[OSError] = None
     try:
         os.killpg(process.pid, signal.SIGKILL)
     except OSError as error:
         if error.errno != errno.ESRCH:
-            raise VoiceObservationCollectionError(
-                "cannot clean the native voice driver process group"
-            ) from error
+            signal_error = error
     try:
         process.wait(timeout=2)
     except subprocess.TimeoutExpired as error:
@@ -981,6 +980,10 @@ def _stop_native_driver(process: subprocess.Popen) -> None:
         raise VoiceObservationCollectionError(
             "cannot clean the native voice driver process group"
         ) from error
+    if signal_error is not None:
+        raise VoiceObservationCollectionError(
+            "cannot clean the native voice driver process group"
+        ) from signal_error
 
 
 def _require_only_native_output(

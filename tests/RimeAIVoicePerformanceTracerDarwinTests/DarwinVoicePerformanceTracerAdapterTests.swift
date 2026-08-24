@@ -85,6 +85,42 @@ struct DarwinVoicePerformanceTracerAdapterTests {
         }
     }
 
+    @Test("unexpected accept errors remain internal through the Darwin adapter")
+    func unexpectedAcceptErrorRemainsInternal() throws {
+        let fixture = try AdapterFixture()
+        let secret = "collector-darwin-accept-secret"
+        let listener = SequenceControlListener(
+            connections: [],
+            acceptError: SensitiveUnexpectedError(secret: secret)
+        )
+        let transport = DarwinVoicePerformanceTracerTransport(
+            controlSocketPath: fixture.measurementPolicy.controlSocketPath,
+            listener: listener,
+            processSystem: SequenceProcessSystem(
+                events: EventLog(),
+                probes: []
+            )
+        )
+        try transport.bindLaunchedDriver(.validDriver)
+
+        do {
+            _ = try VoicePerformanceTracerCollector(transport: transport)
+                .collect(
+                    fixture.request,
+                    deadline: ContinuousClock().now.advanced(
+                        by: .seconds(1)
+                    )
+                )
+            Issue.record("expected the unexpected adapter error to fail")
+        } catch let error as VoicePerformanceTracerCollectorError {
+            #expect(error == .internalFailure)
+            #expect(!String(describing: error).contains(secret))
+        } catch {
+            Issue.record("unexpected collector error type: \(type(of: error))")
+        }
+        #expect(listener.didClose)
+    }
+
     @Test("invalid driver launch identities fail closed and terminal")
     func invalidBindingsAreTerminal() throws {
         let invalid = [
@@ -176,6 +212,25 @@ struct DarwinVoicePerformanceTracerAdapterTests {
                 )
             }
         }
+    }
+
+    @Test("transport close propagates listener cleanup failure")
+    func transportClosePropagatesListenerCleanupFailure() {
+        let listener = SequenceControlListener(
+            connections: [],
+            closeSucceeds: false
+        )
+        let transport = DarwinVoicePerformanceTracerTransport(
+            listener: listener,
+            processSystem: SequenceProcessSystem(
+                events: EventLog(),
+                probes: []
+            )
+        )
+
+        #expect(!transport.close())
+        #expect(listener.didClose)
+        #expect(!transport.close())
     }
 
     @Test("a same-signed driver outside the launched generation is rejected")
@@ -669,7 +724,7 @@ struct DarwinVoicePerformanceTracerAdapterTests {
         }
     }
 
-    @Test("ESRCH confirms exit while every other process error fails closed")
+    @Test("ESRCH confirms exit while unknown process errors propagate")
     func processProbeErrorsAreClassifiedSafely() throws {
         do {
             let events = EventLog()
@@ -699,11 +754,38 @@ struct DarwinVoicePerformanceTracerAdapterTests {
                 role: .helper,
                 processSystem: system
             )
-            #expect(throws: VoicePerformanceTracerTransportError.failed) {
+            #expect(throws: TestProcessError.permissionDenied) {
                 try connection.closeAndConfirmPeerExit(
                     deadline: system.now.advanced(by: .seconds(1))
                 )
             }
+        }
+    }
+
+    @Test("unknown process wait errors propagate without leaking their text")
+    func unexpectedProcessWaitErrorPropagates() throws {
+        let secret = "collector-darwin-wait-secret"
+        let events = EventLog()
+        let system = SequenceProcessSystem(
+            events: events,
+            probes: [.usage(.active)],
+            waitError: SensitiveUnexpectedError(secret: secret)
+        )
+        let connection = try DarwinVoicePerformanceTracerConnection(
+            controlConnection: FakeControlConnection(events: events),
+            role: .helper,
+            processSystem: system
+        )
+
+        do {
+            try connection.closeAndConfirmPeerExit(
+                deadline: system.now.advanced(by: .seconds(1))
+            )
+            Issue.record("expected the unexpected wait error to propagate")
+        } catch let error as SensitiveUnexpectedError {
+            #expect(error.secret == secret)
+        } catch {
+            Issue.record("unexpected wait error type: \(type(of: error))")
         }
     }
 
@@ -746,10 +828,13 @@ struct DarwinVoicePerformanceTracerAdapterTests {
                     == expected
             )
         }
-        #expect(
-            normalizedTracerTransportError(TestProcessError.permissionDenied)
-                == .failed
-        )
+        let unknown: VoicePerformanceTracerTransportError? =
+            normalizedTracerTransportError(
+                SensitiveUnexpectedError(
+                    secret: "collector-darwin-normalizer-secret"
+                )
+            )
+        #expect(unknown == nil)
     }
 
     @Test("collector driver and helper requests map to exact Darwin identities")
@@ -904,13 +989,19 @@ private final class SequenceControlListener:
 {
     private let lock = NSLock()
     private var connections: [any DarwinVoicePerformanceTracerControlConnection]
+    private let closeSucceeds: Bool
+    private let acceptError: (any Error)?
     private(set) var expectedPeers: [PerformanceControlExpectedPeerIdentity] = []
     private(set) var didClose = false
 
     init(
-        connections: [any DarwinVoicePerformanceTracerControlConnection]
+        connections: [any DarwinVoicePerformanceTracerControlConnection],
+        closeSucceeds: Bool = true,
+        acceptError: (any Error)? = nil
     ) {
         self.connections = connections
+        self.closeSucceeds = closeSucceeds
+        self.acceptError = acceptError
     }
 
     func acceptControlConnection(
@@ -920,16 +1011,19 @@ private final class SequenceControlListener:
         lock.lock()
         defer { lock.unlock() }
         expectedPeers.append(expectedPeer)
+        if let acceptError { throw acceptError }
         guard !connections.isEmpty else {
             throw PerformanceControlTransportError.ioFailure
         }
         return connections.removeFirst()
     }
 
-    func close() {
+    @discardableResult
+    func close() -> Bool {
         lock.lock()
         didClose = true
         lock.unlock()
+        return closeSucceeds
     }
 }
 
@@ -942,6 +1036,7 @@ private final class SequenceProcessSystem:
     private var probes: [DarwinVoicePerformanceTracerProcessProbe]
     private var processInfos: [DarwinVoicePerformanceTracerBSDProbe]
     private let probeError: (any Error)?
+    private let waitError: (any Error)?
     private let probeAdvance: Duration
     private var instant: ContinuousClock.Instant
     private(set) var probedPIDs: [Int32] = []
@@ -953,12 +1048,14 @@ private final class SequenceProcessSystem:
         probes: [DarwinVoicePerformanceTracerProcessProbe],
         processInfos: [DarwinVoicePerformanceTracerBSDProbe] = [],
         probeError: (any Error)? = nil,
+        waitError: (any Error)? = nil,
         probeAdvance: Duration = .zero
     ) {
         self.events = events
         self.probes = probes
         self.processInfos = processInfos
         self.probeError = probeError
+        self.waitError = waitError
         self.probeAdvance = probeAdvance
         instant = ContinuousClock().now
     }
@@ -986,10 +1083,11 @@ private final class SequenceProcessSystem:
 
     func wait(for duration: Duration) throws {
         lock.lock()
+        defer { lock.unlock() }
         events.append("wait")
         waitDurations.append(duration)
         instant = instant.advanced(by: duration)
-        lock.unlock()
+        if let waitError { throw waitError }
     }
 
     func probeBSDInfo(processIdentifier: Int32) throws
@@ -1176,6 +1274,10 @@ private extension DarwinVoicePerformanceTracerBSDInfo {
 
 private enum TestProcessError: Error {
     case permissionDenied
+}
+
+private struct SensitiveUnexpectedError: Error, Equatable {
+    let secret: String
 }
 
 private struct AdapterFixture {

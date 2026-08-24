@@ -4,6 +4,40 @@ import Testing
 
 @Suite("Sealed performance-control driver policy v1")
 struct SealedDriverPolicyTests {
+    @Test("code-owned tracer construction emits the exact reviewed policy")
+    func codeOwnedTracerConstructionIsExactAndRoundTrips() throws {
+        let canonical = try SealedPerformanceControlDriverPolicy
+            .tracerCanonicalData()
+        let expected = Data(
+            #"{"capabilities":["authenticated_control","lazy_load_ticket"],"control_protocol":{"id":"rimeai-performance-control-v2","sha256":"b7784bd825b63851ad02bf376020e41f6949f8d51f076da222ff8b6b383dfad3"},"qualification":"tracer","schema_version":1}"#.utf8
+        )
+
+        #expect(canonical == expected)
+        #expect(
+            canonical.count
+                <= SealedPerformanceControlDriverPolicy.maximumEncodedBytes
+        )
+        #expect(!canonical.contains(0x0A))
+        #expect(!canonical.contains(0x0D))
+
+        let decoded = try SealedPerformanceControlDriverPolicy
+            .decodeCanonical(
+                canonical,
+                expectedControlProtocol:
+                    PerformanceControlProtocolContract.identity
+            )
+        #expect(decoded.qualification == .tracer)
+        #expect(
+            decoded.capabilities
+                == SealedPerformanceControlDriverPolicy.tracerCapabilities
+        )
+        #expect(
+            decoded.controlProtocol
+                == PerformanceControlProtocolContract.identity
+        )
+        #expect(!decoded.authenticatedProductionDriver)
+    }
+
     @Test("control protocol identity is the reviewed ID plus lowercase SHA-256")
     func controlProtocolIdentityIsExact() throws {
         let digest = String(repeating: "a", count: 64)

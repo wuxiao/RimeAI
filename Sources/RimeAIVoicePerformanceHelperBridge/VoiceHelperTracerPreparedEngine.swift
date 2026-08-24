@@ -1,5 +1,6 @@
 import Foundation
 import RimeAIInputCore
+@_spi(VoiceArtifactAssembly) import RimeAIVoiceHelperEngine
 import RimeAIVoicePerformanceControlCore
 
 struct VoiceHelperInternalTracerLoadAuthorization: Equatable, Sendable {
@@ -95,7 +96,10 @@ final class VoiceHelperInternalTracerPreparedEngine: @unchecked Sendable {
             guard finishLoading(as: .terminal) else {
                 throw VoiceHelperInternalTracerLoadError.invalidState
             }
-            throw VoiceHelperInternalTracerLoadError.engineLoadFailed
+            if Self.isKnownEngineLoadError(error) {
+                throw VoiceHelperInternalTracerLoadError.engineLoadFailed
+            }
+            throw error
         }
         guard finishLoading(as: .loaded) else {
             throw VoiceHelperInternalTracerLoadError.invalidState
@@ -132,6 +136,16 @@ final class VoiceHelperInternalTracerPreparedEngine: @unchecked Sendable {
         state = completedState
         lock.unlock()
         return true
+    }
+
+    private static func isKnownEngineLoadError(_ error: Error) -> Bool {
+        error is VoiceASRArtifactError
+            || error is VoiceASRArtifactStoreError
+            || error is VoiceProductEngineDescriptorError
+            || error is ProductStreamingVoiceEngineError
+            || error is VoiceAdmittedArtifactEngineAssemblyError
+            || error is VoiceHelperReleaseBootstrapError
+            || error is VoiceReleasePolicyError
     }
 }
 

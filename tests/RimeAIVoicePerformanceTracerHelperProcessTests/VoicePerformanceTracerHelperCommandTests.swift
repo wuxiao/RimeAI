@@ -7,7 +7,7 @@ import Testing
 
 @Suite("Voice performance tracer helper command")
 struct VoicePerformanceTracerHelperCommandTests {
-    @Test("raw transport failures normalize to typed helper errors")
+    @Test("only known transport failures normalize to typed helper errors")
     func transportFailuresAreTypedBeforeReachingCommand() {
         #expect(
             VoicePerformanceHelperTransportErrorNormalizer.normalize(
@@ -27,7 +27,7 @@ struct VoicePerformanceTracerHelperCommandTests {
         #expect(
             VoicePerformanceHelperTransportErrorNormalizer.normalize(
                 HelperFixtureError.unexpectedCall
-            ) == .failed
+            ) == nil
         )
     }
 
@@ -73,6 +73,191 @@ struct VoicePerformanceTracerHelperCommandTests {
             )
         }
         #expect(runtime.sideEffects.isEmpty)
+    }
+
+    @Test("unexpected facade creation errors reach the entrypoint as internal")
+    func unexpectedMakeFacadeErrorIsInternalAndRedacted() throws {
+        let fixture = try HelperCommandFixture(coldTrials: 1)
+        let secret = "helper-facade-secret-a42d"
+        let commandRuntime = RecordingHelperRuntime(
+            now: 1_000,
+            facadeError: HelperSensitiveUnexpectedError(secret)
+        )
+        let processRuntime = HelperCommandEntrypointProcessRuntime(
+            fixture: fixture,
+            commandRuntime: commandRuntime
+        )
+        let executablePath = fixture.measurementPolicy.helper
+            .expectedExecutablePath
+        let arguments = [
+            executablePath,
+            "--tracer-bundle", fixture.bundlePath,
+            "--trial", "1",
+            "--deadline-continuous-ns", "300000000000",
+        ]
+        var diagnostics: [String] = []
+
+        let status = VoicePerformanceTracerHelperEntrypoint.run(
+            arguments: arguments,
+            resolveCurrentExecutablePath: { executablePath },
+            runProcess: { argv, currentExecutablePath in
+                try VoicePerformanceTracerHelperProcess(
+                    runtime: processRuntime
+                ).run(
+                    argv: argv,
+                    currentExecutablePath: currentExecutablePath
+                )
+            },
+            writeDiagnostic: { diagnostics.append($0) }
+        )
+
+        #expect(status == 70)
+        #expect(
+            diagnostics
+                == ["rimeai-voice-performance-helper:E_INTERNAL\n"]
+        )
+        #expect(diagnostics.allSatisfy { !$0.contains(secret) })
+        #expect(commandRuntime.sideEffects == [
+            "current-generation", "make-facade",
+        ])
+    }
+
+    @Test("unexpected connect errors reach the entrypoint as internal")
+    func unexpectedConnectErrorIsInternalAndRedacted() throws {
+        let fixture = try HelperCommandFixture(coldTrials: 1)
+        let secret = "helper-connect-secret-e822"
+        let facade = try RecordingHelperFacade(
+            measurementPolicy: fixture.measurementPolicy,
+            peerNonce: try helperNonce("9")
+        )
+        let commandRuntime = RecordingHelperRuntime(
+            now: 1_000,
+            facade: facade,
+            connectError: HelperSensitiveUnexpectedError(secret)
+        )
+        facade.recorder = commandRuntime.recorder
+        let processRuntime = HelperCommandEntrypointProcessRuntime(
+            fixture: fixture,
+            commandRuntime: commandRuntime
+        )
+        let executablePath = fixture.measurementPolicy.helper
+            .expectedExecutablePath
+        let arguments = [
+            executablePath,
+            "--tracer-bundle", fixture.bundlePath,
+            "--trial", "1",
+            "--deadline-continuous-ns", "300000000000",
+        ]
+        var diagnostics: [String] = []
+
+        let status = VoicePerformanceTracerHelperEntrypoint.run(
+            arguments: arguments,
+            resolveCurrentExecutablePath: { executablePath },
+            runProcess: { argv, currentExecutablePath in
+                try VoicePerformanceTracerHelperProcess(
+                    runtime: processRuntime
+                ).run(
+                    argv: argv,
+                    currentExecutablePath: currentExecutablePath
+                )
+            },
+            writeDiagnostic: { diagnostics.append($0) }
+        )
+
+        #expect(status == 70)
+        #expect(
+            diagnostics
+                == ["rimeai-voice-performance-helper:E_INTERNAL\n"]
+        )
+        #expect(diagnostics.allSatisfy { !$0.contains(secret) })
+        #expect(commandRuntime.sideEffects == [
+            "current-generation", "make-facade", "connect", "cancel",
+        ])
+    }
+
+    @Test("opaque deferred loader errors survive cleanup and reach the helper entrypoint redacted")
+    func opaqueDeferredLoaderErrorIsPreservedAndRedacted() throws {
+        let fixture = try HelperCommandFixture(coldTrials: 1)
+        let binding = try fixture.binding(trial: 1)
+        let secret = "helper-deferred-loader-secret-3bc1"
+        let unexpected = HelperSensitiveUnexpectedError(secret)
+        let facade = try RecordingHelperFacade(
+            measurementPolicy: fixture.measurementPolicy,
+            peerNonce: try helperNonce("9"),
+            loaderError: unexpected
+        )
+        let ticket = try helperNonce("2")
+        let connection = RecordingHelperConnection(
+            frames: [
+                .challenge(
+                    peerRole: .helper,
+                    sessionID: binding.sessionID,
+                    planNonce: binding.planNonce,
+                    collectorNonce: try helperNonce("8")
+                ),
+                .loadEngine(
+                    sequence: 1,
+                    sessionID: binding.sessionID,
+                    trial: 1,
+                    loadTicket: ticket
+                ),
+                .loadStartedAck(
+                    sequence: 2,
+                    sessionID: binding.sessionID,
+                    replyTo: 1,
+                    trial: 1,
+                    loadTicket: ticket
+                ),
+            ],
+            terminalError: .peerDisconnected
+        )
+        let commandRuntime = RecordingHelperRuntime(
+            now: 1_000,
+            facade: facade,
+            connection: connection
+        )
+        facade.recorder = commandRuntime.recorder
+        connection.recorder = commandRuntime.recorder
+        let processRuntime = HelperCommandEntrypointProcessRuntime(
+            fixture: fixture,
+            commandRuntime: commandRuntime
+        )
+        let executablePath = fixture.measurementPolicy.helper
+            .expectedExecutablePath
+        let arguments = [
+            executablePath,
+            "--tracer-bundle", fixture.bundlePath,
+            "--trial", "1",
+            "--deadline-continuous-ns", "300000000000",
+        ]
+        var diagnostics: [String] = []
+
+        let status = VoicePerformanceTracerHelperEntrypoint.run(
+            arguments: arguments,
+            resolveCurrentExecutablePath: { executablePath },
+            runProcess: { argv, currentExecutablePath in
+                try VoicePerformanceTracerHelperProcess(
+                    runtime: processRuntime
+                ).run(
+                    argv: argv,
+                    currentExecutablePath: currentExecutablePath
+                )
+            },
+            writeDiagnostic: { diagnostics.append($0) }
+        )
+
+        #expect(
+            (processRuntime.observedCommandError
+                as? HelperSensitiveUnexpectedError)?.description == secret
+        )
+        #expect(status == 70)
+        #expect(
+            diagnostics
+                == ["rimeai-voice-performance-helper:E_INTERNAL\n"]
+        )
+        #expect(diagnostics.allSatisfy { !$0.contains(secret) })
+        #expect(connection.closeCount == 1)
+        #expect(facade.cancelCount == 1)
     }
 
     @Test("helper follows challenge load acknowledgement ready then EOF")
@@ -852,6 +1037,7 @@ private final class RecordingHelperFacade:
     var recorder = HelperEventRecorder()
     private let measurementPolicy: VoicePerformanceMeasurementPolicy
     private let peerNonce: PerformanceControlNonce
+    private let loaderError: Error?
     private(set) var loaderInvocationCount = 0
     private(set) var loaderCountsBeforeReceive: [Int] = []
     private(set) var receivedDeadlines: [
@@ -863,10 +1049,12 @@ private final class RecordingHelperFacade:
 
     init(
         measurementPolicy: VoicePerformanceMeasurementPolicy,
-        peerNonce: PerformanceControlNonce
+        peerNonce: PerformanceControlNonce,
+        loaderError: Error? = nil
     ) throws {
         self.measurementPolicy = measurementPolicy
         self.peerNonce = peerNonce
+        self.loaderError = loaderError
     }
 
     func receive(
@@ -920,6 +1108,7 @@ private final class RecordingHelperFacade:
         ):
             recorder.events.append("loader")
             loaderInvocationCount += 1
+            if let loaderError { throw loaderError }
             return .loadReady(
                 sequence: sequence,
                 sessionID: sessionID,
@@ -959,6 +1148,8 @@ private final class RecordingHelperRuntime:
     private let clock: HelperTestClock
     private let facade: RecordingHelperFacade?
     private let connection: RecordingHelperConnection?
+    private let facadeError: Error?
+    private let connectError: Error?
     private let expireAtSideEffectCount: Int?
     private let expiredNow: UInt64
 
@@ -968,12 +1159,16 @@ private final class RecordingHelperRuntime:
         now: UInt64,
         facade: RecordingHelperFacade? = nil,
         connection: RecordingHelperConnection? = nil,
+        facadeError: Error? = nil,
+        connectError: Error? = nil,
         expireAtSideEffectCount: Int? = nil,
         expiredNow: UInt64 = .max
     ) {
         clock = HelperTestClock(now: now)
         self.facade = facade
         self.connection = connection
+        self.facadeError = facadeError
+        self.connectError = connectError
         self.expireAtSideEffectCount = expireAtSideEffectCount
         self.expiredNow = expiredNow
         connection?.clock = clock
@@ -999,6 +1194,7 @@ private final class RecordingHelperRuntime:
         measurementPolicy: VoicePerformanceMeasurementPolicy
     ) throws -> any VoicePerformanceTracerHelperFacade {
         recorder.events.append("make-facade")
+        if let facadeError { throw facadeError }
         guard let facade else {
             throw HelperFixtureError.unexpectedCall
         }
@@ -1011,10 +1207,72 @@ private final class RecordingHelperRuntime:
         deadline: VoicePerformanceContinuousDeadline
     ) throws -> any VoicePerformanceTracerHelperConnection {
         recorder.events.append("connect")
+        if let connectError { throw connectError }
         guard let connection else {
             throw HelperFixtureError.unexpectedCall
         }
         return connection
+    }
+}
+
+private final class HelperCommandEntrypointProcessRuntime:
+    VoicePerformanceTracerHelperProcessRuntime
+{
+    private let fixture: HelperCommandFixture
+    private let commandRuntime: RecordingHelperRuntime
+    private(set) var observedCommandError: Error?
+
+    init(
+        fixture: HelperCommandFixture,
+        commandRuntime: RecordingHelperRuntime
+    ) {
+        self.fixture = fixture
+        self.commandRuntime = commandRuntime
+    }
+
+    func parseArguments(
+        _ argv: [String],
+        currentExecutablePath: String,
+        policyColdTrials: UInt64
+    ) throws -> VoicePerformanceHelperProcessArguments {
+        try VoicePerformanceHelperProcessArguments.parse(
+            argv,
+            currentExecutablePath: currentExecutablePath,
+            policyColdTrials: policyColdTrials
+        )
+    }
+
+    func verifyHelperBundle(
+        declaredPath: String
+    ) throws -> VerifiedPerformanceTracerBundleContext {
+        fixture.context
+    }
+
+    func runCommand(
+        arguments: VoicePerformanceHelperProcessArguments,
+        verifiedBundle: VerifiedPerformanceTracerBundleContext
+    ) throws {
+        do {
+            try VoicePerformanceTracerHelperCommand.run(
+                arguments: arguments,
+                verifiedBundle: verifiedBundle,
+                runtime: commandRuntime
+            )
+        } catch {
+            observedCommandError = error
+            throw error
+        }
+    }
+}
+
+private struct HelperSensitiveUnexpectedError:
+    Error,
+    CustomStringConvertible
+{
+    let description: String
+
+    init(_ description: String) {
+        self.description = description
     }
 }
 

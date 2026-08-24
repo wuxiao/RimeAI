@@ -10,13 +10,78 @@ import Testing
 @Suite(.serialized)
 struct VoiceHelperPerformanceTracerBridgeTests {
     @Test
-    func spiFactoryRequiresPolicyAndBundleWithoutSpoofableGeneration() {
+    func spiFactoryRequiresPolicyWithoutSpoofableGeneration() {
         let factory: (
             RimeAIProductDataLayout,
             VoicePerformanceMeasurementPolicy
         ) throws -> VoiceHelperPerformanceTracerBridge =
             VoiceHelperPerformanceTracerBridgeFactory.make
         _ = factory
+    }
+
+    @Test
+    func privateTemporaryVerifiedHelperPathIsThePolicyAuthority() throws {
+        let fixture = try TracerFacadeFixture()
+        defer { fixture.remove() }
+
+        _ = try VoiceHelperPerformanceTracerBridgeFactory.make(
+            bootstrap: fixture.bootstrap,
+            measurementPolicy: fixture.measurementPolicy,
+            peerNonceSource: { try tracerFacadeNonce("9") },
+            processStartTokenSource: { 9_001 }
+        )
+
+        #expect(fixture.bundleValidationCount == 1)
+    }
+
+    @Test
+    func temporarySymlinkAliasCannotBecomeThePolicyAuthority() throws {
+        let fixture = try TracerFacadeFixture(
+            helperExecutablePathTransform: {
+                guard $0.hasPrefix("/private/tmp/") else { return $0 }
+                return "/tmp/" + $0.dropFirst("/private/tmp/".count)
+            }
+        )
+        defer { fixture.remove() }
+
+        #expect(
+            throws: VoiceHelperPerformanceTracerBridgeError.rejected
+        ) {
+            _ = try fixture.makeBridge()
+        }
+        #expect(fixture.bundleValidationCount == 0)
+    }
+
+    @Test
+    func decomposedVerifiedHelperPathCannotBecomeThePolicyAuthority() {
+        let decomposedPath =
+            "/private/tmp/RimeAI-e\u{301}.app"
+            + "/Contents/MacOS/rimeai-voice-performance-helper"
+
+        #expect(
+            throws: VoiceHelperPerformanceTracerBootstrapError
+                .invalidVerifiedHelperExecutablePath
+        ) {
+            _ = try VoiceHelperPerformanceTracerBootstrap
+                .deriveVerifiedHelperBundleURL(
+                    executablePath: decomposedPath
+                )
+        }
+    }
+
+    @Test
+    func symlinkedPolicyAncestorIsRejectedAfterBundleValidation() throws {
+        let fixture = try TracerFacadeFixture()
+        defer { fixture.remove() }
+        try fixture.replaceResourcesWithSymlink()
+
+        #expect(
+            throws: VoiceHelperPerformanceTracerBridgeError.rejected
+        ) {
+            _ = try fixture.makeBridge()
+        }
+        #expect(fixture.bundleValidationCount == 1)
+        #expect(fixture.factory.invocationCount == 0)
     }
 
     @Test
@@ -59,6 +124,25 @@ struct VoiceHelperPerformanceTracerBridgeTests {
         #expect(fixture.factory.invocationCount == 0)
         #expect(fixture.appleReleaseFactory.invocationCount == 0)
         #expect(fixture.productionFactory.invocationCount == 0)
+    }
+
+    @Test
+    func unexpectedFactorySourceErrorIsNotMisclassifiedAsRejection() throws {
+        let fixture = try TracerFacadeFixture()
+        defer { fixture.remove() }
+        let unexpected = TracerFacadeUnexpectedError(
+            description: "bridge-factory-secret-2d7a"
+        )
+
+        #expect(throws: unexpected) {
+            _ = try VoiceHelperPerformanceTracerBridgeFactory.make(
+                bootstrap: fixture.bootstrap,
+                measurementPolicy: fixture.measurementPolicy,
+                peerNonceSource: { try tracerFacadeNonce("9") },
+                processStartTokenSource: { throw unexpected }
+            )
+        }
+        #expect(fixture.factory.invocationCount == 0)
     }
 
     @Test
@@ -112,6 +196,47 @@ struct VoiceHelperPerformanceTracerBridgeTests {
         #expect(fixture.bundleValidationCount == 1)
         #expect(fixture.factory.invocationCount == 1)
         #expect(fixture.productionFactory.invocationCount == 0)
+    }
+
+    @Test
+    func opaqueDeferredLoaderFailureSurvivesFacadeTerminalCleanup() throws {
+        let unexpected = TracerFacadeUnexpectedError(
+            description: "helper-facade-loader-secret-169e"
+        )
+        let fixture = try TracerFacadeFixture(
+            factory: TracerFacadeEngineFactory { throw unexpected }
+        )
+        defer { fixture.remove() }
+        let bridge = try fixture.makeBridge()
+        let binding = try fixture.binding(trial: 7)
+        let ticket = try tracerFacadeNonce("2")
+        _ = try bridge.receive(.challenge(
+            peerRole: .helper,
+            sessionID: binding.sessionID,
+            planNonce: binding.planNonce,
+            collectorNonce: try tracerFacadeNonce("8")
+        ))
+        _ = try bridge.receive(.loadEngine(
+            sequence: 1,
+            sessionID: binding.sessionID,
+            trial: 7,
+            loadTicket: ticket
+        ))
+        let acknowledgement = PerformanceControlWireFrame.loadStartedAck(
+            sequence: 2,
+            sessionID: binding.sessionID,
+            replyTo: 1,
+            trial: 7,
+            loadTicket: ticket
+        )
+
+        #expect(throws: unexpected) {
+            _ = try bridge.receive(acknowledgement)
+        }
+        #expect(throws: VoiceHelperPerformanceTracerBridgeError.rejected) {
+            _ = try bridge.receive(acknowledgement)
+        }
+        #expect(fixture.factory.invocationCount == 1)
     }
 
     @Test
@@ -728,6 +853,7 @@ private final class TracerFacadeFixture {
         controlSessionNonce: String = String(repeating: "0f", count: 32),
         declaredReleasePolicySHA256: String? = nil,
         coldTrials: UInt64 = 7,
+        helperExecutablePathTransform: (String) -> String = { $0 },
         factory: TracerFacadeEngineFactory = TracerFacadeEngineFactory()
     ) throws {
         let validationCounter = TracerFacadeCounter()
@@ -738,7 +864,10 @@ private final class TracerFacadeFixture {
         self.appleReleaseFactory = appleReleaseFactory
         self.productionFactory = productionFactory
         releasePolicyData = tracerFacadeReleasePolicyData()
-        root = FileManager.default.temporaryDirectory.appendingPathComponent(
+        root = URL(
+            fileURLWithPath: "/private/tmp",
+            isDirectory: true
+        ).appendingPathComponent(
             "rimeai-tracer-facade-\(UUID().uuidString)",
             isDirectory: true
         )
@@ -758,6 +887,10 @@ private final class TracerFacadeFixture {
             isDirectory: false
         )
         try releasePolicyData.write(to: policyURL)
+        let helperExecutablePath = helperExecutablePathTransform(
+            bundleURL.path
+                + "/Contents/MacOS/rimeai-voice-performance-helper"
+        )
         measurementPolicy = try VoicePerformanceMeasurementPolicy
             .decodeCanonical(tracerFacadeMeasurementPolicyData(
                 controlSessionNonce: controlSessionNonce,
@@ -767,6 +900,7 @@ private final class TracerFacadeFixture {
                     "EvaluationArtifact",
                     isDirectory: true
                 ).path,
+                helperExecutablePath: helperExecutablePath,
                 coldTrials: coldTrials
             ))
         bootstrap = VoiceHelperPerformanceTracerBootstrap(
@@ -790,7 +924,6 @@ private final class TracerFacadeFixture {
         return try VoiceHelperPerformanceTracerBridgeFactory.make(
             bootstrap: bootstrap,
             measurementPolicy: measurementPolicy,
-            bundleURL: bundleURL,
             peerNonceSource: { resolvedPeerNonce },
             processStartTokenSource: { processStartToken }
         )
@@ -804,6 +937,29 @@ private final class TracerFacadeFixture {
                 measurementPolicy.controlSessionNonce
             ),
             trial: trial
+        )
+    }
+
+    func replaceResourcesWithSymlink() throws {
+        let resourcesURL = policyURL.deletingLastPathComponent()
+        let externalResourcesURL = root.appendingPathComponent(
+            "ExternalResources",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: externalResourcesURL,
+            withIntermediateDirectories: false
+        )
+        try releasePolicyData.write(
+            to: externalResourcesURL.appendingPathComponent(
+                "VoiceReleasePolicy.plist",
+                isDirectory: false
+            )
+        )
+        try FileManager.default.removeItem(at: resourcesURL)
+        try FileManager.default.createSymbolicLink(
+            at: resourcesURL,
+            withDestinationURL: externalResourcesURL
         )
     }
 
@@ -888,6 +1044,15 @@ private final class TracerFacadeEngineFactory: @unchecked Sendable {
 
 private enum TracerFacadeTestError: Error {
     case factoryTimedOut
+}
+
+private struct TracerFacadeUnexpectedError:
+    Error,
+    Equatable,
+    Sendable,
+    CustomStringConvertible
+{
+    let description: String
 }
 
 private final class TracerFacadeReceiveOutcome: @unchecked Sendable {
@@ -1097,6 +1262,7 @@ private func tracerFacadeMeasurementPolicyData(
     controlSessionNonce: String,
     releasePolicySHA256: String,
     artifactDirectory: String,
+    helperExecutablePath: String,
     coldTrials: UInt64
 ) -> Data {
     Data(
@@ -1120,7 +1286,9 @@ private func tracerFacadeMeasurementPolicyData(
             + #"","directory":""# + artifactDirectory
             + #"","maximum_hotwords":8},"helper":{"expected_cdhash":""#
             + String(repeating: "3", count: 40)
-            + #"","expected_executable_path":"/usr/local/libexec/rimeai-voice-helper","expected_executable_sha256":""#
+            + #"","expected_executable_path":""#
+            + helperExecutablePath
+            + #"","expected_executable_sha256":""#
             + String(repeating: "1", count: 64)
             + #"","expected_signing_identifier":"fun.wwcn.rimeai.voice-helper","expected_team_identifier":"TEAMID1234"},"release_policy_sha256":""#
             + releasePolicySHA256

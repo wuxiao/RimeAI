@@ -47,6 +47,14 @@ final class PrivacyCenterWindowController: NSObject {
         target: nil,
         action: nil
     )
+    private let voiceInstructionLabel = NSTextField(labelWithString: "")
+    private let voiceShortcutCaptureButton = SettingsShortcutCaptureButton()
+    private let voiceShortcutCancelButton = NSButton(
+        title: "取消编辑",
+        target: nil,
+        action: nil
+    )
+    private let voiceShortcutStatusLabel = NSTextField(labelWithString: "")
     private let voiceStatusLabel = NSTextField(labelWithString: "")
     private let disabledAIField = NSTextField()
     private let disabledContextField = NSTextField()
@@ -55,10 +63,29 @@ final class PrivacyCenterWindowController: NSObject {
     private let artifactLabel = NSTextField(labelWithString: "")
     private let diagnosticsLabel = NSTextField(labelWithString: "")
     private let dataSizeLabel = NSTextField(labelWithString: "")
+    private let settingsActionStatusLabel = NSTextField(labelWithString: "")
+    private let importSettingsButton = NSButton(
+        title: "导入设置…",
+        target: nil,
+        action: nil
+    )
+    private let restoreDefaultSettingsButton = NSButton(
+        title: "恢复默认设置…",
+        target: nil,
+        action: nil
+    )
     private var daemonObserver: NSObjectProtocol?
     private var cloudObserver: NSObjectProtocol?
     private var settingsObserver: NSObjectProtocol?
     private var diagnosticsObserver: NSObjectProtocol?
+    private var settingsActionStatusObserver: NSObjectProtocol?
+    private var voiceShortcutStatusObserver: NSObjectProtocol?
+    private var runtimeSyncGeneration: UInt64 = 0
+    private var isRuntimeSyncInProgress = false
+    private var pendingRuntimeOperations: [SettingsRuntimeOperation] = []
+    private var activeRuntimeOperations: [SettingsRuntimeOperation] = []
+    private var failedRuntimeOperations: [(service: String, error: String)] = []
+    private var runtimeSyncDescription = ""
 
     private override init() {
         window = NSWindow(
@@ -68,6 +95,7 @@ final class PrivacyCenterWindowController: NSObject {
             defer: false
         )
         super.init()
+        window.delegate = self
         reconcileCloudConfiguration()
         window.title = "RimeAI 设置"
         window.isReleasedWhenClosed = false
@@ -98,57 +126,77 @@ final class PrivacyCenterWindowController: NSObject {
         let contentView = NSView()
         window.contentView = contentView
 
-        let scrollView = NSScrollView()
-        scrollView.hasVerticalScroller = true
-        scrollView.drawsBackground = false
-        scrollView.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(scrollView)
-        NSLayoutConstraint.activate([
-            scrollView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
-            scrollView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
-            scrollView.topAnchor.constraint(equalTo: contentView.topAnchor),
-            scrollView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
-        ])
-
-        let documentView = NSView()
-        documentView.translatesAutoresizingMaskIntoConstraints = false
-        scrollView.documentView = documentView
-        documentView.widthAnchor.constraint(
-            equalTo: scrollView.contentView.widthAnchor
-        ).isActive = true
-
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 12
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        documentView.addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(
-                equalTo: documentView.leadingAnchor,
-                constant: 24
-            ),
-            stack.trailingAnchor.constraint(
-                equalTo: documentView.trailingAnchor,
-                constant: -24
-            ),
-            stack.topAnchor.constraint(
-                equalTo: documentView.topAnchor,
-                constant: 22
-            ),
-            stack.bottomAnchor.constraint(
-                equalTo: documentView.bottomAnchor,
-                constant: -22
-            ),
-        ])
-
         let title = label(
             "RimeAI 设置",
             font: .systemFont(ofSize: 22, weight: .semibold)
         )
-        stack.addArrangedSubview(title)
-        stack.addArrangedSubview(sectionTitle("常规输入"))
-        stack.addArrangedSubview(
+        title.setAccessibilityLabel("RimeAI 设置")
+        configureWrapping(settingsActionStatusLabel)
+        settingsActionStatusLabel.font = .systemFont(ofSize: 12)
+        settingsActionStatusLabel.identifier = NSUserInterfaceItemIdentifier(
+            "settings.action-status"
+        )
+        settingsActionStatusLabel.setAccessibilityLabel("设置操作状态")
+
+        let tabView = NSTabView()
+        tabView.tabViewType = .topTabsBezelBorder
+        tabView.translatesAutoresizingMaskIntoConstraints = false
+        tabView.setAccessibilityLabel("RimeAI 设置分类")
+        tabView.setContentHuggingPriority(.defaultLow, for: .vertical)
+
+        let rootStack = NSStackView(views: [
+            title,
+            settingsActionStatusLabel,
+            tabView,
+        ])
+        rootStack.orientation = .vertical
+        rootStack.alignment = .leading
+        rootStack.spacing = 8
+        rootStack.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(rootStack)
+        NSLayoutConstraint.activate([
+            rootStack.leadingAnchor.constraint(
+                equalTo: contentView.leadingAnchor,
+                constant: 18
+            ),
+            rootStack.trailingAnchor.constraint(
+                equalTo: contentView.trailingAnchor,
+                constant: -18
+            ),
+            rootStack.topAnchor.constraint(
+                equalTo: contentView.topAnchor,
+                constant: 16
+            ),
+            rootStack.bottomAnchor.constraint(
+                equalTo: contentView.bottomAnchor,
+                constant: -16
+            ),
+            tabView.widthAnchor.constraint(equalTo: rootStack.widthAnchor),
+            settingsActionStatusLabel.widthAnchor.constraint(
+                equalTo: rootStack.widthAnchor
+            ),
+            tabView.heightAnchor.constraint(greaterThanOrEqualToConstant: 500),
+        ])
+
+        let inputStack = addSettingsTab(
+            to: tabView,
+            title: "输入与 AI"
+        )
+        let voiceStack = addSettingsTab(
+            to: tabView,
+            title: "语音"
+        )
+        let cloudStack = addSettingsTab(
+            to: tabView,
+            title: "云端与历史"
+        )
+        let statusStack = addSettingsTab(
+            to: tabView,
+            title: "状态与数据"
+        )
+
+        inputStack.addArrangedSubview(sectionTitle("常规输入"))
+        inputStack.addArrangedSubview(
             label(
                 "默认使用简体中文、半角字符和中文标点。也可以从菜单栏的"
                     + "输入法菜单直接切换这些选项。",
@@ -163,8 +211,12 @@ final class PrivacyCenterWindowController: NSObject {
         characterSetPopup.addItems(withTitles: ["简体中文", "繁体中文"])
         characterSetPopup.target = self
         characterSetPopup.action = #selector(characterSetChanged(_:))
+        characterSetPopup.identifier = NSUserInterfaceItemIdentifier(
+            "settings.character-set"
+        )
+        characterSetPopup.setAccessibilityLabel("汉字输出")
         characterSetRow.addArrangedSubview(characterSetPopup)
-        stack.addArrangedSubview(characterSetRow)
+        inputStack.addArrangedSubview(characterSetRow)
 
         let characterWidthRow = NSStackView()
         characterWidthRow.orientation = .horizontal
@@ -173,8 +225,12 @@ final class PrivacyCenterWindowController: NSObject {
         characterWidthPopup.addItems(withTitles: ["半角", "全角"])
         characterWidthPopup.target = self
         characterWidthPopup.action = #selector(characterWidthChanged(_:))
+        characterWidthPopup.identifier = NSUserInterfaceItemIdentifier(
+            "settings.character-width"
+        )
+        characterWidthPopup.setAccessibilityLabel("字符宽度")
         characterWidthRow.addArrangedSubview(characterWidthPopup)
-        stack.addArrangedSubview(characterWidthRow)
+        inputStack.addArrangedSubview(characterWidthRow)
 
         let punctuationRow = NSStackView()
         punctuationRow.orientation = .horizontal
@@ -183,12 +239,16 @@ final class PrivacyCenterWindowController: NSObject {
         punctuationPopup.addItems(withTitles: ["中文（，。）", "西文（,.）"])
         punctuationPopup.target = self
         punctuationPopup.action = #selector(punctuationChanged(_:))
+        punctuationPopup.identifier = NSUserInterfaceItemIdentifier(
+            "settings.punctuation-style"
+        )
+        punctuationPopup.setAccessibilityLabel("标点样式")
         punctuationRow.addArrangedSubview(punctuationPopup)
-        stack.addArrangedSubview(punctuationRow)
+        inputStack.addArrangedSubview(punctuationRow)
 
-        stack.addArrangedSubview(separator())
-        stack.addArrangedSubview(sectionTitle("AI 与隐私"))
-        stack.addArrangedSubview(
+        addSeparator(to: inputStack)
+        inputStack.addArrangedSubview(sectionTitle("AI 与隐私"))
+        inputStack.addArrangedSubview(
             label(
                 "Rime 同步生成候选；语义模型只通过当前用户私有的 Unix "
                     + "Domain Socket 运行。配置云端 API Key 后，另一个独立进程"
@@ -200,12 +260,18 @@ final class PrivacyCenterWindowController: NSObject {
         aiToggle.title = "启用本地语义候选"
         aiToggle.target = self
         aiToggle.action = #selector(toggleChanged(_:))
-        stack.addArrangedSubview(aiToggle)
+        aiToggle.identifier = NSUserInterfaceItemIdentifier(
+            "settings.ai-enabled"
+        )
+        inputStack.addArrangedSubview(aiToggle)
 
         offlineToggle.title =
             "本地 daemon 网络隔离（始终开启：禁止 IPv4 / IPv6 socket）"
         offlineToggle.isEnabled = false
-        stack.addArrangedSubview(offlineToggle)
+        offlineToggle.setAccessibilityHelp(
+            "固定开启的安全策略，不能在设置中关闭。"
+        )
+        inputStack.addArrangedSubview(offlineToggle)
 
         let contextRow = NSStackView()
         contextRow.orientation = .horizontal
@@ -220,27 +286,127 @@ final class PrivacyCenterWindowController: NSObject {
         )
         contextPopup.target = self
         contextPopup.action = #selector(contextChanged(_:))
+        contextPopup.identifier = NSUserInterfaceItemIdentifier(
+            "settings.context-policy"
+        )
+        contextPopup.setAccessibilityLabel("上下文模式")
         contextRow.addArrangedSubview(contextPopup)
-        stack.addArrangedSubview(contextRow)
+        inputStack.addArrangedSubview(contextRow)
 
-        stack.addArrangedSubview(separator())
-        stack.addArrangedSubview(sectionTitle("本地语音听写（实验）"))
-        stack.addArrangedSubview(
+        addSeparator(to: inputStack)
+        inputStack.addArrangedSubview(sectionTitle("应用级策略"))
+        inputStack.addArrangedSubview(
             label(
-                "按住 \(VoiceHotKeyManager.displayShortcut) 录音，松开后等待最终"
-                    + "文本；Space 或回车确认上屏，Esc 取消。音频只在独立的"
-                    + "本地 helper 内存中处理，不写入录音或听写历史。Apple "
-                    + "Speech 属于系统管理引擎；麦克风与语音识别权限都由 "
-                    + "RimeAI Voice Helper 申请和持有，而不是输入法进程。",
+                "仅禁用本地 AI 的 Bundle ID（逗号分隔，精确匹配）",
                 secondary: true
             )
         )
-        voiceToggle.title =
-            "启用按住说话（\(VoiceHotKeyManager.displayShortcut)）"
+        disabledAIField.placeholderString =
+            "例如：com.example.PasswordManager"
+        disabledAIField.translatesAutoresizingMaskIntoConstraints = false
+        disabledAIField.identifier = NSUserInterfaceItemIdentifier(
+            "settings.disabled-ai-applications"
+        )
+        disabledAIField.setAccessibilityLabel("禁用本地 AI 的应用 Bundle ID")
+        inputStack.addArrangedSubview(disabledAIField)
+        disabledAIField.widthAnchor.constraint(
+            equalTo: inputStack.widthAnchor
+        ).isActive = true
+        inputStack.addArrangedSubview(
+            label(
+                "仅禁用本地上下文的 Bundle ID（本地 AI 退化为严格模式）",
+                secondary: true
+            )
+        )
+        disabledContextField.placeholderString = "例如：com.example.Terminal"
+        disabledContextField.translatesAutoresizingMaskIntoConstraints = false
+        disabledContextField.identifier = NSUserInterfaceItemIdentifier(
+            "settings.disabled-context-applications"
+        )
+        disabledContextField.setAccessibilityLabel(
+            "禁用本地上下文的应用 Bundle ID"
+        )
+        inputStack.addArrangedSubview(disabledContextField)
+        disabledContextField.widthAnchor.constraint(
+            equalTo: inputStack.widthAnchor
+        ).isActive = true
+        let savePolicies = NSButton(
+            title: "保存应用策略",
+            target: self,
+            action: #selector(saveApplicationPolicies(_:))
+        )
+        inputStack.addArrangedSubview(savePolicies)
+
+        voiceStack.addArrangedSubview(
+            sectionTitle("本地语音听写（实验）")
+        )
+        configureWrapping(voiceInstructionLabel)
+        voiceInstructionLabel.textColor = .secondaryLabelColor
+        voiceStack.addArrangedSubview(voiceInstructionLabel)
+
+        let shortcutRow = NSStackView()
+        shortcutRow.orientation = .horizontal
+        shortcutRow.alignment = .centerY
+        shortcutRow.spacing = 8
+        shortcutRow.addArrangedSubview(label("按住说话快捷键"))
+        voiceShortcutCaptureButton.identifier = NSUserInterfaceItemIdentifier(
+            "settings.voice-shortcut.capture"
+        )
+        voiceShortcutCaptureButton.onCaptureStateChanged = { [weak self]
+            isCapturing in
+            guard let self else {
+                return
+            }
+            self.voiceShortcutCancelButton.isEnabled = isCapturing
+            if isCapturing {
+                self.voiceShortcutStatusLabel.stringValue =
+                    "正在等待新组合；"
+                    + VoiceDictationShortcut.validationFailureDescription
+                self.voiceShortcutStatusLabel.textColor = .controlAccentColor
+            }
+        }
+        voiceShortcutCaptureButton.onKeyEvent = { [weak self]
+            keyCode,
+            modifierFlags in
+            self?.captureVoiceShortcut(
+                keyCode: keyCode,
+                modifierFlags: modifierFlags
+            )
+        }
+        voiceShortcutCaptureButton.onCancel = { [weak self] in
+            self?.refreshVoiceShortcutStatus()
+        }
+        shortcutRow.addArrangedSubview(voiceShortcutCaptureButton)
+        voiceShortcutCancelButton.target = self
+        voiceShortcutCancelButton.action = #selector(cancelVoiceShortcutEdit(_:))
+        voiceShortcutCancelButton.isEnabled = false
+        shortcutRow.addArrangedSubview(voiceShortcutCancelButton)
+        let restoreVoiceShortcutButton = NSButton(
+            title: "恢复默认",
+            target: self,
+            action: #selector(restoreDefaultVoiceShortcut(_:))
+        )
+        restoreVoiceShortcutButton.setAccessibilityHelp(
+            "恢复默认按住说话快捷键 "
+                + VoiceDictationShortcut.default.displayName + "。"
+        )
+        shortcutRow.addArrangedSubview(restoreVoiceShortcutButton)
+        voiceStack.addArrangedSubview(shortcutRow)
+        configureWrapping(voiceShortcutStatusLabel)
+        voiceShortcutStatusLabel.identifier = NSUserInterfaceItemIdentifier(
+            "settings.voice-shortcut.status"
+        )
+        voiceShortcutStatusLabel.setAccessibilityLabel("语音快捷键状态")
+        voiceStack.addArrangedSubview(voiceShortcutStatusLabel)
+
+        voiceToggle.title = "启用按住说话"
         voiceToggle.target = self
         voiceToggle.action = #selector(toggleChanged(_:))
-        stack.addArrangedSubview(voiceToggle)
-        stack.addArrangedSubview(
+        voiceToggle.identifier = NSUserInterfaceItemIdentifier(
+            "settings.voice-enabled"
+        )
+        voiceStack.addArrangedSubview(voiceToggle)
+        voiceStack.addArrangedSubview(
             label(
                 "可单独允许把当前焦点会话中成功确认的 Rime 词条作为"
                     + "易失本地热词。不会读取完整用户词典、长期历史或光标"
@@ -252,9 +418,16 @@ final class PrivacyCenterWindowController: NSObject {
             "使用当前会话已确认的 Rime 词条辅助语音（实验）"
         voiceRimeHotwordToggle.target = self
         voiceRimeHotwordToggle.action = #selector(toggleChanged(_:))
-        stack.addArrangedSubview(voiceRimeHotwordToggle)
+        voiceRimeHotwordToggle.identifier = NSUserInterfaceItemIdentifier(
+            "settings.voice-rime-hotwords"
+        )
+        voiceStack.addArrangedSubview(voiceRimeHotwordToggle)
         configureWrapping(voiceStatusLabel)
-        stack.addArrangedSubview(voiceStatusLabel)
+        voiceStatusLabel.identifier = NSUserInterfaceItemIdentifier(
+            "settings.voice-status"
+        )
+        voiceStatusLabel.setAccessibilityLabel("语音服务状态")
+        voiceStack.addArrangedSubview(voiceStatusLabel)
         let voiceButtons = NSStackView()
         voiceButtons.orientation = .horizontal
         voiceButtons.spacing = 8
@@ -279,11 +452,10 @@ final class PrivacyCenterWindowController: NSObject {
                 action: #selector(openSpeechRecognitionPrivacy(_:))
             )
         )
-        stack.addArrangedSubview(voiceButtons)
+        voiceStack.addArrangedSubview(voiceButtons)
 
-        stack.addArrangedSubview(separator())
-        stack.addArrangedSubview(sectionTitle("云端模型增强与长期记忆"))
-        stack.addArrangedSubview(
+        cloudStack.addArrangedSubview(sectionTitle("云端模型增强"))
+        cloudStack.addArrangedSubview(
             label(
                 "保存 API Key 即启用：RimeAI 会跨应用、以明文长期保存每次"
                     + "上屏文本、拼音、应用标识和时间，并把最近文本、检索片段、"
@@ -293,7 +465,11 @@ final class PrivacyCenterWindowController: NSObject {
             )
         )
         configureWrapping(cloudStatusLabel)
-        stack.addArrangedSubview(cloudStatusLabel)
+        cloudStatusLabel.identifier = NSUserInterfaceItemIdentifier(
+            "settings.cloud-status"
+        )
+        cloudStatusLabel.setAccessibilityLabel("云增强状态")
+        cloudStack.addArrangedSubview(cloudStatusLabel)
 
         let modelRow = NSStackView()
         modelRow.orientation = .horizontal
@@ -304,13 +480,23 @@ final class PrivacyCenterWindowController: NSObject {
         )
         cloudModelPopup.target = self
         cloudModelPopup.action = #selector(cloudModelChanged(_:))
+        cloudModelPopup.identifier = NSUserInterfaceItemIdentifier(
+            "settings.cloud-model"
+        )
+        cloudModelPopup.setAccessibilityLabel("云端排序模型")
         modelRow.addArrangedSubview(cloudModelPopup)
-        stack.addArrangedSubview(modelRow)
+        cloudStack.addArrangedSubview(modelRow)
 
         apiKeyField.placeholderString = "GLM 云端 API Key（保存至 ~/.config/rimeai/cloud.env）"
         apiKeyField.translatesAutoresizingMaskIntoConstraints = false
-        stack.addArrangedSubview(apiKeyField)
-        apiKeyField.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        apiKeyField.identifier = NSUserInterfaceItemIdentifier(
+            "settings.cloud-api-key"
+        )
+        apiKeyField.setAccessibilityLabel("云端 API Key")
+        cloudStack.addArrangedSubview(apiKeyField)
+        apiKeyField.widthAnchor.constraint(
+            equalTo: cloudStack.widthAnchor
+        ).isActive = true
         let cloudButtons = NSStackView()
         cloudButtons.orientation = .horizontal
         cloudButtons.spacing = 8
@@ -328,10 +514,16 @@ final class PrivacyCenterWindowController: NSObject {
                 action: #selector(removeAPIKey(_:))
             )
         )
-        stack.addArrangedSubview(cloudButtons)
+        cloudStack.addArrangedSubview(cloudButtons)
 
+        addSeparator(to: cloudStack)
+        cloudStack.addArrangedSubview(sectionTitle("长期明文历史"))
         configureWrapping(historyStatusLabel)
-        stack.addArrangedSubview(historyStatusLabel)
+        historyStatusLabel.identifier = NSUserInterfaceItemIdentifier(
+            "settings.history-status"
+        )
+        historyStatusLabel.setAccessibilityLabel("长期明文历史状态")
+        cloudStack.addArrangedSubview(historyStatusLabel)
         let historyButtons = NSStackView()
         historyButtons.orientation = .horizontal
         historyButtons.spacing = 8
@@ -349,44 +541,11 @@ final class PrivacyCenterWindowController: NSObject {
                 action: #selector(clearHistory(_:))
             )
         )
-        stack.addArrangedSubview(historyButtons)
+        cloudStack.addArrangedSubview(historyButtons)
 
-        stack.addArrangedSubview(separator())
-        stack.addArrangedSubview(sectionTitle("应用级策略"))
-        stack.addArrangedSubview(
-            label(
-                "仅禁用本地 AI 的 Bundle ID（逗号分隔，精确匹配）",
-                secondary: true
-            )
+        statusStack.addArrangedSubview(
+            sectionTitle("本地模型与运行状态")
         )
-        disabledAIField.placeholderString =
-            "例如：com.example.PasswordManager"
-        disabledAIField.translatesAutoresizingMaskIntoConstraints = false
-        stack.addArrangedSubview(disabledAIField)
-        disabledAIField.widthAnchor.constraint(
-            equalTo: stack.widthAnchor
-        ).isActive = true
-        stack.addArrangedSubview(
-            label(
-                "仅禁用本地上下文的 Bundle ID（本地 AI 退化为严格模式）",
-                secondary: true
-            )
-        )
-        disabledContextField.placeholderString = "例如：com.example.Terminal"
-        disabledContextField.translatesAutoresizingMaskIntoConstraints = false
-        stack.addArrangedSubview(disabledContextField)
-        disabledContextField.widthAnchor.constraint(
-            equalTo: stack.widthAnchor
-        ).isActive = true
-        let savePolicies = NSButton(
-            title: "保存应用策略",
-            target: self,
-            action: #selector(saveApplicationPolicies(_:))
-        )
-        stack.addArrangedSubview(savePolicies)
-
-        stack.addArrangedSubview(separator())
-        stack.addArrangedSubview(sectionTitle("本地模型与运行状态"))
         for statusLabel in [
             daemonStatusLabel,
             modelLabel,
@@ -394,13 +553,46 @@ final class PrivacyCenterWindowController: NSObject {
             dataSizeLabel,
         ] {
             configureWrapping(statusLabel)
-            stack.addArrangedSubview(statusLabel)
+            statusStack.addArrangedSubview(statusLabel)
         }
 
-        stack.addArrangedSubview(separator())
-        stack.addArrangedSubview(sectionTitle("无原文诊断"))
+        addSeparator(to: statusStack)
+        statusStack.addArrangedSubview(sectionTitle("设置管理"))
+        statusStack.addArrangedSubview(
+            label(
+                "导入只接受经过 Store 严格校验的设置文档；API Key 不会导出或导入。"
+                    + "导入与恢复默认后，daemon、云端 broker 和语音 helper 会按新设置收敛。",
+                secondary: true
+            )
+        )
+        let settingsButtons = NSStackView()
+        settingsButtons.orientation = .horizontal
+        settingsButtons.spacing = 8
+        importSettingsButton.target = self
+        importSettingsButton.action = #selector(importSettings(_:))
+        settingsButtons.addArrangedSubview(importSettingsButton)
+        settingsButtons.addArrangedSubview(
+            NSButton(
+                title: "导出设置…",
+                target: self,
+                action: #selector(exportSettings(_:))
+            )
+        )
+        restoreDefaultSettingsButton.target = self
+        restoreDefaultSettingsButton.action = #selector(
+            restoreDefaultSettings(_:)
+        )
+        settingsButtons.addArrangedSubview(restoreDefaultSettingsButton)
+        statusStack.addArrangedSubview(settingsButtons)
+
+        addSeparator(to: statusStack)
+        statusStack.addArrangedSubview(sectionTitle("无原文诊断"))
         configureWrapping(diagnosticsLabel)
-        stack.addArrangedSubview(diagnosticsLabel)
+        diagnosticsLabel.identifier = NSUserInterfaceItemIdentifier(
+            "settings.diagnostics-status"
+        )
+        diagnosticsLabel.setAccessibilityLabel("无原文诊断计数")
+        statusStack.addArrangedSubview(diagnosticsLabel)
         let dataButtons = NSStackView()
         dataButtons.orientation = .horizontal
         dataButtons.spacing = 8
@@ -418,22 +610,18 @@ final class PrivacyCenterWindowController: NSObject {
                 action: #selector(resetDiagnostics(_:))
             )
         )
-        dataButtons.addArrangedSubview(
-            NSButton(
-                title: "导出设置…",
-                target: self,
-                action: #selector(exportSettings(_:))
-            )
-        )
-        dataButtons.addArrangedSubview(
+        statusStack.addArrangedSubview(dataButtons)
+
+        addSeparator(to: statusStack)
+        statusStack.addArrangedSubview(sectionTitle("危险操作"))
+        statusStack.addArrangedSubview(
             NSButton(
                 title: "停用 AI 并清除本地制品…",
                 target: self,
                 action: #selector(clearAllProductData(_:))
             )
         )
-        stack.addArrangedSubview(dataButtons)
-        stack.addArrangedSubview(
+        statusStack.addArrangedSubview(
             label(
                 "清除操作会移除 API Key，并将历史、AI 模型、daemon 与 "
                     + "LaunchAgent 移到废纸篓，但不修改 Rime 用户词典。",
@@ -488,6 +676,24 @@ final class PrivacyCenterWindowController: NSObject {
                     self?.diagnosticsDescription() ?? ""
             }
         }
+        settingsActionStatusObserver = NotificationCenter.default.addObserver(
+            forName: .rimeAISettingsActionStatusDidChange,
+            object: SettingsActionStatusCenter.shared,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.refreshSettingsActionStatus()
+            }
+        }
+        voiceShortcutStatusObserver = NotificationCenter.default.addObserver(
+            forName: .rimeAIVoiceHotKeyRegistrationDidChange,
+            object: VoiceHotKeyManager.shared,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.refreshVoiceShortcutStatus()
+            }
+        }
     }
 
     private func refresh() {
@@ -501,9 +707,24 @@ final class PrivacyCenterWindowController: NSObject {
             at: settings.punctuationStyle == .chinese ? 0 : 1
         )
         aiToggle.state = settings.aiEnabled ? .on : .off
+        aiToggle.isEnabled = !isRuntimeSyncInProgress
         offlineToggle.state = settings.offlineLockEnabled ? .on : .off
         voiceToggle.state = settings.voiceEnabled ? .on : .off
         voiceToggle.isEnabled = settings.aiEnabled
+            && !isRuntimeSyncInProgress
+        let voiceShortcut = settings.voiceShortcut
+        voiceInstructionLabel.stringValue =
+            "按住 \(voiceShortcut.displayName) 录音，松开后等待最终文本；"
+            + "Space 或回车确认上屏，Esc 取消。音频只在独立的本地 helper "
+            + "内存中处理，不写入录音或听写历史。Apple Speech 属于系统管理"
+            + "引擎；麦克风与语音识别权限都由 RimeAI Voice Helper 申请和"
+            + "持有，而不是输入法进程。"
+        voiceToggle.title =
+            "启用按住说话（\(voiceShortcut.displayName)）"
+        voiceShortcutCaptureButton.showShortcut(voiceShortcut.displayName)
+        voiceShortcutCancelButton.isEnabled =
+            voiceShortcutCaptureButton.isCapturing
+        refreshVoiceShortcutStatus()
         voiceRimeHotwordToggle.state = settings.voiceRimeHotwordsEnabled
             ? .on
             : .off
@@ -539,6 +760,7 @@ final class PrivacyCenterWindowController: NSObject {
                 "云增强：未启用 · 未配置的输入不会保存到长期历史或上传"
         }
         refreshVoiceStatus()
+        refreshSettingsActionStatus()
         if let statistics = try? historyService.statistics() {
             historyStatusLabel.stringValue =
                 "明文历史：\(statistics.recordCount) 条 · 代次 "
@@ -554,17 +776,32 @@ final class PrivacyCenterWindowController: NSObject {
     }
 
     @objc private func toggleChanged(_ sender: NSButton) {
+        if isRuntimeSyncInProgress,
+           sender === aiToggle || sender === voiceToggle
+        {
+            refresh()
+            updateSettingsActionStatus(
+                .working,
+                "另一个生命周期操作仍在进行，请稍后再更改开关"
+            )
+            return
+        }
         if sender === aiToggle {
-            settings.aiEnabled = sender.state == .on
-            if sender.state == .off {
+            let enabled = sender.state == .on
+            settings.aiEnabled = enabled
+            if !enabled {
                 settings.clearEphemeralData()
                 DaemonClient.shared.disconnect()
                 settings.voiceEnabled = false
-                // 即使 helper 仍处于异步启动阶段，关闭总开关也必须推进
-                // generation 并在同一串行队列中排入 suspend。
-                setManagedVoiceEnabled(false)
             }
-            setManagedDaemonEnabled(sender.state == .on)
+            reconcileRuntime(
+                SettingsRuntimeTransition(
+                    daemonEnabled: enabled,
+                    cloudBrokerEnabled: nil,
+                    voiceHelperEnabled: enabled ? nil : false
+                ),
+                operation: enabled ? "本地 AI 已设为启用" : "本地 AI 已设为停用"
+            )
         } else if sender === voiceToggle {
             guard settings.aiEnabled else {
                 voiceToggle.state = .off
@@ -574,7 +811,14 @@ final class PrivacyCenterWindowController: NSObject {
             if !enabled {
                 settings.voiceEnabled = false
             }
-            setManagedVoiceEnabled(enabled)
+            reconcileRuntime(
+                SettingsRuntimeTransition(
+                    daemonEnabled: nil,
+                    cloudBrokerEnabled: nil,
+                    voiceHelperEnabled: enabled
+                ),
+                operation: enabled ? "语音已设为启用" : "语音已设为停用"
+            )
         } else if sender === voiceRimeHotwordToggle {
             guard settings.aiEnabled,
                   settings.voiceEnabled,
@@ -589,13 +833,74 @@ final class PrivacyCenterWindowController: NSObject {
     }
 
     @objc private func retryVoice(_ sender: Any?) {
+        guard !rejectLifecycleActionDuringRuntimeSync("重试语音服务") else {
+            return
+        }
         guard settings.aiEnabled, settings.voiceEnabled else {
             refreshVoiceStatus()
             return
         }
-        // 只在 lifecycle 确认 helper ready 后由成功分支广播 retry，避免
-        // 输入法先重注册热键、却连接到尚未就绪的 socket。
-        setManagedVoiceEnabled(true)
+        // 只在 lifecycle 期望状态操作成功后广播 retry；认证 XPC ready
+        // 仍由语音 coordinator 独立确认，不能从进程或 socket 推断。
+        reconcileRuntime(
+            SettingsRuntimeTransition(
+                daemonEnabled: nil,
+                cloudBrokerEnabled: nil,
+                voiceHelperEnabled: true
+            ),
+            operation: "语音服务重试已提交"
+        )
+    }
+
+    private func captureVoiceShortcut(
+        keyCode: UInt16,
+        modifierFlags: NSEvent.ModifierFlags
+    ) {
+        guard let shortcut = VoiceHotKeyManager.makeShortcut(
+            keyCode: keyCode,
+            modifierFlags: modifierFlags
+        ) else {
+            voiceShortcutCaptureButton.showValidationFailure()
+            voiceShortcutStatusLabel.stringValue =
+                "组合不可用；原快捷键 \(settings.voiceShortcut.displayName) 仍已保留"
+            voiceShortcutStatusLabel.textColor = .systemRed
+            updateSettingsActionStatus(
+                .failure,
+                "快捷键未更改："
+                    + VoiceDictationShortcut.validationFailureDescription
+            )
+            return
+        }
+        settings.voiceShortcut = shortcut
+        voiceShortcutCaptureButton.finishCapture(
+            displayName: shortcut.displayName
+        )
+        voiceShortcutCancelButton.isEnabled = false
+        updateSettingsActionStatus(
+            .success,
+            "语音快捷键已更改为 \(shortcut.displayName)"
+        )
+        refreshVoiceShortcutStatus()
+    }
+
+    @objc private func cancelVoiceShortcutEdit(_ sender: Any?) {
+        voiceShortcutCaptureButton.cancelCapture()
+        voiceShortcutCancelButton.isEnabled = false
+        refreshVoiceShortcutStatus()
+    }
+
+    @objc private func restoreDefaultVoiceShortcut(_ sender: Any?) {
+        let shortcut = VoiceDictationShortcut.default
+        settings.voiceShortcut = shortcut
+        voiceShortcutCaptureButton.finishCapture(
+            displayName: shortcut.displayName
+        )
+        voiceShortcutCancelButton.isEnabled = false
+        updateSettingsActionStatus(
+            .success,
+            "语音快捷键已恢复为 \(shortcut.displayName)"
+        )
+        refreshVoiceShortcutStatus()
     }
 
     @objc private func openMicrophonePrivacy(_ sender: Any?) {
@@ -654,13 +959,23 @@ final class PrivacyCenterWindowController: NSObject {
     }
 
     @objc private func saveAPIKey(_ sender: Any?) {
+        guard !rejectLifecycleActionDuringRuntimeSync("启用云增强") else {
+            return
+        }
         do {
             try credentialStore.saveAPIKey(apiKeyField.stringValue)
             settings.cloudModelID = cloudModelPopup.selectedItem?.title
                 ?? RimeAICloudConfiguration.defaultRankingModelID
             settings.cloudConfigured = true
             apiKeyField.stringValue = ""
-            setManagedCloudBrokerEnabled(true)
+            reconcileRuntime(
+                SettingsRuntimeTransition(
+                    daemonEnabled: nil,
+                    cloudBrokerEnabled: true,
+                    voiceHelperEnabled: nil
+                ),
+                operation: "云增强已设为启用"
+            )
             refresh()
         } catch {
             presentError(
@@ -673,6 +988,9 @@ final class PrivacyCenterWindowController: NSObject {
     }
 
     @objc private func removeAPIKey(_ sender: Any?) {
+        guard !rejectLifecycleActionDuringRuntimeSync("移除 API Key") else {
+            return
+        }
         let alert = NSAlert()
         alert.messageText = "移除 API Key 并停用云增强？"
         alert.informativeText =
@@ -683,22 +1001,34 @@ final class PrivacyCenterWindowController: NSObject {
             guard response == .alertFirstButtonReturn, let self else {
                 return
             }
+            guard !self.rejectLifecycleActionDuringRuntimeSync("移除 API Key")
+            else {
+                return
+            }
             // Disable first so no new cloud request or history write can race
             // with credential removal.
             self.settings.cloudConfigured = false
             CloudBrokerClient.shared.disconnect()
-            self.setManagedCloudBrokerEnabled(false)
+            var credentialFailure: (service: String, error: String)?
             do {
                 try self.credentialStore.deleteAPIKey()
                 self.apiKeyField.stringValue = ""
-                self.refresh()
             } catch {
-                self.presentError(
-                    error,
-                    message: "未能移除 API Key",
-                    information: "云增强已停用，但凭据文件可能仍然存在。"
+                credentialFailure = (
+                    service: "API Key",
+                    error: error.localizedDescription
                 )
             }
+            self.reconcileRuntime(
+                SettingsRuntimeTransition(
+                    daemonEnabled: nil,
+                    cloudBrokerEnabled: false,
+                    voiceHelperEnabled: nil
+                ),
+                operation: "云增强已设为停用",
+                initialFailure: credentialFailure
+            )
+            self.refresh()
         }
     }
 
@@ -770,31 +1100,299 @@ final class PrivacyCenterWindowController: NSObject {
 
     @objc private func resetDiagnostics(_ sender: Any?) {
         settings.resetDiagnostics()
+        updateSettingsActionStatus(.success, "诊断计数已重置")
+    }
+
+    @objc private func importSettings(_ sender: Any?) {
+        guard !isRuntimeSyncInProgress else {
+            updateSettingsActionStatus(
+                .working,
+                "上一次设置变更仍在同步运行状态，请稍后再导入"
+            )
+            return
+        }
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.json]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard response == .OK,
+                  let url = panel.url,
+                  let self
+            else {
+                return
+            }
+            guard !self.rejectLifecycleActionDuringRuntimeSync("导入设置")
+            else {
+                return
+            }
+            self.updateSettingsActionStatus(.working, "正在验证导入设置")
+            do {
+                // 先用 metadata 拒绝过大文档，避免在解码门禁前将整个
+                // 非受信文件读入输入法进程；Store 仍保留第二道上限。
+                try SettingsDocumentCodec.validateFileSize(at: url)
+                let document = try Data(contentsOf: url, options: .mappedIfSafe)
+                // 这里只取得严格凭据复验结果；设置文档从不承载、读取或写入
+                // API Key 内容。凭据文件不可读时必须在应用任何设置前失败。
+                let hasCloudCredential = try self.credentialStore
+                    .containsAPIKey()
+                try self.settings.applyImport(
+                    document,
+                    hasCloudCredential: hasCloudCredential
+                )
+                self.settings.clearEphemeralData()
+                let after = self.settings.exportSnapshot()
+                self.reconcileRuntime(
+                    SettingsRuntimeTransition.plan(
+                        desired: after,
+                        // 现有进程、socket 节点与 UI 状态都不是当前
+                        // generation 的认证存活证明，不能据此跳过幂等收敛。
+                        observation: .unverified
+                    ),
+                    operation: "设置已从 \(url.lastPathComponent) 导入"
+                )
+            } catch {
+                self.presentError(
+                    error,
+                    message: "未能导入设置",
+                    information: "文件必须是受支持的 RimeAI 设置文档；"
+                        + "API Key 不会从文件导入，现有设置未被部分修改。"
+                )
+            }
+        }
     }
 
     @objc private func exportSettings(_ sender: Any?) {
         let panel = NSSavePanel()
         panel.nameFieldStringValue = "RimeAI-settings.json"
         panel.allowedContentTypes = [.json]
-        panel.beginSheetModal(for: window) { [settings] response in
-            guard response == .OK, let url = panel.url else {
-                return
-            }
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [
-                .prettyPrinted,
-                .sortedKeys,
-                .withoutEscapingSlashes,
-            ]
-            guard let data = try? encoder.encode(settings.exportSnapshot())
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard response == .OK,
+                  let url = panel.url,
+                  let self
             else {
                 return
             }
-            try? data.write(to: url, options: .atomic)
+            self.updateSettingsActionStatus(.working, "正在导出设置")
+            do {
+                let data = try SettingsDocumentCodec.encode(
+                    self.settings.exportSnapshot()
+                )
+                try data.write(to: url, options: .atomic)
+                self.updateSettingsActionStatus(
+                    .success,
+                    "设置已导出为 \(url.lastPathComponent)"
+                )
+            } catch {
+                self.presentError(
+                    error,
+                    message: "未能导出设置",
+                    information: "目标文件没有被完整写入；现有设置未被修改。"
+                )
+            }
         }
     }
 
+    @objc private func restoreDefaultSettings(_ sender: Any?) {
+        guard !isRuntimeSyncInProgress else {
+            updateSettingsActionStatus(
+                .working,
+                "上一次设置变更仍在同步运行状态，请稍后再恢复默认"
+            )
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = "恢复默认设置？"
+        alert.informativeText =
+            "输入偏好、AI 开关、云端状态、语音开关与快捷键、"
+                + "上下文及应用策略将恢复默认。API Key、长期历史、"
+                + "诊断计数、个人英文词与本地模型不会被删除。"
+        alert.addButton(withTitle: "恢复默认")
+        alert.addButton(withTitle: "取消")
+        alert.alertStyle = .warning
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn,
+                  let self
+            else {
+                return
+            }
+            guard !self.rejectLifecycleActionDuringRuntimeSync("恢复默认设置")
+            else {
+                return
+            }
+            self.updateSettingsActionStatus(.working, "正在恢复默认设置")
+            self.settings.restoreDefaults()
+            self.settings.clearEphemeralData()
+            let after = self.settings.exportSnapshot()
+            self.reconcileRuntime(
+                SettingsRuntimeTransition.plan(
+                    desired: after,
+                    observation: .unverified
+                ),
+                operation: "默认设置已恢复"
+            )
+        }
+    }
+
+    private func reconcileRuntime(
+        _ transition: SettingsRuntimeTransition,
+        operation: String,
+        initialFailure: (service: String, error: String)? = nil
+    ) {
+        guard !isRuntimeSyncInProgress else {
+            updateSettingsActionStatus(
+                .working,
+                "另一个生命周期操作仍在进行，请稍后重试"
+            )
+            return
+        }
+        runtimeSyncGeneration &+= 1
+        if runtimeSyncGeneration == 0 {
+            runtimeSyncGeneration = 1
+        }
+        pendingRuntimeOperations = transition.orderedOperations
+        activeRuntimeOperations = pendingRuntimeOperations
+        failedRuntimeOperations = initialFailure.map { [$0] } ?? []
+        runtimeSyncDescription = operation
+        guard !pendingRuntimeOperations.isEmpty else {
+            activeRuntimeOperations = []
+            setRuntimeSyncInProgress(false)
+            updateSettingsActionStatus(
+                .success,
+                "\(operation)；认证运行态与期望状态一致"
+            )
+            return
+        }
+        setRuntimeSyncInProgress(true)
+        let services = pendingRuntimeOperations.map(\.displayName)
+        updateSettingsActionStatus(
+            .working,
+            "\(operation)；正在同步\(services.joined(separator: "、"))"
+        )
+        runNextRuntimeOperation(generation: runtimeSyncGeneration)
+    }
+
+    private func runNextRuntimeOperation(generation: UInt64) {
+        guard generation == runtimeSyncGeneration else {
+            return
+        }
+        guard !pendingRuntimeOperations.isEmpty else {
+            setRuntimeSyncInProgress(false)
+            if failedRuntimeOperations.isEmpty {
+                let completionDescription: String
+                if activeRuntimeOperations.count == 1,
+                   let onlyOperation = activeRuntimeOperations.first
+                {
+                    completionDescription = SettingsRuntimeStatusCopy.applied(
+                        onlyOperation
+                    )
+                } else {
+                    completionDescription =
+                        "生命周期操作已完成；服务状态继续刷新"
+                        + "（以各服务状态为准）"
+                }
+                updateSettingsActionStatus(
+                    .success,
+                    "\(runtimeSyncDescription)；\(completionDescription)"
+                )
+            } else {
+                let services = failedRuntimeOperations.map { $0.service }
+                updateSettingsActionStatus(
+                    .failure,
+                    "\(runtimeSyncDescription)；"
+                        + "\(services.joined(separator: "、"))"
+                        + " 未能收敛，失败项目已保持或回退为关闭偏好"
+                )
+                presentRuntimeSyncFailure()
+            }
+            activeRuntimeOperations = []
+            return
+        }
+        let next = pendingRuntimeOperations.removeFirst()
+        performRuntimeOperation(next) { [weak self] result in
+            guard let self,
+                  generation == self.runtimeSyncGeneration
+            else {
+                return
+            }
+            if case let .failure(error) = result {
+                self.failedRuntimeOperations.append((
+                    service: next.displayName,
+                    error: error.localizedDescription
+                ))
+            }
+            self.runNextRuntimeOperation(generation: generation)
+        }
+    }
+
+    private func performRuntimeOperation(
+        _ operation: SettingsRuntimeOperation,
+        completion: @escaping SettingsRuntimeCompletion
+    ) {
+        switch operation {
+        case let .daemon(enabled):
+            setManagedDaemonEnabled(enabled, completion: completion)
+        case let .cloudBroker(enabled):
+            setManagedCloudBrokerEnabled(enabled, completion: completion)
+        case let .voiceHelper(enabled):
+            guard !enabled || settings.aiEnabled else {
+                settings.voiceEnabled = false
+                let error = NSError(
+                    domain: "fun.wwcn.inputmethod.RimeAI.settings-runtime",
+                    code: 1,
+                    userInfo: [
+                        NSLocalizedDescriptionKey:
+                            "AI 总开关关闭时不能启用语音 helper。",
+                    ]
+                )
+                setManagedVoiceEnabled(false) { _ in
+                    completion(.failure(error))
+                }
+                return
+            }
+            setManagedVoiceEnabled(enabled, completion: completion)
+        }
+    }
+
+    private func setRuntimeSyncInProgress(_ inProgress: Bool) {
+        isRuntimeSyncInProgress = inProgress
+        importSettingsButton.isEnabled = !inProgress
+        restoreDefaultSettingsButton.isEnabled = !inProgress
+        aiToggle.isEnabled = !inProgress
+        voiceToggle.isEnabled = !inProgress && settings.aiEnabled
+    }
+
+    private func rejectLifecycleActionDuringRuntimeSync(
+        _ action: String
+    ) -> Bool {
+        guard isRuntimeSyncInProgress else {
+            return false
+        }
+        updateSettingsActionStatus(
+            .working,
+            "运行状态仍在同步，请稍后再\(action)"
+        )
+        return true
+    }
+
+    private func presentRuntimeSyncFailure() {
+        let details = failedRuntimeOperations.map {
+            "\($0.service)：\($0.error)"
+        }.joined(separator: "\n")
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "设置已更新，但操作未完全完成"
+        alert.informativeText = details
+            + "\n相关偏好已保持或回退为关闭；"
+            + "其他服务的生命周期操作已完成，连接状态请见状态页。"
+        alert.beginSheetModal(for: window)
+    }
+
     @objc private func clearAllProductData(_ sender: Any?) {
+        guard !rejectLifecycleActionDuringRuntimeSync("清除本地制品") else {
+            return
+        }
         let alert = NSAlert()
         alert.messageText = "停用 AI 并清除本地制品？"
         alert.informativeText =
@@ -805,14 +1403,25 @@ final class PrivacyCenterWindowController: NSObject {
         alert.addButton(withTitle: "取消")
         alert.alertStyle = .warning
         alert.beginSheetModal(for: window) { [weak self] response in
-            guard response == .alertFirstButtonReturn else {
+            guard response == .alertFirstButtonReturn,
+                  let self
+            else {
                 return
             }
-            self?.disableAIAndTrashManagedData()
+            guard !self.rejectLifecycleActionDuringRuntimeSync("清除本地制品")
+            else {
+                return
+            }
+            self.disableAIAndTrashManagedData()
         }
     }
 
     private func disableAIAndTrashManagedData() {
+        setRuntimeSyncInProgress(true)
+        updateSettingsActionStatus(
+            .working,
+            "正在停用服务并清除本地制品"
+        )
         DaemonClient.shared.disconnect()
         CloudBrokerClient.shared.disconnect()
         settings.cloudConfigured = false
@@ -829,85 +1438,188 @@ final class PrivacyCenterWindowController: NSObject {
                 try self.credentialStore.deleteAPIKey()
                 _ = try self.historyService.clearAll()
                 self.historyService.discardOpenStore()
-                try Self.stopManagedDaemon(layout: layout)
-                try Self.stopManagedCloudBroker(layout: layout)
                 try VoiceHelperLifecycleCoordinator.shared
                     .suspendSynchronously(layout: layout)
+                try Self.stopManagedCloudBroker(layout: layout)
+                try Self.stopManagedDaemon(layout: layout)
                 try Self.trashManagedData(layout: layout)
             }
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
+                self.setRuntimeSyncInProgress(false)
                 switch result {
                 case .success:
                     self.settings.resetAllProductData()
                     self.settings.aiEnabled = false
                     self.daemonStatusLabel.stringValue =
-                        "Daemon：已停用 · Internet socket：不存在"
+                        "Daemon：停用期望状态已应用 · 连接状态继续刷新"
                     self.modelLabel.stringValue = "模型制品：已移到废纸篓"
                     self.artifactLabel.stringValue =
                         "重新安装开发者预览版后可恢复本地 AI。"
                     self.refresh()
+                    self.updateSettingsActionStatus(
+                        .success,
+                        "停用生命周期与本地制品清理已完成；"
+                            + "服务状态继续刷新（以状态页为准）"
+                    )
                 case let .failure(error):
-                    let failure = NSAlert(error: error)
-                    failure.messageText = "未能完整清除 RimeAI 本地制品"
-                    failure.informativeText =
-                        "部分项目可能已经移到废纸篓；Rime 用户词典未被修改。"
-                    failure.beginSheetModal(for: self.window)
+                    self.presentError(
+                        error,
+                        message: "未能完整清除 RimeAI 本地制品",
+                        information: "部分项目可能已经移到废纸篓；"
+                            + "Rime 用户词典未被修改。"
+                    )
                 }
             }
         }
     }
 
-    private func setManagedDaemonEnabled(_ enabled: Bool) {
+    private func setManagedDaemonEnabled(
+        _ enabled: Bool,
+        completion: @escaping SettingsRuntimeCompletion
+    ) {
         let layout = RimeAIProductDataLayout(
             homeDirectory: FileManager.default.homeDirectoryForCurrentUser
         )
         daemonStatusLabel.stringValue =
             enabled ? "Daemon：正在启动" : "Daemon：正在停止"
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let result = Result {
-                if enabled {
-                    try Self.startManagedDaemon(layout: layout)
-                } else {
-                    try Self.suspendManagedDaemon(layout: layout)
+        if enabled {
+            // Socket nodes and status notifications can outlive the client
+            // generation that produced them. Invalidate that generation before
+            // starting the lifecycle transaction so only the new hello can
+            // prove readiness for this enable request.
+            DaemonClient.shared.invalidateCurrentGeneration { [weak self] in
+                guard let self else {
+                    return
                 }
+                self.startManagedDaemonAndAwaitReadiness(
+                    layout: layout,
+                    completion: completion
+                )
             }
-            DispatchQueue.main.async {
+            return
+        }
+
+        SettingsDaemonActivationFailurePolicy.apply(to: settings)
+        DaemonClient.shared.disconnect()
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = Result {
+                try Self.suspendManagedDaemon(layout: layout)
+            }
+            DispatchQueue.main.async { [weak self] in
                 guard let self else {
                     return
                 }
                 switch result {
                 case .success:
-                    if enabled {
-                        DaemonClient.shared.connect()
-                    } else {
-                        self.daemonStatusLabel.stringValue =
-                            "Daemon：已停用 · 模型资源已释放"
-                    }
-                case let .failure(error):
-                    if enabled {
-                        self.settings.aiEnabled = false
-                    }
                     self.daemonStatusLabel.stringValue =
-                        "Daemon：生命周期操作失败"
-                    let failure = NSAlert(error: error)
-                    failure.messageText = enabled
-                        ? "未能启动 RimeAI daemon"
-                        : "未能完整停止 RimeAI daemon"
-                    failure.beginSheetModal(for: self.window)
+                        "Daemon：停用期望状态已应用 · 连接状态继续刷新"
+                    completion(.success(()))
+                case let .failure(error):
+                    // 执行态可能尚待人工重试，但持久化真值必须
+                    // fail closed：下次启动不会再启用 daemon/voice。
+                    SettingsDaemonActivationFailurePolicy.apply(
+                        to: self.settings
+                    )
+                    DaemonClient.shared.disconnect()
+                    self.daemonStatusLabel.stringValue =
+                        "Daemon：关闭未完整完成 · 运行态不确定"
+                    completion(.failure(error))
                 }
             }
         }
     }
 
-    private func setManagedCloudBrokerEnabled(_ enabled: Bool) {
+    private func startManagedDaemonAndAwaitReadiness(
+        layout: RimeAIProductDataLayout,
+        completion: @escaping SettingsRuntimeCompletion
+    ) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = Result {
+                try Self.startManagedDaemon(layout: layout)
+            }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else {
+                    return
+                }
+                switch result {
+                case .success:
+                    self.daemonStatusLabel.stringValue =
+                        "Daemon：正在验证本代协议握手"
+                    DaemonClient.shared.connectWhenReady { [weak self] result in
+                        guard let self else {
+                            return
+                        }
+                        switch result {
+                        case .success:
+                            self.daemonStatusLabel.stringValue =
+                                "Daemon：本代协议握手就绪"
+                            completion(.success(()))
+                        case let .failure(error):
+                            self.rollbackManagedDaemonActivation(
+                                readinessError: error,
+                                layout: layout,
+                                completion: completion
+                            )
+                        }
+                    }
+                case let .failure(error):
+                    SettingsDaemonActivationFailurePolicy.apply(
+                        to: self.settings
+                    )
+                    DaemonClient.shared.disconnect()
+                    self.daemonStatusLabel.stringValue =
+                        error is SettingsDaemonDeactivationError
+                            ? "Daemon：启动回滚未完整完成 · 运行态不确定"
+                            : "Daemon：生命周期操作失败"
+                    completion(.failure(error))
+                }
+            }
+        }
+    }
+
+    private func rollbackManagedDaemonActivation(
+        readinessError: Error,
+        layout: RimeAIProductDataLayout,
+        completion: @escaping SettingsRuntimeCompletion
+    ) {
+        SettingsDaemonActivationFailurePolicy.apply(to: settings)
+        DaemonClient.shared.disconnect()
+        daemonStatusLabel.stringValue = "Daemon：握手失败，正在回滚"
+        DispatchQueue.global(qos: .userInitiated).async {
+            let completionError =
+                SettingsDaemonActivationFailurePolicy.rollbackError(
+                    readinessError: readinessError,
+                    performRollback: {
+                        try Self.suspendManagedDaemon(layout: layout)
+                    }
+                )
+            DispatchQueue.main.async { [weak self] in
+                guard let self else {
+                    return
+                }
+                self.daemonStatusLabel.stringValue =
+                    "Daemon：握手失败，关闭偏好已回退"
+                completion(.failure(completionError))
+            }
+        }
+    }
+
+    private func setManagedCloudBrokerEnabled(
+        _ enabled: Bool,
+        completion: @escaping SettingsRuntimeCompletion
+    ) {
         let layout = RimeAIProductDataLayout(
             homeDirectory: FileManager.default.homeDirectoryForCurrentUser
         )
+        if !enabled {
+            settings.cloudConfigured = false
+            CloudBrokerClient.shared.disconnect()
+        }
         cloudStatusLabel.stringValue = enabled
             ? "云增强：正在启动"
             : "云增强：正在停止"
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        DispatchQueue.global(qos: .userInitiated).async {
             let result = Result {
                 if enabled {
                     try Self.startManagedCloudBroker(layout: layout)
@@ -915,7 +1627,7 @@ final class PrivacyCenterWindowController: NSObject {
                     try Self.suspendManagedCloudBroker(layout: layout)
                 }
             }
-            DispatchQueue.main.async {
+            DispatchQueue.main.async { [weak self] in
                 guard let self else {
                     return
                 }
@@ -926,22 +1638,27 @@ final class PrivacyCenterWindowController: NSObject {
                     } else {
                         self.refresh()
                     }
+                    completion(.success(()))
                 case let .failure(error):
-                    self.presentError(
-                        error,
-                        message: enabled
-                            ? "未能启动云端 broker"
-                            : "未能完整停止云端 broker",
-                        information: enabled
-                            ? "API Key 与长期历史仍已保存；请重新安装服务组件后重试。"
-                            : "云增强已在设置中停用，重新登录后 broker 不会再次启动。"
-                    )
+                    if enabled {
+                        self.settings.cloudConfigured = false
+                        CloudBrokerClient.shared.disconnect()
+                    } else {
+                        // 无论 suspend 是否成功，都不允许失败把下次
+                        // 启动的偏好重新拉回开启。
+                        self.settings.cloudConfigured = false
+                        CloudBrokerClient.shared.disconnect()
+                    }
+                    completion(.failure(error))
                 }
             }
         }
     }
 
-    private func setManagedVoiceEnabled(_ enabled: Bool) {
+    private func setManagedVoiceEnabled(
+        _ enabled: Bool,
+        completion: @escaping SettingsRuntimeCompletion
+    ) {
         let layout = RimeAIProductDataLayout(
             homeDirectory: FileManager.default.homeDirectoryForCurrentUser
         )
@@ -965,19 +1682,12 @@ final class PrivacyCenterWindowController: NSObject {
                     )
                 }
                 self.refresh()
+                completion(.success(()))
             case let .failure(error):
                 self.settings.voiceEnabled = false
                 self.voiceToggle.state = .off
                 self.refreshVoiceStatus()
-                self.presentError(
-                    error,
-                    message: enabled
-                        ? "未能启动语音听写"
-                        : "未能完整停止语音听写",
-                    information: enabled
-                        ? "请先安装带权限声明的 RimeAI Voice Helper，再重试。"
-                        : "语音偏好已关闭；重新登录后 helper 不会再次启动。"
-                )
+                completion(.failure(error))
             }
         }
     }
@@ -1257,10 +1967,12 @@ final class PrivacyCenterWindowController: NSObject {
             let socket = layout.runtimeDirectory
                 .appendingPathComponent("rimeai-cloud.sock")
             for _ in 0..<40 {
-                let attributes = try? fileManager.attributesOfItem(
-                    atPath: socket.path
-                )
-                if attributes?[.type] as? FileAttributeType == .typeSocket {
+                if SettingsRuntimeSocketNode.exists(
+                    at: socket,
+                    fileManager: fileManager
+                ) {
+                    // A socket node is only a launch milestone. Authenticated
+                    // protocol readiness continues asynchronously in the client.
                     return
                 }
                 Thread.sleep(forTimeInterval: 0.05)
@@ -1292,22 +2004,32 @@ final class PrivacyCenterWindowController: NSObject {
     nonisolated private static func suspendManagedDaemon(
         layout: RimeAIProductDataLayout
     ) throws {
-        if FileManager.default.fileExists(
-            atPath: layout.daemonEnabledMarker.path
-        ) {
-            try FileManager.default.removeItem(
-                at: layout.daemonEnabledMarker
-            )
-        }
-        _ = try runProcess(
-            executable: "/bin/launchctl",
-            arguments: [
-                "kill",
-                "SIGTERM",
-                "gui/\(getuid())/fun.wwcn.rimeai.daemon",
-            ]
-        )
-        try stopAdHocDaemon(layout: layout)
+        try SettingsDaemonDeactivationPolicy.run([
+            (.removeMarker, {
+                if FileManager.default.fileExists(
+                    atPath: layout.daemonEnabledMarker.path
+                ) {
+                    try FileManager.default.removeItem(
+                        at: layout.daemonEnabledMarker
+                    )
+                }
+            }),
+            (.stopLaunchAgent, {
+                let status = try runProcess(
+                    executable: "/bin/launchctl",
+                    arguments: [
+                        "kill",
+                        "SIGTERM",
+                        "gui/\(getuid())/fun.wwcn.rimeai.daemon",
+                    ]
+                )
+                try SettingsDaemonDeactivationPolicy
+                    .requireSuccessfulLaunchctlKill(status)
+            }),
+            (.stopAdHocProcess, {
+                try stopAdHocDaemon(layout: layout)
+            }),
+        ])
     }
 
     nonisolated private static func startManagedDaemon(
@@ -1331,64 +2053,78 @@ final class PrivacyCenterWindowController: NSObject {
             withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700]
         )
-        guard fileManager.createFile(
-            atPath: layout.daemonEnabledMarker.path,
-            contents: Data(),
-            attributes: [.posixPermissions: 0o600]
-        ) else {
-            throw lifecycleError(
-                "could not create the local AI enable marker",
-                code: 4
-            )
-        }
-        let domain = "gui/\(getuid())"
-        let printStatus = try runProcess(
-            executable: "/bin/launchctl",
-            arguments: [
-                "print",
-                "\(domain)/fun.wwcn.rimeai.daemon",
-            ]
-        )
-        if printStatus != 0 {
-            let bootstrapStatus = try runProcess(
-                executable: "/bin/launchctl",
-                arguments: [
-                    "bootstrap",
-                    domain,
-                    layout.launchAgentPlist.path,
-                ]
-            )
-            guard bootstrapStatus == 0 else {
+        try SettingsLifecycleMarkerTransaction.run(
+            createMarker: {
+                guard fileManager.createFile(
+                    atPath: layout.daemonEnabledMarker.path,
+                    contents: Data(),
+                    attributes: [.posixPermissions: 0o600]
+                ) else {
+                    throw lifecycleError(
+                        "could not create the local AI enable marker",
+                        code: 4
+                    )
+                }
+            },
+            rollbackMarker: {
+                try suspendManagedDaemon(layout: layout)
+            },
+            operation: {
+                let domain = "gui/\(getuid())"
+                let printStatus = try runProcess(
+                    executable: "/bin/launchctl",
+                    arguments: [
+                        "print",
+                        "\(domain)/fun.wwcn.rimeai.daemon",
+                    ]
+                )
+                if printStatus != 0 {
+                    let bootstrapStatus = try runProcess(
+                        executable: "/bin/launchctl",
+                        arguments: [
+                            "bootstrap",
+                            domain,
+                            layout.launchAgentPlist.path,
+                        ]
+                    )
+                    guard bootstrapStatus == 0 else {
+                        throw lifecycleError(
+                            "launchctl could not bootstrap the daemon",
+                            code: Int(bootstrapStatus)
+                        )
+                    }
+                }
+                let kickstartStatus = try runProcess(
+                    executable: "/bin/launchctl",
+                    arguments: [
+                        "kickstart",
+                        "\(domain)/fun.wwcn.rimeai.daemon",
+                    ]
+                )
+                guard kickstartStatus == 0 else {
+                    throw lifecycleError(
+                        "launchctl could not start the daemon",
+                        code: Int(kickstartStatus)
+                    )
+                }
+                let socket = layout.runtimeDirectory
+                    .appendingPathComponent("rimeai.sock")
+                for _ in 0..<80 {
+                    if SettingsRuntimeSocketNode.exists(
+                        at: socket,
+                        fileManager: fileManager
+                    ) {
+                        // This deliberately does not claim daemon hello/ready;
+                        // a typed generation-bound probe remains future work.
+                        return
+                    }
+                    Thread.sleep(forTimeInterval: 0.1)
+                }
                 throw lifecycleError(
-                    "launchctl could not bootstrap the daemon",
-                    code: Int(bootstrapStatus)
+                    "daemon did not create its private socket",
+                    code: 3
                 )
             }
-        }
-        let kickstartStatus = try runProcess(
-            executable: "/bin/launchctl",
-            arguments: [
-                "kickstart",
-                "\(domain)/fun.wwcn.rimeai.daemon",
-            ]
-        )
-        guard kickstartStatus == 0 else {
-            throw lifecycleError(
-                "launchctl could not start the daemon",
-                code: Int(kickstartStatus)
-            )
-        }
-        let socket = layout.runtimeDirectory
-            .appendingPathComponent("rimeai.sock")
-        for _ in 0..<80 {
-            if fileManager.fileExists(atPath: socket.path) {
-                return
-            }
-            Thread.sleep(forTimeInterval: 0.1)
-        }
-        throw lifecycleError(
-            "daemon did not create its private socket",
-            code: 3
         )
     }
 
@@ -1495,11 +2231,113 @@ final class PrivacyCenterWindowController: NSObject {
         )
     }
 
+    private func refreshVoiceShortcutStatus() {
+        guard !voiceShortcutCaptureButton.isCapturing else {
+            return
+        }
+        let configured = settings.voiceShortcut
+        let message: String
+        let color: NSColor
+        switch VoiceHotKeyManager.shared.registrationStatus {
+        case .inactive:
+            if settings.aiEnabled, settings.voiceEnabled {
+                message =
+                    "已保存 \(configured.displayName)；"
+                    + "仅在输入目标可用且未进入安全输入时注册"
+            } else {
+                message =
+                    "已保存 \(configured.displayName)；语音启用后将自动注册"
+            }
+            color = .secondaryLabelColor
+        case let .registered(shortcut):
+            if shortcut == configured {
+                message = "已注册 \(shortcut.displayName)"
+                color = .systemGreen
+            } else {
+                message =
+                    "正在从 \(shortcut.displayName) 切换到 "
+                    + configured.displayName
+                color = .systemOrange
+            }
+        case let .failed(shortcut, kind, code, registrationMessage):
+            let failureKind = kind == .conflict ? "快捷键冲突" : "系统注册失败"
+            message =
+                "\(failureKind)：\(registrationMessage)"
+                + "（\(shortcut.displayName)，OSStatus \(code)）"
+            color = .systemRed
+            if shortcut == configured {
+                updateSettingsActionStatus(
+                    .failure,
+                    "\(configured.displayName) 已保存，但当前无法注册；请更换快捷键"
+                )
+            }
+        }
+        guard voiceShortcutStatusLabel.stringValue != message
+                || voiceShortcutStatusLabel.textColor != color
+        else {
+            return
+        }
+        voiceShortcutStatusLabel.stringValue = message
+        voiceShortcutStatusLabel.textColor = color
+        voiceShortcutStatusLabel.setAccessibilityValue(message)
+        NSAccessibility.post(
+            element: voiceShortcutStatusLabel,
+            notification: .valueChanged
+        )
+    }
+
+    private func refreshSettingsActionStatus() {
+        let status = SettingsActionStatusCenter.shared.current
+        guard settingsActionStatusLabel.stringValue != status.message
+                || settingsActionStatusLabel.textColor
+                    != settingsActionStatusColor(for: status.kind)
+        else {
+            return
+        }
+        settingsActionStatusLabel.stringValue = status.message
+        settingsActionStatusLabel.textColor = settingsActionStatusColor(
+            for: status.kind
+        )
+        NSAccessibility.post(
+            element: settingsActionStatusLabel,
+            notification: .valueChanged
+        )
+    }
+
+    private func settingsActionStatusColor(
+        for kind: SettingsActionStatus.Kind
+    ) -> NSColor {
+        switch kind {
+        case .ready:
+            return .secondaryLabelColor
+        case .working:
+            return .controlAccentColor
+        case .success:
+            return .systemGreen
+        case .failure:
+            return .systemRed
+        }
+    }
+
+    private func updateSettingsActionStatus(
+        _ kind: SettingsActionStatus.Kind,
+        _ message: String
+    ) {
+        SettingsActionStatusCenter.shared.update(SettingsActionStatus(
+            kind: kind,
+            message: message
+        ))
+    }
+
     private func presentError(
         _ error: Error,
         message: String,
         information: String
     ) {
+        updateSettingsActionStatus(
+            .failure,
+            "\(message)：\(error.localizedDescription)"
+        )
         let alert = NSAlert(error: error)
         alert.messageText = message
         alert.informativeText = information
@@ -1531,11 +2369,68 @@ final class PrivacyCenterWindowController: NSObject {
         )
     }
 
-    private func separator() -> NSBox {
+    private func addSettingsTab(
+        to tabView: NSTabView,
+        title: String
+    ) -> NSStackView {
+        let item = NSTabViewItem(identifier: title)
+        item.label = title
+
+        let scrollView = NSScrollView()
+        scrollView.hasVerticalScroller = true
+        scrollView.drawsBackground = false
+        scrollView.autohidesScrollers = true
+        scrollView.setAccessibilityLabel("\(title)设置")
+
+        let documentView = SettingsDocumentView()
+        documentView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.documentView = documentView
+        documentView.widthAnchor.constraint(
+            equalTo: scrollView.contentView.widthAnchor
+        ).isActive = true
+
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 12
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        documentView.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(
+                equalTo: documentView.leadingAnchor,
+                constant: 20
+            ),
+            stack.trailingAnchor.constraint(
+                equalTo: documentView.trailingAnchor,
+                constant: -20
+            ),
+            stack.topAnchor.constraint(
+                equalTo: documentView.topAnchor,
+                constant: 20
+            ),
+            stack.bottomAnchor.constraint(
+                equalTo: documentView.bottomAnchor,
+                constant: -24
+            ),
+        ])
+
+        item.view = scrollView
+        tabView.addTabViewItem(item)
+        return stack
+    }
+
+    private func addSeparator(to stack: NSStackView) {
         let separator = NSBox()
         separator.boxType = .separator
         separator.translatesAutoresizingMaskIntoConstraints = false
-        separator.widthAnchor.constraint(equalToConstant: 600).isActive = true
-        return separator
+        stack.addArrangedSubview(separator)
+        separator.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+    }
+}
+
+extension PrivacyCenterWindowController: NSWindowDelegate {
+    func windowWillClose(_ notification: Notification) {
+        voiceShortcutCaptureButton.cancelCapture()
+        voiceShortcutCancelButton.isEnabled = false
     }
 }

@@ -1,6 +1,8 @@
 # 语音 IPC 威胁模型与实现边界
 
-状态：`CHECKED IMPLEMENTATION / RELEASE VALIDATION PENDING`。传输已按不可变
+状态：`CHECKED IMPLEMENTATION / RELEASE VALIDATION PENDING`。当前工作树的
+clean Swift/Xcode build 另被 XCFramework headers 缺口阻塞；全局状态只以
+[`TASKS.md`](../TASKS.md) 为准。传输已按不可变
 构建配置分流：Debug 只允许显式私有 Unix Domain Socket（UDS），Release
 只允许双向认证 NSXPC/Mach service。代码和自动化证据已经覆盖认证策略、逐帧
 门、背压和代际；输入法与 nested helper 的真实 Developer ID 配对静态门已

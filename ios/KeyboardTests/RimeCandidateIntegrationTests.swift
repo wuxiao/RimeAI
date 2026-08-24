@@ -123,16 +123,119 @@ final class RimeCandidateIntegrationTests: XCTestCase {
             String(cString: buffer.baseAddress!)
         }
         XCTAssertFalse(committedText.isEmpty)
+
+        collector.values = []
+        let partialCount = error.withUnsafeMutableBufferPointer {
+            errorBuffer in
+            "mingtiantianqi".withCString { input in
+                rai_engine_candidates(
+                    engine,
+                    input,
+                    20,
+                    collectTestCandidate,
+                    context,
+                    errorBuffer.baseAddress,
+                    errorBuffer.count
+                )
+            }
+        }
+        XCTAssertGreaterThan(partialCount, 0, message(from: error))
+        let partialIndex = try XCTUnwrap(
+            collector.values.firstIndex(of: "明天")
+        )
+        var selected = [CChar](repeating: 0, count: 1024)
+        var remaining = [CChar](repeating: 0, count: 1024)
+        let partialResult = error.withUnsafeMutableBufferPointer {
+            errorBuffer in
+            selected.withUnsafeMutableBufferPointer { selectedBuffer in
+                remaining.withUnsafeMutableBufferPointer { remainingBuffer in
+                    "mingtiantianqi".withCString { input in
+                        "明天".withCString { expected in
+                            rai_engine_select_candidate(
+                                engine,
+                                input,
+                                partialIndex,
+                                expected,
+                                selectedBuffer.baseAddress,
+                                selectedBuffer.count,
+                                remainingBuffer.baseAddress,
+                                remainingBuffer.count,
+                                errorBuffer.baseAddress,
+                                errorBuffer.count
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        XCTAssertEqual(
+            partialResult,
+            Int32(RAI_CANDIDATE_SELECTION_PARTIAL)
+        )
+        XCTAssertEqual(string(from: selected), "明天")
+        XCTAssertEqual(string(from: remaining), "tianqi")
+
+        collector.values = []
+        let tailCount = error.withUnsafeMutableBufferPointer { errorBuffer in
+            "tianqi".withCString { input in
+                rai_engine_candidates(
+                    engine,
+                    input,
+                    20,
+                    collectTestCandidate,
+                    context,
+                    errorBuffer.baseAddress,
+                    errorBuffer.count
+                )
+            }
+        }
+        XCTAssertGreaterThan(tailCount, 0, message(from: error))
+        let correctedTailIndex = try XCTUnwrap(
+            collector.values.firstIndex(of: "天启")
+        )
+        selected = [CChar](repeating: 0, count: 1024)
+        remaining = [CChar](repeating: 0, count: 1024)
+        let tailResult = error.withUnsafeMutableBufferPointer { errorBuffer in
+            selected.withUnsafeMutableBufferPointer { selectedBuffer in
+                remaining.withUnsafeMutableBufferPointer { remainingBuffer in
+                    "tianqi".withCString { input in
+                        "天启".withCString { expected in
+                            rai_engine_select_candidate(
+                                engine,
+                                input,
+                                correctedTailIndex,
+                                expected,
+                                selectedBuffer.baseAddress,
+                                selectedBuffer.count,
+                                remainingBuffer.baseAddress,
+                                remainingBuffer.count,
+                                errorBuffer.baseAddress,
+                                errorBuffer.count
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        XCTAssertEqual(
+            tailResult,
+            Int32(RAI_CANDIDATE_SELECTION_COMPLETE)
+        )
+        XCTAssertEqual(string(from: selected), "天启")
+        XCTAssertEqual(string(from: remaining), "")
     }
 
     private func message(from buffer: [CChar]) -> String {
-        buffer.withUnsafeBufferPointer { pointer in
-            guard let baseAddress = pointer.baseAddress,
-                  baseAddress.pointee != 0
-            else {
-                return "no librime error text"
-            }
-            return String(cString: baseAddress)
-        }
+        let decoded = string(from: buffer)
+        return decoded.isEmpty ? "no librime error text" : decoded
+    }
+
+    private func string(from buffer: [CChar]) -> String {
+        String(
+            decoding: buffer.prefix { $0 != 0 }.map {
+                UInt8(bitPattern: $0)
+            },
+            as: UTF8.self
+        )
     }
 }

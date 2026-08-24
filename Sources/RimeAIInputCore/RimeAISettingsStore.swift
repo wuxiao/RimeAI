@@ -63,6 +63,24 @@ public enum RimeAIDiagnosticEvent: String, CaseIterable, Codable, Sendable {
 }
 
 public struct RimeAISettingsExport: Codable, Equatable, Sendable {
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion
+        case inputPreferences
+        case aiEnabled
+        case offlineLockEnabled
+        case cloudConfigured
+        case cloudProvider
+        case cloudEndpoint
+        case cloudModelID
+        case voiceEnabled
+        case voiceShortcut
+        case voiceRimeHotwordsEnabled
+        case contextPolicy
+        case disabledAIApplications
+        case disabledContextApplications
+        case diagnostics
+    }
+
     public let schemaVersion: Int
     public let inputPreferences: RimeAIInputPreferences
     public let aiEnabled: Bool
@@ -72,6 +90,7 @@ public struct RimeAISettingsExport: Codable, Equatable, Sendable {
     public let cloudEndpoint: String
     public let cloudModelID: String
     public let voiceEnabled: Bool
+    public let voiceShortcut: VoiceDictationShortcut
     public let voiceRimeHotwordsEnabled: Bool
     public let contextPolicy: ContextPolicy
     public let disabledAIApplications: [String]
@@ -79,7 +98,7 @@ public struct RimeAISettingsExport: Codable, Equatable, Sendable {
     public let diagnostics: [String: Int]
 
     public init(
-        schemaVersion: Int = 5,
+        schemaVersion: Int = 6,
         inputPreferences: RimeAIInputPreferences = RimeAIInputPreferences(),
         aiEnabled: Bool,
         offlineLockEnabled: Bool,
@@ -88,6 +107,7 @@ public struct RimeAISettingsExport: Codable, Equatable, Sendable {
         cloudEndpoint: String = RimeAICloudConfiguration.endpoint.absoluteString,
         cloudModelID: String = RimeAICloudConfiguration.defaultRankingModelID,
         voiceEnabled: Bool = false,
+        voiceShortcut: VoiceDictationShortcut = .default,
         voiceRimeHotwordsEnabled: Bool = false,
         contextPolicy: ContextPolicy,
         disabledAIApplications: [String],
@@ -103,15 +123,124 @@ public struct RimeAISettingsExport: Codable, Equatable, Sendable {
         self.cloudEndpoint = cloudEndpoint
         self.cloudModelID = cloudModelID
         self.voiceEnabled = voiceEnabled
+        self.voiceShortcut = voiceShortcut
         self.voiceRimeHotwordsEnabled = voiceRimeHotwordsEnabled
         self.contextPolicy = contextPolicy
         self.disabledAIApplications = disabledAIApplications
         self.disabledContextApplications = disabledContextApplications
         self.diagnostics = diagnostics
     }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let schemaVersion = try container.decode(
+            Int.self,
+            forKey: .schemaVersion
+        )
+        self.schemaVersion = schemaVersion
+        inputPreferences = try container.decode(
+            RimeAIInputPreferences.self,
+            forKey: .inputPreferences
+        )
+        aiEnabled = try container.decode(Bool.self, forKey: .aiEnabled)
+        offlineLockEnabled = try container.decode(
+            Bool.self,
+            forKey: .offlineLockEnabled
+        )
+        cloudConfigured = try container.decode(
+            Bool.self,
+            forKey: .cloudConfigured
+        )
+        cloudProvider = try container.decode(
+            String.self,
+            forKey: .cloudProvider
+        )
+        cloudEndpoint = try container.decode(
+            String.self,
+            forKey: .cloudEndpoint
+        )
+        cloudModelID = try container.decode(
+            String.self,
+            forKey: .cloudModelID
+        )
+        voiceEnabled = try container.decode(Bool.self, forKey: .voiceEnabled)
+        if schemaVersion == 5 {
+            voiceShortcut = try container.decodeIfPresent(
+                VoiceDictationShortcut.self,
+                forKey: .voiceShortcut
+            ) ?? .default
+        } else {
+            voiceShortcut = try container.decode(
+                VoiceDictationShortcut.self,
+                forKey: .voiceShortcut
+            )
+        }
+        voiceRimeHotwordsEnabled = try container.decode(
+            Bool.self,
+            forKey: .voiceRimeHotwordsEnabled
+        )
+        contextPolicy = try container.decode(
+            ContextPolicy.self,
+            forKey: .contextPolicy
+        )
+        disabledAIApplications = try container.decode(
+            [String].self,
+            forKey: .disabledAIApplications
+        )
+        disabledContextApplications = try container.decode(
+            [String].self,
+            forKey: .disabledContextApplications
+        )
+        diagnostics = try container.decode(
+            [String: Int].self,
+            forKey: .diagnostics
+        )
+    }
+}
+
+public enum RimeAISettingsImportError: Error, Equatable, Sendable {
+    case invalidDocument
+    case documentTooLarge
+    case unsupportedSchemaVersion(Int)
+    case offlineLockRequired
+    case unsupportedCloudProvider
+    case unsupportedCloudEndpoint
+    case unsupportedCloudModelID
+    case cloudCredentialRequired
+    case voiceRequiresAI
+    case applicationPolicyLimitExceeded
+}
+
+extension RimeAISettingsImportError: LocalizedError {
+    public var errorDescription: String? {
+        switch self {
+        case .invalidDocument:
+            "设置文件格式无效或包含不安全的快捷键。"
+        case .documentTooLarge:
+            "设置文件超过 \(RimeAISettingsStore.maxImportDocumentBytes / 1_024) KiB 限制。"
+        case let .unsupportedSchemaVersion(version):
+            "不支持设置文件版本 \(version)，仅接受版本 5 或 6。"
+        case .offlineLockRequired:
+            "离线网络隔离是强制策略，不能通过导入关闭。"
+        case .unsupportedCloudProvider:
+            "设置文件包含不受支持的云服务提供方。"
+        case .unsupportedCloudEndpoint:
+            "设置文件包含不受支持的云服务地址。"
+        case .unsupportedCloudModelID:
+            "设置文件包含不受支持的云模型。"
+        case .cloudCredentialRequired:
+            "启用云服务前必须重新验证本机已有凭据。"
+        case .voiceRequiresAI:
+            "启用语音听写时必须同时启用 AI 功能。"
+        case .applicationPolicyLimitExceeded:
+            "应用策略列表过大或包含无效的应用标识。"
+        }
+    }
 }
 
 public final class RimeAISettingsStore: @unchecked Sendable {
+    public static let maxImportDocumentBytes = 128 * 1_024
+
     public enum Keys {
         public static let aiEnabled = "RimeAIEnabled"
         public static let characterSet = "RimeAICharacterSet"
@@ -121,6 +250,7 @@ public final class RimeAISettingsStore: @unchecked Sendable {
         public static let cloudConfigured = "RimeAICloudConfigured"
         public static let cloudModelID = "RimeAICloudModelID"
         public static let voiceEnabled = "RimeAIVoiceEnabled"
+        public static let voiceShortcut = "RimeAIVoiceShortcut"
         public static let voiceRimeHotwordsEnabled =
             "RimeAIVoiceRimeHotwordsEnabled"
         public static let contextPolicy = "RimeAIContextPolicy"
@@ -284,6 +414,28 @@ public final class RimeAISettingsStore: @unchecked Sendable {
         }
     }
 
+    public var voiceShortcut: VoiceDictationShortcut {
+        get {
+            guard let data = defaults.data(forKey: Keys.voiceShortcut),
+                  let shortcut = try? JSONDecoder().decode(
+                      VoiceDictationShortcut.self,
+                      from: data
+                  )
+            else {
+                return .default
+            }
+            return shortcut
+        }
+        set {
+            guard let data = try? JSONEncoder().encode(newValue) else {
+                assertionFailure("Voice shortcut encoding must not fail.")
+                return
+            }
+            defaults.set(data, forKey: Keys.voiceShortcut)
+            notifySettingsChanged()
+        }
+    }
+
     /// 独立于语音总开关的明示策略。开启后只允许使用当前焦点会话中用户
     /// 已经通过 Rime 成功确认的有界词条；不会读取完整 userdb、历史或光标文本。
     /// 默认关闭，避免把“语音已启用”误解为授权传递最近上屏词条。
@@ -437,6 +589,7 @@ public final class RimeAISettingsStore: @unchecked Sendable {
             Keys.cloudConfigured,
             Keys.cloudModelID,
             Keys.voiceEnabled,
+            Keys.voiceShortcut,
             Keys.voiceRimeHotwordsEnabled,
             Keys.contextPolicy,
             Keys.disabledAIApplications,
@@ -450,6 +603,27 @@ public final class RimeAISettingsStore: @unchecked Sendable {
         notifySettingsChanged()
     }
 
+    public func restoreDefaults() {
+        for key in [
+            Keys.aiEnabled,
+            Keys.characterSet,
+            Keys.characterWidth,
+            Keys.punctuationStyle,
+            Keys.offlineLockEnabled,
+            Keys.cloudConfigured,
+            Keys.cloudModelID,
+            Keys.voiceEnabled,
+            Keys.voiceShortcut,
+            Keys.voiceRimeHotwordsEnabled,
+            Keys.contextPolicy,
+            Keys.disabledAIApplications,
+            Keys.disabledContextApplications,
+        ] {
+            defaults.removeObject(forKey: key)
+        }
+        notifySettingsChanged()
+    }
+
     public func exportSnapshot() -> RimeAISettingsExport {
         RimeAISettingsExport(
             inputPreferences: inputPreferences,
@@ -458,12 +632,112 @@ public final class RimeAISettingsStore: @unchecked Sendable {
             cloudConfigured: cloudConfigured,
             cloudModelID: cloudModelID,
             voiceEnabled: voiceEnabled,
+            voiceShortcut: voiceShortcut,
             voiceRimeHotwordsEnabled: voiceRimeHotwordsEnabled,
             contextPolicy: contextPolicy,
             disabledAIApplications: disabledAIApplications,
             disabledContextApplications: disabledContextApplications,
             diagnostics: diagnosticSnapshot()
         )
+    }
+
+    public func applyImport(
+        _ data: Data,
+        hasCloudCredential: Bool
+    ) throws {
+        guard data.count <= Self.maxImportDocumentBytes else {
+            throw RimeAISettingsImportError.documentTooLarge
+        }
+        let snapshot: RimeAISettingsExport
+        do {
+            snapshot = try JSONDecoder().decode(
+                RimeAISettingsExport.self,
+                from: data
+            )
+        } catch {
+            throw RimeAISettingsImportError.invalidDocument
+        }
+        try applyImport(
+            snapshot,
+            hasCloudCredential: hasCloudCredential
+        )
+    }
+
+    public func applyImport(
+        _ snapshot: RimeAISettingsExport,
+        hasCloudCredential: Bool
+    ) throws {
+        guard snapshot.schemaVersion == 5 || snapshot.schemaVersion == 6 else {
+            throw RimeAISettingsImportError.unsupportedSchemaVersion(
+                snapshot.schemaVersion
+            )
+        }
+        guard snapshot.offlineLockEnabled else {
+            throw RimeAISettingsImportError.offlineLockRequired
+        }
+        guard snapshot.cloudProvider == RimeAICloudConfiguration.provider else {
+            throw RimeAISettingsImportError.unsupportedCloudProvider
+        }
+        guard snapshot.cloudEndpoint
+            == RimeAICloudConfiguration.endpoint.absoluteString
+        else {
+            throw RimeAISettingsImportError.unsupportedCloudEndpoint
+        }
+        guard RimeAICloudConfiguration.rankingModelIDs.contains(
+            snapshot.cloudModelID
+        ) else {
+            throw RimeAISettingsImportError.unsupportedCloudModelID
+        }
+        guard !snapshot.cloudConfigured || hasCloudCredential else {
+            throw RimeAISettingsImportError.cloudCredentialRequired
+        }
+        guard snapshot.aiEnabled || !snapshot.voiceEnabled else {
+            throw RimeAISettingsImportError.voiceRequiresAI
+        }
+        guard Self.isValidImportedApplicationPolicy(
+            snapshot.disabledAIApplications
+        ), Self.isValidImportedApplicationPolicy(
+            snapshot.disabledContextApplications
+        ) else {
+            throw RimeAISettingsImportError.applicationPolicyLimitExceeded
+        }
+        let encodedShortcut = try JSONEncoder().encode(snapshot.voiceShortcut)
+
+        defaults.set(
+            snapshot.inputPreferences.characterSet.rawValue,
+            forKey: Keys.characterSet
+        )
+        defaults.set(
+            snapshot.inputPreferences.characterWidth.rawValue,
+            forKey: Keys.characterWidth
+        )
+        defaults.set(
+            snapshot.inputPreferences.punctuationStyle.rawValue,
+            forKey: Keys.punctuationStyle
+        )
+        defaults.set(snapshot.aiEnabled, forKey: Keys.aiEnabled)
+        defaults.set(true, forKey: Keys.offlineLockEnabled)
+        defaults.set(snapshot.cloudConfigured, forKey: Keys.cloudConfigured)
+        defaults.set(snapshot.cloudModelID, forKey: Keys.cloudModelID)
+        defaults.set(snapshot.voiceEnabled, forKey: Keys.voiceEnabled)
+        defaults.set(
+            encodedShortcut,
+            forKey: Keys.voiceShortcut
+        )
+        defaults.set(
+            snapshot.voiceRimeHotwordsEnabled,
+            forKey: Keys.voiceRimeHotwordsEnabled
+        )
+        defaults.set(snapshot.contextPolicy.rawValue, forKey: Keys.contextPolicy)
+        defaults.set(
+            normalizedApplications(snapshot.disabledAIApplications),
+            forKey: Keys.disabledAIApplications
+        )
+        defaults.set(
+            normalizedApplications(snapshot.disabledContextApplications),
+            forKey: Keys.disabledContextApplications
+        )
+        notifySettingsChanged()
     }
 
     private func loadDiagnostics() -> [String: Int] {
@@ -485,6 +759,24 @@ public final class RimeAISettingsStore: @unchecked Sendable {
                     .filter { !$0.isEmpty }
             )
         ).sorted()
+    }
+
+    private static func isValidImportedApplicationPolicy(
+        _ applications: [String]
+    ) -> Bool {
+        guard applications.count <= 256 else {
+            return false
+        }
+        return applications.allSatisfy { application in
+            let trimmed = application.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            )
+            return application == trimmed
+                && (1 ... 255).contains(application.utf8.count)
+                && application.unicodeScalars.allSatisfy {
+                    !CharacterSet.controlCharacters.contains($0)
+                }
+        }
     }
 
     private func normalizedApplication(

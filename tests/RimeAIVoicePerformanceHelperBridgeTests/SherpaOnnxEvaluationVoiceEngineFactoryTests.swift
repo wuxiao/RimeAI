@@ -138,7 +138,9 @@ struct SherpaOnnxEvaluationVoiceEngineFactoryTests {
                 ),
                 releasePolicySHA256: evaluationSHA256(
                     bundle.releasePolicyData
-                )
+                ),
+                helperExecutablePath: bundle.bundleURL.path
+                    + "/Contents/MacOS/rimeai-voice-performance-helper"
             )
         )
         let bootstrap = VoiceHelperPerformanceTracerBootstrap(
@@ -166,7 +168,6 @@ struct SherpaOnnxEvaluationVoiceEngineFactoryTests {
         let bridge = try VoiceHelperPerformanceTracerBridgeFactory.make(
             bootstrap: bootstrap,
             measurementPolicy: policy,
-            bundleURL: bundle.bundleURL,
             peerNonceSource: {
                 try PerformanceControlNonce(
                     String(repeating: "9", count: 64)
@@ -515,7 +516,10 @@ private struct EvaluationTracerBundleFixture {
     let releasePolicyData: Data
 
     init() throws {
-        root = FileManager.default.temporaryDirectory.appendingPathComponent(
+        root = URL(
+            fileURLWithPath: "/private/tmp",
+            isDirectory: true
+        ).appendingPathComponent(
             "rimeai-evaluation-tracer-bundle-\(UUID().uuidString)",
             isDirectory: true
         )
@@ -581,7 +585,8 @@ private func evaluationTracerMeasurementPolicyData(
     artifactID: String,
     contentSHA256: String,
     maximumHotwords: UInt64,
-    releasePolicySHA256: String
+    releasePolicySHA256: String,
+    helperExecutablePath: String
 ) -> Data {
     Data(
         (#"{"cold_trials":1,"collector":{"expected_cdhash":""#
@@ -608,7 +613,9 @@ private func evaluationTracerMeasurementPolicyData(
             + String(maximumHotwords)
             + #"},"helper":{"expected_cdhash":""#
             + String(repeating: "3", count: 40)
-            + #"","expected_executable_path":"/usr/local/libexec/rimeai-voice-helper","expected_executable_sha256":""#
+            + #"","expected_executable_path":""#
+            + helperExecutablePath
+            + #"","expected_executable_sha256":""#
             + String(repeating: "1", count: 64)
             + #"","expected_signing_identifier":"fun.wwcn.rimeai.voice-helper","expected_team_identifier":"TEAMID1234"},"release_policy_sha256":""#
             + releasePolicySHA256

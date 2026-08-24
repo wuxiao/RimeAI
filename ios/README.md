@@ -1,5 +1,9 @@
 # RimeAI iOS internal feasibility build
 
+Current repository status and release blockers are maintained only in
+[`TASKS.md`](../TASKS.md). This file defines the iOS feasibility scope; a
+passing internal Simulator baseline does not claim release readiness.
+
 This directory is an additive iOS host app and custom keyboard extension. It
 does not replace the macOS InputMethodKit implementation.
 
@@ -18,6 +22,13 @@ with:
 
 ```bash
 xcodegen generate --spec ios/project.yml --project ios
+```
+
+Verify an exact regeneration (including the project, scheme, and workspace)
+without mutating the checked-in project with:
+
+```bash
+./scripts/verify_ios_project_generation.sh
 ```
 
 `ExportOptions.plist` pins the App Store Connect export to Team

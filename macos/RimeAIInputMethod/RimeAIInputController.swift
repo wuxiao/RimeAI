@@ -23,7 +23,6 @@ final class RimeAIInputController: IMKInputController,
     private var pendingRequestStartedAt: TimeInterval?
     private var pendingCloudRequestID: String?
     private var pendingCloudBuildCancellation: CloudCandidateBuildCancellation?
-    private var cloudDeadlineAt: TimeInterval?
     private var semanticPresentation: SemanticCandidatePresentation = .idle
     private var semanticHistorySource: HistoryCommitSource = .localSemantic
     private var semanticCloudCandidate: CloudCandidate?
@@ -506,11 +505,10 @@ final class RimeAIInputController: IMKInputController,
     }
 
     private func isVoiceShortcut(_ event: NSEvent) -> Bool {
-        guard event.keyCode == UInt16(kVK_ANSI_V) else {
-            return false
-        }
         return VoiceDictationKeyRouter.isExactVoiceShortcut(
-            modifiers: voiceKeyModifiers(event.modifierFlags)
+            keyCode: event.keyCode,
+            modifiers: voiceKeyModifiers(event.modifierFlags),
+            shortcut: settings.voiceShortcut
         )
     }
 
@@ -594,6 +592,12 @@ final class RimeAIInputController: IMKInputController,
         matching expectedText: String? = nil,
         client: any IMKTextInput
     ) {
+        guard !composition.isSecureInput,
+              !IsSecureEventInputEnabled()
+        else {
+            enterSecureInput(client: client)
+            return
+        }
         let bundleIdentifier = client.bundleIdentifier() ?? "unknown-client"
         let session = voiceHotwordSession(for: client)
         voiceHotwordAdmission.activate(
@@ -657,6 +661,7 @@ final class RimeAIInputController: IMKInputController,
         do {
             try VoiceHotKeyManager.shared.activate(
                 owner: self,
+                shortcut: settings.voiceShortcut,
                 onPressed: { [weak self] in
                     guard let self,
                           let client = self.activeClientObject
@@ -695,7 +700,8 @@ final class RimeAIInputController: IMKInputController,
 
     private func compositionInput(
         _ rawInput: String,
-        client: any IMKTextInput
+        client: any IMKTextInput,
+        preserveInputOnLookupFailure: Bool = false
     ) {
         cancelVoiceDictation()
         invalidateInference()
@@ -708,7 +714,9 @@ final class RimeAIInputController: IMKInputController,
         let mixedSuggestion = resolveMixedComposition(
             rawInput: rawInput
         )
-        guard !candidates.isEmpty || mixedSuggestion != nil else {
+        guard !candidates.isEmpty || mixedSuggestion != nil
+                || preserveInputOnLookupFailure
+        else {
             if composition.pinyin.isEmpty {
                 return
             }
@@ -731,6 +739,12 @@ final class RimeAIInputController: IMKInputController,
             ),
             replacementRange: notFoundRange
         )
+        if candidates.isEmpty, mixedSuggestion == nil {
+            semanticPresentation = .unavailable
+            semanticContextCharacterCount = 0
+            renderCandidatePanel(client: client)
+            return
+        }
         if let mixedSuggestion,
            composition.applySemanticCandidate(
                mixedSuggestion.text,
@@ -954,8 +968,6 @@ final class RimeAIInputController: IMKInputController,
         pendingCloudBuildCancellation?.cancel()
         pendingCloudBuildCancellation = buildCancellation
         pendingCloudRequestID = requestID
-        cloudDeadlineAt = deadlineAt
-        settings.record(.cloudRequestStarted)
         DispatchQueue.global(qos: .userInitiated).async {
             let apiKey = try? FileCloudCredentialStore.shared.loadAPIKey()
             guard let apiKey,
@@ -970,7 +982,6 @@ final class RimeAIInputController: IMKInputController,
                     }
                     self.pendingCloudRequestID = nil
                     self.pendingCloudBuildCancellation = nil
-                    self.cloudDeadlineAt = nil
                     self.settings.record(.cloudTransportFailure)
                     self.applyCloudFallback(
                         localRequestWasScheduled: localRequestWasScheduled,
@@ -1036,7 +1047,6 @@ final class RimeAIInputController: IMKInputController,
                         {
                             self.pendingCloudBuildCancellation = nil
                         }
-                        self.cloudDeadlineAt = nil
                         self.settings.record(.cloudTimeout)
                         if self.composition.token == token,
                            !self.composition.isSelecting,
@@ -1053,6 +1063,7 @@ final class RimeAIInputController: IMKInputController,
                     return
                 }
                 self.pendingCloudBuildCancellation = nil
+                self.settings.record(.cloudRequestStarted)
                 CloudBrokerClient.shared.infer(
                     request,
                     apiKey: apiKey
@@ -1082,7 +1093,6 @@ final class RimeAIInputController: IMKInputController,
             return
         }
         pendingCloudRequestID = nil
-        cloudDeadlineAt = nil
         guard !IsSecureEventInputEnabled() else {
             enterSecureInputIfPossible()
             return
@@ -1410,32 +1420,39 @@ final class RimeAIInputController: IMKInputController,
         guard composition.mainCandidates.indices.contains(index) else {
             return
         }
-        let pinyin = composition.pinyin.lowercased()
+        let originalInput = composition.pinyin
+        let pinyin = originalInput.lowercased()
         let fallback = composition.mainCandidates[index]
         let semanticDecision = acceptedViaSemanticCandidate
             ? composition.semanticCandidateDecision
             : nil
         composition.beginSelection()
         invalidateInference()
-        let rimeCommitted = RimeEngine.shared.commitCandidate(
+        guard let transition = RimeEngine.shared.selectCandidate(
             pinyin: pinyin,
-            index: index
-        )
-        let committed = rimeCommitted ?? fallback
-        recordVoiceHotwordFromRimeCommit(rimeCommitted, client: client)
+            index: index,
+            expectedText: fallback
+        ) else {
+            settings.record(.invalidResult)
+            compositionInput(originalInput, client: client)
+            return
+        }
+        let historySource = acceptedViaSemanticCandidate
+            ? semanticHistorySource
+            : .rimeMain
+        guard applyCandidateSelection(
+            transition,
+            expectedText: fallback,
+            source: historySource,
+            client: client
+        ) else {
+            return
+        }
         if acceptedViaSemanticCandidate {
             recordSemanticAcceptance(decision: semanticDecision)
         } else {
             settings.record(.mainAccepted)
         }
-        let historySource = acceptedViaSemanticCandidate
-            ? semanticHistorySource
-            : .rimeMain
-        commitText(
-            committed,
-            source: historySource,
-            client: client
-        )
     }
 
     private func selectSemanticCandidate(
@@ -1459,6 +1476,7 @@ final class RimeAIInputController: IMKInputController,
             )
             return
         }
+        let originalInput = composition.pinyin
         let cloudCandidate = semanticCloudCandidate?.text == candidate
             ? semanticCloudCandidate
             : nil
@@ -1467,42 +1485,52 @@ final class RimeAIInputController: IMKInputController,
             : nil
         composition.beginSelection()
         invalidateInference()
-        recordSemanticAcceptance(decision: decision)
+        var learnedEnglishTokens = Set<String>()
         if let acceptedMixedSuggestion {
-            let tokens = Set(
+            learnedEnglishTokens = Set(
                 acceptedMixedSuggestion.segments
                     .filter { $0.kind == .ascii }
                     .map { $0.rawText.lowercased() }
             )
-            settings.learnPersonalEnglishTokens(tokens)
         }
         let committedCandidate: String
         let rimeCommitResult: String?
         if let cloudCandidate,
            let rimeIndex = cloudCandidate.rimeIndex
         {
-            let committed = RimeEngine.shared.commitCandidate(
+            guard let transition = RimeEngine.shared.selectCandidate(
                 pinyin: cloudCandidate.alignedPinyin,
-                index: rimeIndex
-            )
-            rimeCommitResult = committed
-            committedCandidate = committed == candidate
-                ? committed ?? candidate
-                : candidate
+                index: rimeIndex,
+                expectedText: candidate
+            ), transition.remainingInput == nil,
+              transition.committedText == candidate
+            else {
+                settings.record(.invalidResult)
+                compositionInput(originalInput, client: client)
+                return
+            }
+            rimeCommitResult = transition.committedText
+            committedCandidate = transition.committedText
         } else {
             rimeCommitResult = nil
             committedCandidate = candidate
+        }
+        guard commitText(
+            committedCandidate,
+            source: semanticHistorySource,
+            client: client
+        ) else {
+            return
         }
         recordVoiceHotwordFromRimeCommit(
             rimeCommitResult,
             matching: candidate,
             client: client
         )
-        commitText(
-            committedCandidate,
-            source: semanticHistorySource,
-            client: client
-        )
+        recordSemanticAcceptance(decision: decision)
+        if !learnedEnglishTokens.isEmpty {
+            settings.learnPersonalEnglishTokens(learnedEnglishTokens)
+        }
     }
 
     private func recordSemanticAcceptance(
@@ -1535,18 +1563,80 @@ final class RimeAIInputController: IMKInputController,
         renderCandidatePanel(client: client)
     }
 
+    @discardableResult
+    private func applyCandidateSelection(
+        _ transition: CandidateSelectionTransition,
+        expectedText: String,
+        source: HistoryCommitSource,
+        client: any IMKTextInput
+    ) -> Bool {
+        CandidateSelectionApplicationTransition.apply(
+            transition,
+            secureInputIsActive: { [self] in
+                composition.isSecureInput || IsSecureEventInputEnabled()
+            },
+            cancelForSecureInput: { [self] in
+                enterSecureInput(client: client)
+            },
+            insertConfirmedPrefix: { [self] text, pinyin in
+                insertCommittedText(
+                    text,
+                    pinyin: pinyin,
+                    source: source,
+                    client: client
+                )
+            },
+            retainMarkedComposition: { [self] remainingInput in
+                compositionInput(
+                    remainingInput,
+                    client: client,
+                    preserveInputOnLookupFailure: true
+                )
+            },
+            resetComposition: { [self] in
+                resetComposition(client: client, preserveContext: true)
+            },
+            recordConfirmedHotword: { [self] text in
+                recordVoiceHotwordFromRimeCommit(
+                    text,
+                    matching: expectedText,
+                    client: client
+                )
+            }
+        )
+    }
+
+    @discardableResult
     private func commitText(
         _ text: String,
         source: HistoryCommitSource,
         client: any IMKTextInput
-    ) {
+    ) -> Bool {
+        let pinyin = composition.pinyin
+        guard insertCommittedText(
+            text,
+            pinyin: pinyin,
+            source: source,
+            client: client
+        ) else {
+            return false
+        }
+        resetComposition(client: client, preserveContext: true)
+        return true
+    }
+
+    private func insertCommittedText(
+        _ text: String,
+        pinyin: String,
+        source: HistoryCommitSource,
+        client: any IMKTextInput
+    ) -> Bool {
         guard !composition.isSecureInput,
               !IsSecureEventInputEnabled()
         else {
             enterSecureInput(client: client)
-            return
+            return false
         }
-        let pinyin = composition.pinyin
         let bundleIdentifier = currentBundleIdentifier
             ?? client.bundleIdentifier()
             ?? "unknown-client"
@@ -1554,7 +1644,19 @@ final class RimeAIInputController: IMKInputController,
             isSecureInput: composition.isSecureInput
                 || IsSecureEventInputEnabled()
         )
+        guard !composition.isSecureInput,
+              !IsSecureEventInputEnabled()
+        else {
+            enterSecureInput(client: client)
+            return false
+        }
         client.insertText(text, replacementRange: notFoundRange)
+        guard !composition.isSecureInput,
+              !IsSecureEventInputEnabled()
+        else {
+            enterSecureInput(client: client)
+            return false
+        }
         if let currentBundleIdentifier,
            settings.isAIAllowed(for: currentBundleIdentifier),
            settings.contextPolicy(for: currentBundleIdentifier) != .strict
@@ -1585,7 +1687,7 @@ final class RimeAIInputController: IMKInputController,
                 }
             }
         }
-        resetComposition(client: client, preserveContext: true)
+        return true
     }
 
     private func resetComposition(
@@ -1668,7 +1770,6 @@ final class RimeAIInputController: IMKInputController,
         }
         pendingCloudBuildCancellation?.cancel()
         pendingCloudBuildCancellation = nil
-        cloudDeadlineAt = nil
         pendingRequestStartedAt = nil
         if clearPresentation {
             semanticPresentation = .idle

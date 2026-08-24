@@ -1,0 +1,6 @@
+RimeAI Voice Evaluation Artifact Notice
+
+Internal evaluation only.
+Redistribution is not approved.
+Production use or release is not approved.
+Upstream rights, immutable revision mapping, and NOTICE obligations remain unresolved.

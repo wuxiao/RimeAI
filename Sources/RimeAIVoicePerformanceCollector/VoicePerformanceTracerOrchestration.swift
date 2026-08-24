@@ -18,6 +18,7 @@ public enum VoicePerformanceTracerCollectorError:
   case entropyFailure
   case invalidDuration
   case invalidResult
+  case internalFailure
 }
 
 public struct VoicePerformanceTracerCollectionRequest: Sendable {
@@ -161,6 +162,11 @@ public protocol VoicePerformanceTracerTransport: Sendable {
     _ request: VoicePerformanceTracerPeerRequest,
     deadline: ContinuousClock.Instant
   ) throws -> any VoicePerformanceTracerConnection
+
+  /// Terminates the transport and reports whether its owned endpoint was
+  /// removed under the same verified filesystem authority that created it.
+  @discardableResult
+  func close() -> Bool
 }
 
 protocol VoicePerformanceTracerNonceSource: Sendable {
@@ -267,6 +273,7 @@ public final class VoicePerformanceTracerCollector: @unchecked Sendable {
     globalDeadline: ContinuousClock.Instant
   ) throws -> VoicePerformanceTracerResult {
     try beginRun()
+    var transportCloseAttempted = false
     do {
       guard continuousClock.now < globalDeadline else {
         throw VoicePerformanceTracerCollectorError.timedOut
@@ -283,11 +290,20 @@ public final class VoicePerformanceTracerCollector: @unchecked Sendable {
       else {
         throw VoicePerformanceTracerCollectorError.invalidResult
       }
+      transportCloseAttempted = true
+      guard transport.close() else {
+        throw VoicePerformanceTracerTransportError.failed
+      }
       finishRun(.completed)
       return result
     } catch {
+      let primary = Self.normalized(error)
+      if !transportCloseAttempted {
+        transportCloseAttempted = true
+        _ = transport.close()
+      }
       finishRun(.failed)
-      throw Self.normalized(error)
+      throw primary
     }
   }
 
@@ -619,8 +635,12 @@ public final class VoicePerformanceTracerCollector: @unchecked Sendable {
     let value: PerformanceControlNonce
     do {
       value = try nonceSource.nextNonce()
-    } catch {
+    } catch let error as VoicePerformanceTracerCollectorError {
+      throw error
+    } catch is PerformanceControlError {
       throw VoicePerformanceTracerCollectorError.entropyFailure
+    } catch {
+      throw VoicePerformanceTracerCollectorError.internalFailure
     }
     guard issued.insert(value).inserted else {
       throw VoicePerformanceTracerCollectorError.entropyFailure
@@ -677,7 +697,7 @@ public final class VoicePerformanceTracerCollector: @unchecked Sendable {
     {
       return .protocolViolation
     }
-    return .transportFailure
+    return .internalFailure
   }
 
   private static func driverRequest(

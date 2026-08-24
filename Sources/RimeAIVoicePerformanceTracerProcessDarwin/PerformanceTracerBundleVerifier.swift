@@ -82,7 +82,14 @@ public struct PerformanceTracerBundleVerifier: Sendable {
                 role: role,
                 declaredTracerBundlePath: declaredTracerBundlePath
             )
-        } catch {
+        } catch is PerformanceTracerBundleVerifierSystemError {
+            // Never echo a caller-controlled path, identity, or policy field.
+            throw VoicePerformanceTracerProcessError.invalidTracerBundle
+        } catch is VoicePerformanceMeasurementPolicyError {
+            throw VoicePerformanceTracerProcessError.invalidTracerBundle
+        } catch is PerformanceControlError {
+            throw VoicePerformanceTracerProcessError.invalidTracerBundle
+        } catch is VoicePerformanceTracerProcessError {
             // Never echo a caller-controlled path, identity, or policy field.
             throw VoicePerformanceTracerProcessError.invalidTracerBundle
         }
@@ -148,7 +155,9 @@ public struct PerformanceTracerBundleVerifier: Sendable {
             try VoicePerformanceMeasurementPolicy.decodeCanonical(
                 measurementResource.data
             )
-        guard !measurementPolicy.authenticatedProductionDriver,
+        guard measurementPolicy.controlProtocol
+                == PerformanceControlProtocolContract.identity,
+              !measurementPolicy.authenticatedProductionDriver,
               measurementPolicy.collector.expectedTeamIdentifier
                 == firstOuter.teamIdentifier,
               measurementPolicy.driver.expectedTeamIdentifier
@@ -261,7 +270,7 @@ public struct PerformanceTracerBundleVerifier: Sendable {
               Self.isLowercaseHex(selfCode.cdHash, byteCount: 20),
               selfCode.codeDirectoryFlags
                 & PerformanceTracerSelfCodeIdentity.hardenedRuntimeFlag != 0,
-              !selfCode.hasDisallowedEntitlements,
+              !selfCode.hasAnyEntitlements,
               !selfCode.isDebugged,
               selfCode.developerIDValidated,
               selfCode.strictValidation,
@@ -536,7 +545,7 @@ struct PerformanceTracerSelfCodeIdentity: Equatable, Sendable {
     let teamIdentifier: String
     let cdHash: String
     let codeDirectoryFlags: UInt32
-    let hasDisallowedEntitlements: Bool
+    let hasAnyEntitlements: Bool
     let isDebugged: Bool
     let developerIDValidated: Bool
     let strictValidation: Bool
@@ -851,8 +860,8 @@ struct MacOSPerformanceTracerBundleVerifierSystem:
             teamIdentifier: staticInformation.teamIdentifier,
             cdHash: staticInformation.cdHash,
             codeDirectoryFlags: staticInformation.codeDirectoryFlags,
-            hasDisallowedEntitlements:
-                staticInformation.hasDisallowedEntitlements,
+            hasAnyEntitlements:
+                staticInformation.hasAnyEntitlements,
             isDebugged:
                 dynamicStatus & PerformanceTracerSelfCodeIdentity.debuggedFlag
                     != 0,
@@ -921,7 +930,7 @@ struct MacOSPerformanceTracerBundleVerifierSystem:
         let teamIdentifier: String
         let cdHash: String
         let codeDirectoryFlags: UInt32
-        let hasDisallowedEntitlements: Bool
+        let hasAnyEntitlements: Bool
     }
 
     private func dynamicCodeStatus() throws -> UInt32 {
@@ -977,21 +986,9 @@ struct MacOSPerformanceTracerBundleVerifierSystem:
         let executablePath = (
             information[kSecCodeInfoMainExecutable] as? URL
         )?.path
-        let entitlementData =
-            information[kSecCodeInfoEntitlements] as? Data
+        let entitlementData = information[kSecCodeInfoEntitlements]
         let entitlementDictionary =
             information[kSecCodeInfoEntitlementsDict]
-                as? [String: Any]
-        let hasMalformedEntitlements = entitlementData != nil
-            && entitlementDictionary == nil
-        let hasEffectiveEntitlements = entitlementDictionary?.contains {
-            _, value in
-            if let boolean = value as? Bool { return boolean }
-            if let number = value as? NSNumber {
-                return number.boolValue
-            }
-            return true
-        } ?? false
         return SigningInformation(
             executablePath: executablePath,
             signingIdentifier: signingIdentifier,
@@ -1000,9 +997,18 @@ struct MacOSPerformanceTracerBundleVerifierSystem:
                 String(format: "%02x", $0)
             }.joined(),
             codeDirectoryFlags: flags.uint32Value,
-            hasDisallowedEntitlements:
-                hasMalformedEntitlements || hasEffectiveEntitlements
+            hasAnyEntitlements: Self.hasAnyEntitlements(
+                entitlementData: entitlementData,
+                entitlementDictionary: entitlementDictionary
+            )
         )
+    }
+
+    static func hasAnyEntitlements(
+        entitlementData: Any?,
+        entitlementDictionary: Any?
+    ) -> Bool {
+        entitlementData != nil || entitlementDictionary != nil
     }
 
     private func developerIDRequirement(

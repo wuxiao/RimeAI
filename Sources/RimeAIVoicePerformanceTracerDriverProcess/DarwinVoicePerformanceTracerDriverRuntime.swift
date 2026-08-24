@@ -47,12 +47,13 @@ public final class DarwinVoicePerformanceTracerDriverRuntime:
             return DarwinVoicePerformanceTracerDriverConnection(
                 connection
             )
-        } catch VoicePerformanceTracerDriverConnectionError.timedOut {
-            throw VoicePerformanceTracerDriverConnectionError.timedOut
-        } catch PerformanceControlTransportError.operationTimedOut {
-            throw VoicePerformanceTracerDriverConnectionError.timedOut
         } catch {
-            throw VoicePerformanceTracerDriverConnectionError.failed
+            if let known = VoicePerformanceDriverTransportErrorNormalizer
+                .normalize(error)
+            {
+                throw known
+            }
+            throw error
         }
     }
 
@@ -134,15 +135,13 @@ private final class DarwinVoicePerformanceTracerDriverConnection:
                     VoicePerformanceDriverTransportDeadlineConverter()
                         .instant(for: deadline)
             )
-        } catch VoicePerformanceTracerDriverConnectionError.timedOut {
-            throw VoicePerformanceTracerDriverConnectionError.timedOut
-        } catch PerformanceControlTransportError.peerDisconnected {
-            throw VoicePerformanceTracerDriverConnectionError
-                .peerDisconnected
-        } catch PerformanceControlTransportError.operationTimedOut {
-            throw VoicePerformanceTracerDriverConnectionError.timedOut
         } catch {
-            throw VoicePerformanceTracerDriverConnectionError.failed
+            if let known = VoicePerformanceDriverTransportErrorNormalizer
+                .normalize(error)
+            {
+                throw known
+            }
+            throw error
         }
     }
 
@@ -157,17 +156,43 @@ private final class DarwinVoicePerformanceTracerDriverConnection:
                     VoicePerformanceDriverTransportDeadlineConverter()
                         .instant(for: deadline)
             )
-        } catch VoicePerformanceTracerDriverConnectionError.timedOut {
-            throw VoicePerformanceTracerDriverConnectionError.timedOut
-        } catch PerformanceControlTransportError.operationTimedOut {
-            throw VoicePerformanceTracerDriverConnectionError.timedOut
         } catch {
-            throw VoicePerformanceTracerDriverConnectionError.failed
+            if let known = VoicePerformanceDriverTransportErrorNormalizer
+                .normalize(error)
+            {
+                throw known
+            }
+            throw error
         }
     }
 
     func close() {
         connection.close()
+    }
+}
+
+enum VoicePerformanceDriverTransportErrorNormalizer {
+    static func normalize(
+        _ error: Error
+    ) -> VoicePerformanceTracerDriverConnectionError? {
+        if let typed =
+            error as? VoicePerformanceTracerDriverConnectionError
+        {
+            return typed
+        }
+        if error is VoicePerformanceTracerProcessError {
+            return .failed
+        }
+        guard let transport = error as? PerformanceControlTransportError
+        else { return nil }
+        return switch transport {
+        case .operationTimedOut:
+            .timedOut
+        case .peerDisconnected:
+            .peerDisconnected
+        default:
+            .failed
+        }
     }
 }
 

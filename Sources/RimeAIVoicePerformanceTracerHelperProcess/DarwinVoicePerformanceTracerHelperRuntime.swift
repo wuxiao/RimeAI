@@ -36,15 +36,21 @@ public final class DarwinVoicePerformanceTracerHelperRuntime:
     public func makeFacade(
         measurementPolicy: VoicePerformanceMeasurementPolicy
     ) throws -> any VoicePerformanceTracerHelperFacade {
-        let layout = RimeAIProductDataLayout(
-            homeDirectory: try homeDirectoryResolver.resolve()
-        )
-        return try DarwinVoicePerformanceTracerHelperFacade(
-            VoiceHelperPerformanceTracerBridgeFactory.make(
-                layout: layout,
-                measurementPolicy: measurementPolicy
+        do {
+            let layout = RimeAIProductDataLayout(
+                homeDirectory: try homeDirectoryResolver.resolve()
             )
-        )
+            return try DarwinVoicePerformanceTracerHelperFacade(
+                VoiceHelperPerformanceTracerBridgeFactory.make(
+                    layout: layout,
+                    measurementPolicy: measurementPolicy
+                )
+            )
+        } catch is VoiceHelperPerformanceTracerBridgeError {
+            throw VoicePerformanceTracerHelperCommandError.invalidFrame
+        } catch is VoicePerformanceTracerHomeDirectoryError {
+            throw VoicePerformanceTracerHelperCommandError.invalidFrame
+        }
     }
 
     public func connect(
@@ -63,9 +69,12 @@ public final class DarwinVoicePerformanceTracerHelperRuntime:
             )
             return DarwinVoicePerformanceTracerHelperConnection(connection)
         } catch {
-            throw VoicePerformanceHelperTransportErrorNormalizer.normalize(
-                error
-            )
+            if let known = VoicePerformanceHelperTransportErrorNormalizer
+                .normalize(error)
+            {
+                throw known
+            }
+            throw error
         }
     }
 }
@@ -93,9 +102,12 @@ private final class DarwinVoicePerformanceTracerHelperConnection:
                         .instant(for: deadline)
             )
         } catch {
-            throw VoicePerformanceHelperTransportErrorNormalizer.normalize(
-                error
-            )
+            if let known = VoicePerformanceHelperTransportErrorNormalizer
+                .normalize(error)
+            {
+                throw known
+            }
+            throw error
         }
     }
 
@@ -111,9 +123,12 @@ private final class DarwinVoicePerformanceTracerHelperConnection:
                         .instant(for: deadline)
             )
         } catch {
-            throw VoicePerformanceHelperTransportErrorNormalizer.normalize(
-                error
-            )
+            if let known = VoicePerformanceHelperTransportErrorNormalizer
+                .normalize(error)
+            {
+                throw known
+            }
+            throw error
         }
     }
 
@@ -125,16 +140,17 @@ private final class DarwinVoicePerformanceTracerHelperConnection:
 enum VoicePerformanceHelperTransportErrorNormalizer {
     static func normalize(
         _ error: Error
-    ) -> VoicePerformanceTracerHelperConnectionError {
+    ) -> VoicePerformanceTracerHelperConnectionError? {
         if let typed =
             error as? VoicePerformanceTracerHelperConnectionError
         {
             return typed
         }
-        guard let transport = error as? PerformanceControlTransportError
-        else {
+        if error is VoicePerformanceTracerProcessError {
             return .failed
         }
+        guard let transport = error as? PerformanceControlTransportError
+        else { return nil }
         switch transport {
         case .operationTimedOut:
             return .timedOut
@@ -174,7 +190,12 @@ private final class DarwinVoicePerformanceTracerHelperFacade:
         // watchdog and driver-group TERM/KILL path are the hard 60-second
         // enforcement boundary. This local check prevents a completed
         // over-deadline load from emitting load_ready.
-        let response = try bridge.receive(frame)
+        let response: PerformanceControlWireFrame
+        do {
+            response = try bridge.receive(frame)
+        } catch is VoiceHelperPerformanceTracerBridgeError {
+            throw VoicePerformanceTracerHelperCommandError.invalidFrame
+        }
         do {
             try requireFacadeDeadline(deadline)
         } catch {

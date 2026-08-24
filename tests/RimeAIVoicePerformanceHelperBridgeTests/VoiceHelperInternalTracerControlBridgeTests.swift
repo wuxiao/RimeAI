@@ -458,9 +458,9 @@ struct VoiceHelperInternalTracerControlBridgeTests {
     }
 
     @Test
-    func selectedFactoryFailureIsTerminalWithoutFallback() throws {
+    func knownArtifactFailureIsTerminalWithoutFallback() throws {
         let factory = TracerBridgeEngineFactory {
-            throw TracerBridgeTestError.factoryFailed
+            throw VoiceASRArtifactError.missingFile("encoder.onnx")
         }
         let bridge = try makeTracerBridge(factory: factory)
         let session = try tracerSession(trial: 7)
@@ -498,6 +498,40 @@ struct VoiceHelperInternalTracerControlBridgeTests {
                     loadTicket: ticket
                 )
             )
+        }
+        #expect(factory.invocationCount == 1)
+    }
+
+    @Test
+    func opaqueFactoryFailureIsTerminalAndPreserved() throws {
+        let unexpected = TracerBridgeUnexpectedError(
+            description: "prepared-loader-secret-b72e"
+        )
+        let factory = TracerBridgeEngineFactory { throw unexpected }
+        let bridge = try makeTracerBridge(factory: factory)
+        let session = try tracerSession(trial: 7)
+        let ticket = try tracerNonce("2")
+        _ = try bridge.receiveLoadEngine(.loadEngine(
+            sequence: 1,
+            sessionID: session,
+            trial: 7,
+            loadTicket: ticket
+        ))
+        let acknowledgement = PerformanceControlWireFrame.loadStartedAck(
+            sequence: 2,
+            sessionID: session,
+            replyTo: 1,
+            trial: 7,
+            loadTicket: ticket
+        )
+
+        #expect(throws: unexpected) {
+            _ = try bridge.receiveLoadStartedAcknowledgement(acknowledgement)
+        }
+        #expect(
+            throws: VoiceHelperInternalTracerControlBridgeError.invalidState
+        ) {
+            _ = try bridge.receiveLoadStartedAcknowledgement(acknowledgement)
         }
         #expect(factory.invocationCount == 1)
     }
@@ -774,8 +808,16 @@ private struct TracerProductEngine: VoiceDictationEngine {
 }
 
 private enum TracerBridgeTestError: Error {
-    case factoryFailed
     case factoryTimedOut
+}
+
+private struct TracerBridgeUnexpectedError:
+    Error,
+    Equatable,
+    Sendable,
+    CustomStringConvertible
+{
+    let description: String
 }
 
 private final class TracerBridgeLoadOutcome: @unchecked Sendable {

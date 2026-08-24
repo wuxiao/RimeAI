@@ -13,6 +13,42 @@ public enum PerformanceControlPeerAuthenticationError:
     case authenticationFailed
 }
 
+private func isCanonicalPerformanceControlExecutablePath(
+    _ value: String
+) -> Bool {
+    guard value.utf8.count > 1,
+          value.utf8.count < Int(MAXPATHLEN),
+          value.first == "/",
+          value.last != "/",
+          value.utf8.elementsEqual(
+              value.precomposedStringWithCanonicalMapping.utf8
+          ),
+          !value.unicodeScalars.contains(where: {
+              $0.value < 0x20 || $0.value == 0x7F
+          })
+    else {
+        return false
+    }
+    let components = value.dropFirst().split(
+        separator: "/",
+        omittingEmptySubsequences: false
+    )
+    return !components.isEmpty
+        && components.allSatisfy {
+            !$0.isEmpty
+                && $0 != "."
+                && $0 != ".."
+                && $0.utf8.count <= Int(NAME_MAX)
+        }
+}
+
+private func performanceControlPathsMatchExactly(
+    _ left: String,
+    _ right: String
+) -> Bool {
+    left.utf8.elementsEqual(right.utf8)
+}
+
 /// Exact peer identity supplied by the sealed tracer policy.
 ///
 /// This value is an input to tracer attestation, not a production trust
@@ -32,7 +68,9 @@ public struct PerformanceControlExpectedPeerIdentity: Equatable, Sendable {
         expectedTeamIdentifier: String,
         expectedCDHash: String
     ) throws {
-        guard Self.isCanonicalAbsolutePath(expectedExecutablePath),
+        guard isCanonicalPerformanceControlExecutablePath(
+                  expectedExecutablePath
+              ),
               (try? PerformanceControlSHA256(
                   expectedExecutableSHA256
               )) != nil,
@@ -48,23 +86,6 @@ public struct PerformanceControlExpectedPeerIdentity: Equatable, Sendable {
         self.expectedSigningIdentifier = expectedSigningIdentifier
         self.expectedTeamIdentifier = expectedTeamIdentifier
         self.expectedCDHash = expectedCDHash
-    }
-
-    private static func isCanonicalAbsolutePath(_ value: String) -> Bool {
-        guard value.utf8.elementsEqual(
-                  value.precomposedStringWithCanonicalMapping.utf8
-              ),
-              value.hasPrefix("/"),
-              value != "/",
-              !value.utf8.contains(0),
-              value.unicodeScalars.allSatisfy({ scalar in
-                  scalar.value >= 0x20 && scalar.value != 0x7F
-              }),
-              value.utf8.count < Int(MAXPATHLEN)
-        else {
-            return false
-        }
-        return URL(fileURLWithPath: value).standardizedFileURL.path == value
     }
 
     private static func isSigningIdentifier(_ value: String) -> Bool {
@@ -250,7 +271,11 @@ public struct DarwinPerformanceControlPeerAuthenticator {
                 auditToken: token.data
             )
             try gate.check()
-            guard executablePath == expected.expectedExecutablePath else {
+            guard performanceControlPathsMatchExactly(
+                      executablePath,
+                      expected.expectedExecutablePath
+                  )
+            else {
                 throw PerformanceControlPeerAuthenticationError
                     .authenticationFailed
             }
@@ -262,7 +287,10 @@ public struct DarwinPerformanceControlPeerAuthenticator {
                 expectedTeamIdentifier: expected.expectedTeamIdentifier
             )
             try gate.check()
-            guard codeIdentity.executablePath == executablePath,
+            guard performanceControlPathsMatchExactly(
+                      codeIdentity.executablePath,
+                      executablePath
+                  ),
                   codeIdentity.signingIdentifier
                     == expected.expectedSigningIdentifier,
                   codeIdentity.teamIdentifier
@@ -467,7 +495,7 @@ struct MacOSDarwinPerformanceControlPeerSystem:
                   bytes: buffer[..<count].map(UInt8.init(bitPattern:)),
                   encoding: .utf8
               ),
-              isCanonicalAbsolutePath(path)
+              isCanonicalPerformanceControlExecutablePath(path)
         else {
             throw DarwinPerformanceControlSystemError.failed
         }
@@ -525,7 +553,9 @@ struct MacOSDarwinPerformanceControlPeerSystem:
               let mainExecutable = information[
                   kSecCodeInfoMainExecutable
               ] as? URL,
-              isCanonicalAbsolutePath(mainExecutable.path)
+              isCanonicalPerformanceControlExecutablePath(
+                  mainExecutable.path
+              )
         else {
             throw DarwinPerformanceControlSystemError.failed
         }
@@ -803,20 +833,4 @@ struct MacOSDarwinPerformanceControlPeerSystem:
         return status
     }
 
-    private func isCanonicalAbsolutePath(_ value: String) -> Bool {
-        guard value.utf8.elementsEqual(
-                  value.precomposedStringWithCanonicalMapping.utf8
-              ),
-              value.hasPrefix("/"),
-              value != "/",
-              !value.utf8.contains(0),
-              value.unicodeScalars.allSatisfy({ scalar in
-                  scalar.value >= 0x20 && scalar.value != 0x7F
-              }),
-              value.utf8.count < Int(MAXPATHLEN)
-        else {
-            return false
-        }
-        return URL(fileURLWithPath: value).standardizedFileURL.path == value
-    }
 }

@@ -106,32 +106,64 @@ final class RimeEngine: @unchecked Sendable {
         }
     }
 
-    func commitCandidate(
+    func selectCandidate(
         pinyin: String,
-        index: Int
-    ) -> String? {
+        index: Int,
+        expectedText: String
+    ) -> CandidateSelectionTransition? {
         queue.sync {
             do {
-                let engine = try ensureEngine()
-                var committedText = [CChar](repeating: 0, count: 4_096)
-                var error = [CChar](repeating: 0, count: 512)
-                let count = pinyin.withCString { input in
-                    rai_engine_commit_candidate(
-                        engine,
-                        input,
-                        max(index, 0),
-                        &committedText,
-                        committedText.count,
-                        &error,
-                        error.count
+                guard index >= 0, index < 50 else {
+                    throw RimeEngineError.candidateCommit(
+                        "Candidate index is outside the displayed list"
                     )
                 }
-                guard count >= 0 else {
+                let engine = try ensureEngine()
+                var selectedText = [CChar](repeating: 0, count: 4_096)
+                var remainingInput = [CChar](repeating: 0, count: 4_096)
+                var error = [CChar](repeating: 0, count: 512)
+                let result = pinyin.withCString { input in
+                    expectedText.withCString { expected in
+                        rai_engine_select_candidate(
+                            engine,
+                            input,
+                            index,
+                            expected,
+                            &selectedText,
+                            selectedText.count,
+                            &remainingInput,
+                            remainingInput.count,
+                            &error,
+                            error.count
+                        )
+                    }
+                }
+                let selected = rimeErrorMessage(selectedText)
+                let remaining = rimeErrorMessage(remainingInput)
+                if result == Int32(RAI_CANDIDATE_SELECTION_COMPLETE) {
+                    guard remaining.isEmpty else {
+                        throw RimeEngineError.candidateCommit(
+                            "Complete selection unexpectedly retained input"
+                        )
+                    }
+                } else if result == Int32(
+                    RAI_CANDIDATE_SELECTION_PARTIAL
+                ) {
+                    guard !remaining.isEmpty else {
+                        throw RimeEngineError.candidateCommit(
+                            "Partial selection unexpectedly consumed all input"
+                        )
+                    }
+                } else {
                     throw RimeEngineError.candidateCommit(
                         rimeErrorMessage(error)
                     )
                 }
-                return String(cString: committedText)
+                return CandidateSelectionTransition(
+                    originalInput: pinyin,
+                    committedText: selected,
+                    remainingInput: remaining
+                )
             } catch {
                 return nil
             }

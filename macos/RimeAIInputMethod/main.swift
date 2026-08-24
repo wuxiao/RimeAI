@@ -67,22 +67,49 @@ private final class RimeAIApplicationDelegate: NSObject, NSApplicationDelegate {
         let layout = RimeAIProductDataLayout(
             homeDirectory: FileManager.default.homeDirectoryForCurrentUser
         )
+        if shouldEnable {
+            MainActor.assumeIsolated {
+                SettingsActionStatusCenter.shared.update(
+                    SettingsActionStatus(
+                        kind: .working,
+                        message: "正在恢复语音服务运行状态"
+                    )
+                )
+            }
+        }
         VoiceHelperLifecycleCoordinator.shared.setDesired(
             shouldEnable,
             layout: layout
         ) { result in
-            guard shouldEnable else {
-                return
-            }
-            switch result {
-            case .success:
-                NotificationCenter.default.post(
-                    name: .rimeAIVoiceRetryRequested,
-                    object: settings
-                )
-            case .failure:
-                // 安装缺失或恢复失败时 fail closed；设置中可再次启用。
-                settings.voiceEnabled = false
+            // Coordinator 的 completion 合同是 @MainActor；显式保持与
+            // AppKit delegate 其余跨隔离入口一致，避免未来实现换队列后
+            // 在非主线程更新设置窗口状态。
+            MainActor.assumeIsolated {
+                guard shouldEnable else {
+                    return
+                }
+                switch result {
+                case .success:
+                    SettingsActionStatusCenter.shared.update(
+                        SettingsActionStatus(
+                            kind: .success,
+                            message: "语音服务已按保存的设置恢复"
+                        )
+                    )
+                    NotificationCenter.default.post(
+                        name: .rimeAIVoiceRetryRequested,
+                        object: settings
+                    )
+                case let .failure(error):
+                    // 安装缺失或恢复失败时 fail closed；设置中可再次启用。
+                    settings.voiceEnabled = false
+                    SettingsActionStatusCenter.shared.update(
+                        SettingsActionStatus(
+                            kind: .failure,
+                            message: "语音服务恢复失败：\(error.localizedDescription)"
+                        )
+                    )
+                }
             }
         }
     }

@@ -70,7 +70,7 @@ public enum VoicePerformanceTracerCollectorEntrypoint {
              .resultInstallationIndeterminate:
             .io
         case .deadlineFailure, .resultCanonicalizationFailed,
-             .cleanupFailed:
+             .cleanupFailed, .internalFailure:
             .internalFailure
         }
     }

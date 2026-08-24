@@ -254,4 +254,6 @@ class CommandSentenceDecoder:
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=0.2)
+        if process.stdout is not None and not process.stdout.closed:
+            process.stdout.close()
         self._process = None

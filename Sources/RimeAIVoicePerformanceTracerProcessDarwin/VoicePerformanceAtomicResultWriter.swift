@@ -343,13 +343,13 @@ public struct VoicePerformanceAtomicResultWriter: Sendable {
             parentIdentity = identity
         } catch let error as VoicePerformanceTracerProcessError {
             throw error
-        } catch {
+        } catch is VoicePerformancePOSIXError {
             throw VoicePerformanceTracerProcessError.invalidResultPath
         }
         let existing: VoicePerformanceFileIdentity?
         do {
             existing = try system.entryIdentity(named: resultName, relativeTo: parent)
-        } catch {
+        } catch is VoicePerformancePOSIXError {
             throw VoicePerformanceTracerProcessError.invalidResultPath
         }
         guard existing == nil else {
@@ -413,7 +413,7 @@ public struct VoicePerformanceAtomicResultWriter: Sendable {
                 confirmedTemporaryIdentity = writtenIdentity
             } catch let error as VoicePerformanceTracerProcessError {
                 throw error
-            } catch {
+            } catch is VoicePerformancePOSIXError {
                 throw VoicePerformanceTracerProcessError.resultWriteFailed
             }
 
@@ -435,8 +435,42 @@ public struct VoicePerformanceAtomicResultWriter: Sendable {
                 wasRenamed = true
             } catch let error as VoicePerformancePOSIXError where error.code == EEXIST {
                 throw VoicePerformanceTracerProcessError.resultAlreadyExists
-            } catch {
+            } catch is VoicePerformancePOSIXError {
                 throw VoicePerformanceTracerProcessError.resultCommitFailed
+            } catch {
+                guard let installedIdentity = confirmedTemporaryIdentity else {
+                    throw VoicePerformanceTracerProcessError
+                        .resultInstallationIndeterminate
+                }
+                do {
+                    let destination = try system.entryIdentity(
+                        named: resultName,
+                        relativeTo: parent
+                    )
+                    let temporary = try system.entryIdentity(
+                        named: temporaryName,
+                        relativeTo: parent
+                    )
+                    if destination == installedIdentity, temporary == nil {
+                        try rollbackInstalledResult(
+                            named: resultName,
+                            identity: installedIdentity,
+                            parent: parent
+                        )
+                    } else if destination == nil,
+                              temporary == installedIdentity
+                    {
+                        // The exclusive rename did not commit. The outer
+                        // failure path removes this exact temporary inode.
+                    } else {
+                        throw VoicePerformanceTracerProcessError
+                            .resultInstallationIndeterminate
+                    }
+                } catch {
+                    throw VoicePerformanceTracerProcessError
+                        .resultInstallationIndeterminate
+                }
+                throw error
             }
             guard let installedIdentity = confirmedTemporaryIdentity else {
                 throw VoicePerformanceTracerProcessError
@@ -459,6 +493,7 @@ public struct VoicePerformanceAtomicResultWriter: Sendable {
                     throw VoicePerformanceTracerProcessError.resultCommitFailed
                 }
             } catch {
+                let primary = error
                 do {
                     try rollbackInstalledResult(
                         named: resultName,
@@ -469,12 +504,18 @@ public struct VoicePerformanceAtomicResultWriter: Sendable {
                     throw VoicePerformanceTracerProcessError
                         .resultInstallationIndeterminate
                 }
-                throw VoicePerformanceTracerProcessError.resultCommitFailed
+                if primary is VoicePerformanceTracerProcessError
+                    || primary is VoicePerformancePOSIXError
+                {
+                    throw VoicePerformanceTracerProcessError.resultCommitFailed
+                }
+                throw primary
             }
 
             do {
                 try synchronize(fileDescriptor: parent)
             } catch {
+                let primary = error
                 do {
                     try rollbackInstalledResult(
                         named: resultName,
@@ -485,7 +526,11 @@ public struct VoicePerformanceAtomicResultWriter: Sendable {
                     throw VoicePerformanceTracerProcessError
                         .resultInstallationIndeterminate
                 }
-                throw VoicePerformanceTracerProcessError.resultDurabilityFailed
+                if primary is VoicePerformancePOSIXError {
+                    throw VoicePerformanceTracerProcessError
+                        .resultDurabilityFailed
+                }
+                throw primary
             }
             try requireTimeRemainingAfterCommit(
                 before: deadline,
@@ -562,7 +607,7 @@ public struct VoicePerformanceAtomicResultWriter: Sendable {
             return identity
         } catch let error as VoicePerformanceTracerProcessError {
             throw error
-        } catch {
+        } catch is VoicePerformancePOSIXError {
             throw VoicePerformanceTracerProcessError.invalidResultPath
         }
     }
@@ -584,7 +629,7 @@ public struct VoicePerformanceAtomicResultWriter: Sendable {
         let root: Int32
         do {
             root = try system.openRootDirectory()
-        } catch {
+        } catch is VoicePerformancePOSIXError {
             throw VoicePerformanceTracerProcessError.invalidResultPath
         }
         var current = root
@@ -595,40 +640,59 @@ public struct VoicePerformanceAtomicResultWriter: Sendable {
                 identity: currentIdentity,
                 protectedIdentities: protectedIdentities
             )
-        } catch {
+        } catch let error as VoicePerformanceTracerProcessError {
+            system.close(fileDescriptor: current)
+            throw error
+        } catch is VoicePerformancePOSIXError {
             system.close(fileDescriptor: current)
             throw VoicePerformanceTracerProcessError.invalidResultPath
+        } catch {
+            system.close(fileDescriptor: current)
+            throw error
         }
         for component in components {
+            let next: Int32
             do {
-                let next = try system.openDirectory(
+                next = try system.openDirectory(
                     named: component,
                     relativeTo: current
                 )
-                do {
-                    let nextIdentity = try fileIdentity(
-                        fileDescriptor: next
-                    )
-                    try validateDirectoryEdge(
-                        parentDescriptor: current,
-                        parentIdentity: currentIdentity,
-                        childIdentity: nextIdentity
-                    )
-                    try rejectProtectedDirectory(
-                        identity: nextIdentity,
-                        protectedIdentities: protectedIdentities
-                    )
-                    currentIdentity = nextIdentity
-                } catch {
-                    system.close(fileDescriptor: next)
-                    throw error
-                }
-                system.close(fileDescriptor: current)
-                current = next
-            } catch {
+            } catch is VoicePerformancePOSIXError {
                 system.close(fileDescriptor: current)
                 throw VoicePerformanceTracerProcessError.invalidResultPath
+            } catch {
+                system.close(fileDescriptor: current)
+                throw error
             }
+            do {
+                let nextIdentity = try fileIdentity(
+                    fileDescriptor: next
+                )
+                try validateDirectoryEdge(
+                    parentDescriptor: current,
+                    parentIdentity: currentIdentity,
+                    childIdentity: nextIdentity
+                )
+                try rejectProtectedDirectory(
+                    identity: nextIdentity,
+                    protectedIdentities: protectedIdentities
+                )
+                currentIdentity = nextIdentity
+            } catch let error as VoicePerformanceTracerProcessError {
+                system.close(fileDescriptor: next)
+                system.close(fileDescriptor: current)
+                throw error
+            } catch is VoicePerformancePOSIXError {
+                system.close(fileDescriptor: next)
+                system.close(fileDescriptor: current)
+                throw VoicePerformanceTracerProcessError.invalidResultPath
+            } catch {
+                system.close(fileDescriptor: next)
+                system.close(fileDescriptor: current)
+                throw error
+            }
+            system.close(fileDescriptor: current)
+            current = next
         }
         do {
             guard currentIdentity.kind == .directory,
@@ -639,9 +703,15 @@ public struct VoicePerformanceAtomicResultWriter: Sendable {
             else {
                 throw VoicePerformanceTracerProcessError.invalidResultPath
             }
-        } catch {
+        } catch let error as VoicePerformanceTracerProcessError {
+            system.close(fileDescriptor: current)
+            throw error
+        } catch is VoicePerformancePOSIXError {
             system.close(fileDescriptor: current)
             throw VoicePerformanceTracerProcessError.invalidResultPath
+        } catch {
+            system.close(fileDescriptor: current)
+            throw error
         }
         return current
     }
@@ -731,7 +801,7 @@ public struct VoicePerformanceAtomicResultWriter: Sendable {
                 )
             } catch let error as VoicePerformancePOSIXError where error.code == EEXIST {
                 continue
-            } catch {
+            } catch is VoicePerformancePOSIXError {
                 throw VoicePerformanceTracerProcessError.resultWriteFailed
             }
         }

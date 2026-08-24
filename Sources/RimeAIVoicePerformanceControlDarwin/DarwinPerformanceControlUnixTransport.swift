@@ -352,6 +352,7 @@ public final class DarwinPerformanceControlUnixListener: @unchecked Sendable {
         var parentIdentity: PerformanceControlFileIdentity?
         var socketIdentity: PerformanceControlFileIdentity?
         var didClose = false
+        var closeSucceeded: Bool?
     }
 
     public let socketPath: String
@@ -362,6 +363,7 @@ public final class DarwinPerformanceControlUnixListener: @unchecked Sendable {
     private let fileSystem: any DarwinPerformanceControlUnixFileSystem
     private let stateLock = NSLock()
     private let acceptLock = NSLock()
+    private let closeLock = NSLock()
     private var state = State()
 
     public convenience init(socketPath: String) throws {
@@ -409,7 +411,7 @@ public final class DarwinPerformanceControlUnixListener: @unchecked Sendable {
     }
 
     deinit {
-        close()
+        _ = close()
     }
 
     public func start() throws {
@@ -572,10 +574,14 @@ public final class DarwinPerformanceControlUnixListener: @unchecked Sendable {
             clearPendingAcceptedDescriptor(accepted)
             system.close(accepted)
             throw error
-        } catch {
+        } catch is PerformanceControlPeerAuthenticationError {
             clearPendingAcceptedDescriptor(accepted)
             system.close(accepted)
             throw PerformanceControlTransportError.authenticationFailed
+        } catch {
+            clearPendingAcceptedDescriptor(accepted)
+            system.close(accepted)
+            throw error
         }
     }
 
@@ -634,11 +640,15 @@ public final class DarwinPerformanceControlUnixListener: @unchecked Sendable {
         }
     }
 
-    public func close() {
+    @discardableResult
+    public func close() -> Bool {
+        closeLock.lock()
+        defer { closeLock.unlock() }
         stateLock.lock()
         guard !state.didClose else {
+            let succeeded = state.closeSucceeded ?? false
             stateLock.unlock()
-            return
+            return succeeded
         }
         let closing = state
         state.didClose = true
@@ -658,11 +668,12 @@ public final class DarwinPerformanceControlUnixListener: @unchecked Sendable {
             system.shutdown(pending)
         }
         acceptLock.lock()
+        var closeSucceeded = true
         if closing.parentDescriptor >= 0,
            let parentIdentity = closing.parentIdentity,
            let socketIdentity = closing.socketIdentity
         {
-            cleanupPerformanceControlSocket(
+            closeSucceeded = cleanupPerformanceControlSocket(
                 parentDescriptor: closing.parentDescriptor,
                 parentIdentity: parentIdentity,
                 name: path.basename,
@@ -690,7 +701,9 @@ public final class DarwinPerformanceControlUnixListener: @unchecked Sendable {
         state.wakeWriteDescriptor = -1
         state.pendingAcceptedDescriptors.removeAll()
         state.parentDescriptor = -1
+        state.closeSucceeded = closeSucceeded
         stateLock.unlock()
+        return closeSucceeded
     }
 
     private func clearPendingAcceptedDescriptor(_ descriptor: Int32) {
@@ -814,9 +827,12 @@ public enum DarwinPerformanceControlUnixClient {
         } catch let error as PerformanceControlTransportError {
             system.close(descriptor)
             throw error
-        } catch {
+        } catch is PerformanceControlPeerAuthenticationError {
             system.close(descriptor)
             throw PerformanceControlTransportError.authenticationFailed
+        } catch {
+            system.close(descriptor)
+            throw error
         }
     }
 }

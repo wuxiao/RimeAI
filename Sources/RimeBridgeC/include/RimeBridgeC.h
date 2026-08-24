@@ -56,6 +56,11 @@ RAI_PUBLIC int rai_engine_candidates(RAIEngine* engine,
                                      char* error,
                                      size_t error_size);
 
+/*
+ * Deprecated whole-composition-only API. A candidate that consumes only an
+ * input prefix fails instead of forcing the unselected tail to commit. New
+ * interactive callers must use rai_engine_select_candidate().
+ */
 RAI_PUBLIC int rai_engine_commit_candidate(RAIEngine* engine,
                                            const char* pinyin,
                                            size_t candidate_index,
@@ -63,6 +68,32 @@ RAI_PUBLIC int rai_engine_commit_candidate(RAIEngine* engine,
                                            size_t committed_text_size,
                                            char* error,
                                            size_t error_size);
+
+/*
+ * Selects the displayed candidate without forcing any unselected input to
+ * commit. The return value is RAI_CANDIDATE_SELECTION_COMPLETE when librime
+ * committed the whole composition, RAI_CANDIDATE_SELECTION_PARTIAL when only
+ * the selected prefix is authoritative, or -1 on failure. On a partial
+ * result, remaining_input is the exact unselected raw-input suffix reported
+ * by librime's composition boundary. expected_text binds the displayed,
+ * de-duplicated candidate index to the native candidate selected here.
+ */
+enum {
+  RAI_CANDIDATE_SELECTION_COMPLETE = 0,
+  RAI_CANDIDATE_SELECTION_PARTIAL = 1,
+};
+
+RAI_PUBLIC int rai_engine_select_candidate(
+    RAIEngine* engine,
+    const char* pinyin,
+    size_t candidate_index,
+    const char* expected_text,
+    char* selected_text,
+    size_t selected_text_size,
+    char* remaining_input,
+    size_t remaining_input_size,
+    char* error,
+    size_t error_size);
 
 #ifdef __cplusplus
 }

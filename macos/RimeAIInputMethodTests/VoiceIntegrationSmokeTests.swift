@@ -1,18 +1,220 @@
 import AppKit
+import Carbon
 import CryptoKit
 import XCTest
 @testable import RimeAIInputMethod
+#if canImport(RimeAIVoicePerformanceHelperBridge)
+@_spi(VoiceEvaluation) import RimeAIVoicePerformanceHelperBridge
+#endif
 
 @MainActor
 final class VoiceIntegrationSmokeTests: XCTestCase {
-#if DEBUG
+    func testHotKeyRegistrationRequestsExclusiveCarbonOwnership() throws {
+        let reference = try XCTUnwrap(EventHotKeyRef(bitPattern: 1))
+        var requests: [VoiceHotKeyRegistrar.Request] = []
+        let registrar = VoiceHotKeyRegistrar(
+            register: { request in
+                requests.append(request)
+                return .init(status: noErr, reference: reference)
+            },
+            unregister: { _ in noErr }
+        )
+        let manager = VoiceHotKeyManager(testingRegistrar: registrar)
+        let owner = NSObject()
+
+        try manager.activate(
+            owner: owner,
+            shortcut: .default,
+            onPressed: {},
+            onReleased: {},
+            onSecureInputDetected: {}
+        )
+
+        let request = try XCTUnwrap(requests.first)
+        XCTAssertEqual(request.options, OptionBits(kEventHotKeyExclusive))
+        XCTAssertEqual(manager.registrationStatus, .registered(.default))
+        manager.deactivate(owner: owner)
+    }
+
+    func testHotKeyRegistrationMapsExistingHolderToConflict() {
+        let registrar = VoiceHotKeyRegistrar(
+            register: { _ in
+                .init(
+                    status: OSStatus(eventHotKeyExistsErr),
+                    reference: nil
+                )
+            },
+            unregister: { _ in noErr }
+        )
+        let manager = VoiceHotKeyManager(testingRegistrar: registrar)
+        let owner = NSObject()
+
+        XCTAssertThrowsError(try manager.activate(
+            owner: owner,
+            shortcut: .default,
+            onPressed: {},
+            onReleased: {},
+            onSecureInputDetected: {}
+        )) { error in
+            XCTAssertEqual(
+                (error as NSError).code,
+                Int(eventHotKeyExistsErr)
+            )
+        }
+        guard case let .failed(shortcut, kind, code, _) =
+            manager.registrationStatus
+        else {
+            return XCTFail("Expected a conflict registration status.")
+        }
+        XCTAssertEqual(shortcut, .default)
+        XCTAssertEqual(kind, .conflict)
+        XCTAssertEqual(code, OSStatus(eventHotKeyExistsErr))
+    }
+
+    func testHotKeyRegistrationPreservesUnexpectedSystemStatus() {
+        let expectedStatus = OSStatus(-12_345)
+        let registrar = VoiceHotKeyRegistrar(
+            register: { _ in
+                .init(status: expectedStatus, reference: nil)
+            },
+            unregister: { _ in noErr }
+        )
+        let manager = VoiceHotKeyManager(testingRegistrar: registrar)
+        let owner = NSObject()
+
+        XCTAssertThrowsError(try manager.activate(
+            owner: owner,
+            shortcut: .default,
+            onPressed: {},
+            onReleased: {},
+            onSecureInputDetected: {}
+        ))
+        guard case let .failed(_, kind, code, _) = manager.registrationStatus
+        else {
+            return XCTFail("Expected a system registration status.")
+        }
+        XCTAssertEqual(kind, .system)
+        XCTAssertEqual(code, expectedStatus)
+    }
+
+    func testHotKeyRegistrationRejectsNoErrWithoutReference() {
+        var unregisterCount = 0
+        let registrar = VoiceHotKeyRegistrar(
+            register: { _ in .init(status: noErr, reference: nil) },
+            unregister: { _ in
+                unregisterCount += 1
+                return noErr
+            }
+        )
+        let manager = VoiceHotKeyManager(testingRegistrar: registrar)
+        let owner = NSObject()
+
+        XCTAssertThrowsError(try manager.activate(
+            owner: owner,
+            shortcut: .default,
+            onPressed: {},
+            onReleased: {},
+            onSecureInputDetected: {}
+        )) { error in
+            XCTAssertEqual((error as NSError).code, Int(paramErr))
+        }
+        guard case let .failed(_, kind, code, _) = manager.registrationStatus
+        else {
+            return XCTFail("Expected an invalid registration status.")
+        }
+        XCTAssertEqual(kind, .system)
+        XCTAssertEqual(code, OSStatus(paramErr))
+        XCTAssertEqual(unregisterCount, 0)
+    }
+
+    func testHotKeyReplacementUnregistersOnceAndEndsPressedSession() throws {
+        let firstReference = try XCTUnwrap(EventHotKeyRef(bitPattern: 1))
+        let secondReference = try XCTUnwrap(EventHotKeyRef(bitPattern: 2))
+        var results = [
+            VoiceHotKeyRegistrar.Result(
+                status: noErr,
+                reference: firstReference
+            ),
+            VoiceHotKeyRegistrar.Result(
+                status: noErr,
+                reference: secondReference
+            ),
+        ]
+        var requests: [VoiceHotKeyRegistrar.Request] = []
+        var unregistered: [EventHotKeyRef] = []
+        let registrar = VoiceHotKeyRegistrar(
+            register: { request in
+                requests.append(request)
+                return results.removeFirst()
+            },
+            unregister: { reference in
+                unregistered.append(reference)
+                return noErr
+            }
+        )
+        let manager = VoiceHotKeyManager(testingRegistrar: registrar)
+        let owner = NSObject()
+        var pressCount = 0
+        var releaseCount = 0
+
+        try manager.activate(
+            owner: owner,
+            shortcut: .default,
+            onPressed: { pressCount += 1 },
+            onReleased: { releaseCount += 1 },
+            onSecureInputDetected: {}
+        )
+        let firstRegistrationID = try XCTUnwrap(requests.first).identifier.id
+        manager.handleFromCarbon(
+            eventKind: UInt32(kEventHotKeyPressed),
+            registrationID: firstRegistrationID
+        )
+        XCTAssertEqual(pressCount, 1)
+
+        let replacement = try XCTUnwrap(VoiceDictationShortcut(
+            keyCode: 0,
+            modifiers: [.option, .shift]
+        ))
+        try manager.activate(
+            owner: owner,
+            shortcut: replacement,
+            onPressed: { pressCount += 1 },
+            onReleased: { releaseCount += 100 },
+            onSecureInputDetected: {}
+        )
+
+        XCTAssertEqual(releaseCount, 1)
+        XCTAssertEqual(unregistered, [firstReference])
+        manager.handleFromCarbon(
+            eventKind: UInt32(kEventHotKeyReleased),
+            registrationID: firstRegistrationID
+        )
+        XCTAssertEqual(releaseCount, 1)
+
+        manager.deactivate(owner: owner)
+        manager.deactivate(owner: owner)
+        XCTAssertEqual(unregistered, [firstReference, secondReference])
+        XCTAssertEqual(
+            unregistered.filter { $0 == firstReference }.count,
+            1
+        )
+        XCTAssertEqual(
+            unregistered.filter { $0 == secondReference }.count,
+            1
+        )
+        XCTAssertEqual(releaseCount, 1)
+    }
+
+#if DEBUG && canImport(RimeAIVoicePerformanceHelperBridge)
     func testDebugBuildIncludesEvaluationArtifactAdmissionBoundary() {
         XCTAssertTrue(
             String(reflecting: VoiceASREvaluationArtifact.self)
                 .hasSuffix(".VoiceASREvaluationArtifact")
         )
     }
+#endif
 
+#if DEBUG
     func testVoicePanelHideErasesTranscriptAccessibilityAndActions() {
         let panel = VoiceDictationPanelController()
         panel.populateForHideTesting()

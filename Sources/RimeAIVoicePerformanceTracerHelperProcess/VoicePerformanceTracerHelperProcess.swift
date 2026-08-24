@@ -68,9 +68,14 @@ public final class VoicePerformanceTracerHelperProcess {
             verifiedBundle = try runtime.verifyHelperBundle(
                 declaredPath: preflight.tracerBundlePath
             )
-        } catch {
+        } catch VoicePerformanceTracerProcessError
+            .invalidTracerBundle
+        {
             throw VoicePerformanceTracerHelperProcessError
                 .invalidTracerBundle
+        } catch {
+            throw VoicePerformanceTracerHelperProcessError
+                .internalFailure
         }
 
         let boundedArguments: VoicePerformanceHelperProcessArguments
@@ -137,6 +142,8 @@ public final class VoicePerformanceTracerHelperProcess {
             .unexpectedFrameAfterReady
         case .transportFailed:
             .transportFailed
+        case .internalFailure:
+            .internalFailure
         }
     }
 }

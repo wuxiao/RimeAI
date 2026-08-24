@@ -324,9 +324,37 @@ struct PerformanceTracerBundleVerifierTests {
         let fixture = try PerformanceTracerBundleVerifierFixture(
             role: .collector
         )
-        fixture.system.selfHasDisallowedEntitlements = true
+        fixture.system.selfHasAnyEntitlements = true
 
         try expectRejected(fixture)
+    }
+
+    @Test("any entitlement payload is present even when empty or all false")
+    func emptyAndFalseEntitlementPayloadsArePresent() {
+        #expect(
+            MacOSPerformanceTracerBundleVerifierSystem.hasAnyEntitlements(
+                entitlementData: nil,
+                entitlementDictionary: [String: Any]()
+            )
+        )
+        #expect(
+            MacOSPerformanceTracerBundleVerifierSystem.hasAnyEntitlements(
+                entitlementData: nil,
+                entitlementDictionary: ["com.example.flag": false]
+            )
+        )
+        #expect(
+            MacOSPerformanceTracerBundleVerifierSystem.hasAnyEntitlements(
+                entitlementData: Data(),
+                entitlementDictionary: nil
+            )
+        )
+        #expect(
+            !MacOSPerformanceTracerBundleVerifierSystem.hasAnyEntitlements(
+                entitlementData: nil,
+                entitlementDictionary: nil
+            )
+        )
     }
 
     @Test("a live process that was debugged cannot produce tracer evidence")
@@ -456,6 +484,36 @@ struct PerformanceTracerBundleVerifierTests {
         try expectRejected(fixture)
     }
 
+    @Test("runtime admission pins the code-owned control protocol contract")
+    func nonCodeOwnedControlProtocolIsRejected() throws {
+        let fixture = try PerformanceTracerBundleVerifierFixture(
+            role: .collector,
+            protocolSHA256: String(repeating: "9", count: 64)
+        )
+
+        try expectRejected(fixture)
+    }
+
+    @Test("unexpected verifier system errors are not misclassified as rejection")
+    func unexpectedSystemErrorPropagates() throws {
+        let fixture = try PerformanceTracerBundleVerifierFixture(
+            role: .collector
+        )
+        let unexpected = VerifierUnexpectedError(
+            description: "verifier-secret-c152"
+        )
+        fixture.system.processSnapshotFailure = unexpected
+
+        #expect(throws: unexpected) {
+            try PerformanceTracerBundleVerifier(
+                system: fixture.system
+            ).verify(
+                role: fixture.role,
+                declaredTracerBundlePath: fixture.bundlePath
+            )
+        }
+    }
+
     private func expectRejected(
         _ fixture: PerformanceTracerBundleVerifierFixture,
         declaredBundlePath: String? = nil
@@ -501,10 +559,14 @@ private final class PerformanceTracerBundleVerifierFixture {
     let measurementPolicy: VoicePerformanceMeasurementPolicy
     let system: FakePerformanceTracerBundleVerifierSystem
 
-    init(role: VoicePerformanceTracerProcessRole) throws {
+    init(
+        role: VoicePerformanceTracerProcessRole,
+        protocolSHA256: String =
+            PerformanceControlProtocolContract.identity.sha256
+    ) throws {
         self.role = role
         let protocolID = PerformanceControlProtocolIdentity.requiredID
-        let protocolSHA = String(repeating: "9", count: 64)
+        let protocolSHA = protocolSHA256
         driverPolicyData = Data(
             ("{\"capabilities\":[\"authenticated_control\",\"lazy_load_ticket\"],"
                 + "\"control_protocol\":{\"id\":\"\(protocolID)\","
@@ -639,7 +701,7 @@ private final class FakePerformanceTracerBundleVerifierSystem:
     var selfCDHash: String?
     var selfCodeDirectoryFlags =
         PerformanceTracerSelfCodeIdentity.hardenedRuntimeFlag
-    var selfHasDisallowedEntitlements = false
+    var selfHasAnyEntitlements = false
     var selfIsDebugged = false
     var selfDeveloperIDValidated = true
     var selfStrictValidation = true
@@ -655,6 +717,7 @@ private final class FakePerformanceTracerBundleVerifierSystem:
     var finalUserCPUNanoseconds: UInt64 = 10
     var finalSystemCPUNanoseconds: UInt64 = 20
     var finalEnergyNanojoules: UInt64 = 30
+    var processSnapshotFailure: Error?
     private(set) var resourceRequests: [String] = []
     private var processSnapshotCount = 0
     private var outerIdentityCount = 0
@@ -680,6 +743,9 @@ private final class FakePerformanceTracerBundleVerifierSystem:
 
     func processSnapshot(pid: pid_t) throws -> PerformanceTracerProcessSnapshot {
         processSnapshotCount += 1
+        if let processSnapshotFailure {
+            throw processSnapshotFailure
+        }
         let isFinal = processSnapshotCount > 1
         return PerformanceTracerProcessSnapshot(
             pid: pid,
@@ -784,8 +850,8 @@ private final class FakePerformanceTracerBundleVerifierSystem:
                 selfTeamIdentifier ?? expectedTeamIdentifier,
             cdHash: selfCDHash ?? expectedIdentity.cdHash,
             codeDirectoryFlags: selfCodeDirectoryFlags,
-            hasDisallowedEntitlements:
-                selfHasDisallowedEntitlements,
+            hasAnyEntitlements:
+                selfHasAnyEntitlements,
             isDebugged: selfIsDebugged,
             developerIDValidated: selfDeveloperIDValidated,
             strictValidation: selfStrictValidation,
@@ -807,4 +873,12 @@ private final class FakePerformanceTracerBundleVerifierSystem:
             openedWithoutSymlink: executableOpenedWithoutSymlink
         )
     }
+}
+
+private struct VerifierUnexpectedError:
+    Error,
+    Equatable,
+    CustomStringConvertible
+{
+    let description: String
 }

@@ -92,6 +92,35 @@ struct VoicePerformanceTracerCollectorTests {
     #expect(try result.encodedCanonical().count > 0)
   }
 
+  @Test("transport cleanup failure prevents final evidence publication")
+  func cleanupFailurePreventsFinalEvidencePublication() throws {
+    let fixture = try TracerFixture()
+    let transport = try ScriptedTracerTransport(
+      fixture: fixture,
+      closeSucceeds: false
+    )
+    let collector = VoicePerformanceTracerCollector(
+      transport: transport,
+      nonceSource: SequenceTracerNonceSource([
+        try nonce("c", suffix: 1),
+        try nonce("c", suffix: 2),
+        try nonce("c", suffix: 3),
+      ]),
+      monotonicClock: SequenceTracerMonotonicClock([100, 350])
+    )
+    let request = try VoicePerformanceTracerCollectionRequest(
+      measurementPolicy: fixture.measurementPolicy,
+      driverPolicy: fixture.driverPolicy
+    )
+
+    #expect(throws: VoicePerformanceTracerCollectorError.transportFailure) {
+      _ = try collector.collect(request)
+    }
+    #expect(transport.closeCallCount == 1)
+    #expect(transport.connectionsAreClosed)
+    #expect(transport.helpersConfirmedExit)
+  }
+
   @Test("thirty-two trials derive ordered sessions and rotate helpers")
   func collectsMaximumColdTrialsWithFreshHelpers() throws {
     let fixture = try TracerFixture(coldTrials: 32)
@@ -251,6 +280,32 @@ struct VoicePerformanceTracerCollectorTests {
       #expect(throws: VoicePerformanceTracerCollectorError.terminal) {
         try collector.collect(request)
       }
+    }
+  }
+
+  @Test("unexpected transport errors remain internal instead of I/O failures")
+  func unexpectedTransportErrorIsInternal() throws {
+    let fixture = try TracerFixture()
+    let request = try VoicePerformanceTracerCollectionRequest(
+      measurementPolicy: fixture.measurementPolicy,
+      driverPolicy: fixture.driverPolicy
+    )
+    let collector = VoicePerformanceTracerCollector(
+      transport: UnexpectedFailureTracerTransport(
+        failure: SensitiveCollectorUnexpectedError(
+          description: "orchestration-secret-5c09"
+        ),
+        controlSocketPath: fixture.measurementPolicy.controlSocketPath
+      ),
+      nonceSource: SequenceTracerNonceSource([]),
+      monotonicClock: SequenceTracerMonotonicClock([])
+    )
+
+    #expect(throws: VoicePerformanceTracerCollectorError.internalFailure) {
+      try collector.collect(request)
+    }
+    #expect(throws: VoicePerformanceTracerCollectorError.terminal) {
+      try collector.collect(request)
     }
   }
 
@@ -675,7 +730,9 @@ private final class ScriptedTracerTransport:
   private let lock = NSLock()
   private let driver: ScriptedDriverConnection
   private let helpers: [ScriptedHelperConnection]
+  private let closeSucceeds: Bool
   private var nextHelper = 0
+  private var closeCalls = 0
   let controlSocketPath: String
   private(set) var acceptedRoles: [PerformanceControlPeerRole] = []
   private(set) var acceptedRequests: [VoicePerformanceTracerPeerRequest] = []
@@ -685,7 +742,8 @@ private final class ScriptedTracerTransport:
     fixture: TracerFixture,
     trials: Int = 1,
     fault: ScriptedTracerFault = .none,
-    controlSocketPath: String? = nil
+    controlSocketPath: String? = nil,
+    closeSucceeds: Bool = true
   ) throws {
     self.controlSocketPath = controlSocketPath
       ?? fixture.measurementPolicy.controlSocketPath
@@ -700,6 +758,7 @@ private final class ScriptedTracerTransport:
         fault: fault
       )
     }
+    self.closeSucceeds = closeSucceeds
   }
 
   func bindLaunchedDriver(
@@ -728,6 +787,20 @@ private final class ScriptedTracerTransport:
       defer { nextHelper += 1 }
       return helpers[nextHelper]
     }
+  }
+
+  @discardableResult
+  func close() -> Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    closeCalls += 1
+    return closeSucceeds
+  }
+
+  var closeCallCount: Int {
+    lock.lock()
+    defer { lock.unlock() }
+    return closeCalls
   }
 
   var connectionsAreClosed: Bool {
@@ -792,6 +865,39 @@ private struct ImmediateFailureTracerTransport:
   ) throws -> any VoicePerformanceTracerConnection {
     throw failure
   }
+
+  @discardableResult
+  func close() -> Bool { true }
+}
+
+private struct UnexpectedFailureTracerTransport:
+  VoicePerformanceTracerTransport
+{
+  let failure: SensitiveCollectorUnexpectedError
+  let controlSocketPath: String
+
+  func bindLaunchedDriver(
+    _: VoicePerformanceTracerLaunchedDriverIdentity
+  ) throws {}
+
+  func acceptAuthenticatedConnection(
+    _: VoicePerformanceTracerPeerRequest,
+    deadline _: ContinuousClock.Instant
+  ) throws -> any VoicePerformanceTracerConnection {
+    throw failure
+  }
+
+  @discardableResult
+  func close() -> Bool { true }
+}
+
+private struct SensitiveCollectorUnexpectedError:
+  Error,
+  Equatable,
+  Sendable,
+  CustomStringConvertible
+{
+  let description: String
 }
 
 private final class ScriptedDriverConnection:

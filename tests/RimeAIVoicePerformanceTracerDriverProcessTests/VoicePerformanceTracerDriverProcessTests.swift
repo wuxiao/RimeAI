@@ -60,7 +60,8 @@ struct VoicePerformanceTracerDriverProcessTests {
     func verificationFailureHasNoCommandEffects() throws {
         let fixture = try DriverProcessFixture()
         let runtime = RecordingDriverProcessRuntime(
-            verifyError: DriverProcessFixtureError.failure
+            verifyError: VoicePerformanceTracerProcessError
+                .invalidTracerBundle
         )
 
         #expect(
@@ -72,6 +73,38 @@ struct VoicePerformanceTracerDriverProcessTests {
                 currentExecutablePath: fixture.executablePath
             )
         }
+        #expect(runtime.events == [.parse, .verify])
+    }
+
+    @Test("unexpected verification errors reach the entrypoint as internal")
+    func unexpectedVerificationErrorIsInternalAndRedacted() throws {
+        let fixture = try DriverProcessFixture()
+        let secret = "driver-verify-secret-1de8"
+        let runtime = RecordingDriverProcessRuntime(
+            verifyError: SensitiveDriverUnexpectedError(secret)
+        )
+        var diagnostics: [String] = []
+
+        let status = VoicePerformanceTracerDriverEntrypoint.run(
+            arguments: fixture.argv,
+            resolveCurrentExecutablePath: { fixture.executablePath },
+            runProcess: { arguments, executablePath in
+                try VoicePerformanceTracerDriverProcess(
+                    runtime: runtime
+                ).run(
+                    argv: arguments,
+                    currentExecutablePath: executablePath
+                )
+            },
+            writeDiagnostic: { diagnostics.append($0) }
+        )
+
+        #expect(status == 70)
+        #expect(
+            diagnostics
+                == ["rimeai-voice-performance-driver:E_INTERNAL\n"]
+        )
+        #expect(diagnostics.allSatisfy { !$0.contains(secret) })
         #expect(runtime.events == [.parse, .verify])
     }
 
@@ -184,6 +217,17 @@ private final class RecordingDriverProcessRuntime:
 
 private enum DriverProcessFixtureError: Error {
     case failure
+}
+
+private struct SensitiveDriverUnexpectedError:
+    Error,
+    CustomStringConvertible
+{
+    let description: String
+
+    init(_ description: String) {
+        self.description = description
+    }
 }
 
 private struct DriverProcessFixture {

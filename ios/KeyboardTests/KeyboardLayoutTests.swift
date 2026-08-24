@@ -3,6 +3,89 @@ import XCTest
 
 @MainActor
 final class KeyboardLayoutTests: XCTestCase {
+    func testPartialCandidateSelectionRetainsUnconfirmedComposition() throws {
+        let selection = try XCTUnwrap(RimeKeyboardSelection(
+            outcome: .partial,
+            originalComposition: "mingtiantianqi",
+            committedText: "明天",
+            remainingComposition: "tianqi"
+        ))
+
+        XCTAssertEqual(selection.committedText, "明天")
+        XCTAssertEqual(selection.historyInput, "mingtian")
+        XCTAssertEqual(selection.remainingComposition, "tianqi")
+    }
+
+    func testWholeCandidateSelectionFinishesComposition() throws {
+        let selection = try XCTUnwrap(RimeKeyboardSelection(
+            outcome: .complete,
+            originalComposition: "nihao",
+            committedText: "你好",
+            remainingComposition: ""
+        ))
+
+        XCTAssertEqual(selection.committedText, "你好")
+        XCTAssertNil(selection.remainingComposition)
+    }
+
+    func testCandidateSelectionRejectsTailThatIsNotOriginalSuffix() {
+        XCTAssertNil(RimeKeyboardSelection(
+            outcome: .partial,
+            originalComposition: "mingtiantianqi",
+            committedText: "明天",
+            remainingComposition: "qianqi"
+        ))
+    }
+
+    func testSelectionOutcomeMustMatchWhetherTailRemains() {
+        XCTAssertNil(RimeKeyboardSelection(
+            outcome: .partial,
+            originalComposition: "nihao",
+            committedText: "你好",
+            remainingComposition: ""
+        ))
+        XCTAssertNil(RimeKeyboardSelection(
+            outcome: .complete,
+            originalComposition: "mingtiantianqi",
+            committedText: "明天",
+            remainingComposition: "tianqi"
+        ))
+    }
+
+    func testSelectionUsesSharedRawInputValidation() {
+        XCTAssertNil(RimeKeyboardSelection(
+            outcome: .partial,
+            originalComposition: "Mingtiantianqi",
+            committedText: "明天",
+            remainingComposition: "tianqi"
+        ))
+    }
+
+    func testPendingFirstSelectionUsesOnlyMatchingCandidateGeneration() throws {
+        let pending = try XCTUnwrap(RimeKeyboardPendingFirstSelection(
+            composition: "mingtiantianqi",
+            requestRevision: 7
+        ))
+        let current = [
+            RimeKeyboardCandidate(text: "明天", comment: nil, index: 0),
+            RimeKeyboardCandidate(text: "明天甜汽", comment: nil, index: 1),
+        ]
+
+        XCTAssertEqual(
+            pending.candidate(
+                for: "mingtiantianqi",
+                requestRevision: 7,
+                from: current
+            )?.text,
+            "明天"
+        )
+        XCTAssertNil(pending.candidate(
+            for: "mingtiantianq",
+            requestRevision: 8,
+            from: current
+        ))
+    }
+
     func testSentenceSuggestionWithoutCommitTargetIsDisabled() {
         let controller = KeyboardViewController()
         let button = controller.makeSemanticButton(
@@ -29,7 +112,9 @@ final class KeyboardLayoutTests: XCTestCase {
 
         let buttons = descendants(of: controller.view, type: UIButton.self)
         let letterButtons = "qwertyuiopasdfghjklzxcvbnm".compactMap { letter in
-            buttons.first { $0.accessibilityLabel == String(letter) }
+            buttons.first {
+                $0.accessibilityIdentifier == "rime-key-letter-\(letter)"
+            }
         }
         XCTAssertEqual(letterButtons.count, 26)
         assertContained(letterButtons, in: controller.view)
@@ -46,9 +131,13 @@ final class KeyboardLayoutTests: XCTestCase {
             )
         }
 
-        let functionButtons = ["下一个键盘", "删除", "空格", "换行"].compactMap {
-            label in
-            buttons.first { $0.accessibilityLabel == label }
+        let functionButtons = [
+            "rime-key-next-keyboard",
+            "rime-key-delete",
+            "rime-key-space",
+            "rime-key-return",
+        ].compactMap { identifier in
+            buttons.first { $0.accessibilityIdentifier == identifier }
         }
         XCTAssertEqual(functionButtons.count, 4)
         assertContained(functionButtons, in: controller.view)

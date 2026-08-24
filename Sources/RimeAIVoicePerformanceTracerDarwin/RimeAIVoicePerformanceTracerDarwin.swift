@@ -34,7 +34,8 @@ protocol DarwinVoicePerformanceTracerControlListening:
         deadline: ContinuousClock.Instant
     ) throws -> any DarwinVoicePerformanceTracerControlConnection
 
-    func close()
+    @discardableResult
+    func close() -> Bool
 }
 
 extension DarwinPerformanceControlUnixListener:
@@ -244,7 +245,10 @@ public final class DarwinVoicePerformanceTracerTransport:
             )
             try listener.start()
         } catch {
-            throw normalizedTracerTransportError(error)
+            if let known = normalizedTracerTransportError(error) {
+                throw known
+            }
+            throw error
         }
         self.init(
             controlSocketPath: socketPath,
@@ -264,7 +268,7 @@ public final class DarwinVoicePerformanceTracerTransport:
     }
 
     deinit {
-        listener.close()
+        _ = listener.close()
     }
 
     public func bindLaunchedDriver(
@@ -332,17 +336,23 @@ public final class DarwinVoicePerformanceTracerTransport:
                         deadline: deadline
                     )
                 }
-            } catch {
+            } catch let error as VoicePerformanceTracerTransportError {
                 controlConnection.close()
                 failTerminal()
-                if let transportError = error as?
-                    VoicePerformanceTracerTransportError,
-                   transportError == .timedOut
-                {
-                    throw transportError
+                if error == .timedOut {
+                    throw error
                 }
                 throw VoicePerformanceTracerTransportError
                     .authenticationFailed
+            } catch is DarwinVoicePerformanceTracerSystemError {
+                controlConnection.close()
+                failTerminal()
+                throw VoicePerformanceTracerTransportError
+                    .authenticationFailed
+            } catch {
+                controlConnection.close()
+                failTerminal()
+                throw error
             }
             do {
                 let connection = try DarwinVoicePerformanceTracerConnection(
@@ -364,11 +374,15 @@ public final class DarwinVoicePerformanceTracerTransport:
             }
         } catch {
             failTerminal()
-            throw normalizedTracerTransportError(error)
+            if let known = normalizedTracerTransportError(error) {
+                throw known
+            }
+            throw error
         }
     }
 
-    public func close() {
+    @discardableResult
+    public func close() -> Bool {
         failTerminal()
     }
 
@@ -427,11 +441,12 @@ public final class DarwinVoicePerformanceTracerTransport:
         }
     }
 
-    private func failTerminal() {
+    @discardableResult
+    private func failTerminal() -> Bool {
         stateLock.lock()
         state = .terminal
         stateLock.unlock()
-        listener.close()
+        return listener.close()
     }
 
     private func verifyDriverGeneration(
@@ -627,7 +642,7 @@ final class DarwinVoicePerformanceTracerConnection:
                 pidVersion: peer.pidVersion,
                 instanceID: peer.instanceID
             )
-        } catch {
+        } catch is VoicePerformanceTracerCollectorError {
             throw VoicePerformanceTracerTransportError.authenticationFailed
         }
         self.controlConnection = controlConnection
@@ -642,7 +657,10 @@ final class DarwinVoicePerformanceTracerConnection:
         do {
             try controlConnection.send(frame, deadline: deadline)
         } catch {
-            throw normalizedTracerTransportError(error)
+            if let known = normalizedTracerTransportError(error) {
+                throw known
+            }
+            throw error
         }
     }
 
@@ -652,7 +670,10 @@ final class DarwinVoicePerformanceTracerConnection:
         do {
             return try controlConnection.receive(deadline: deadline)
         } catch {
-            throw normalizedTracerTransportError(error)
+            if let known = normalizedTracerTransportError(error) {
+                throw known
+            }
+            throw error
         }
     }
 
@@ -678,7 +699,10 @@ final class DarwinVoicePerformanceTracerConnection:
                     processIdentifier: attestedPeer.pid
                 )
             } catch {
-                throw VoicePerformanceTracerTransportError.failed
+                if let known = normalizedTracerTransportError(error) {
+                    throw known
+                }
+                throw error
             }
             guard processSystem.now < deadline else {
                 throw VoicePerformanceTracerTransportError.timedOut
@@ -730,7 +754,10 @@ final class DarwinVoicePerformanceTracerConnection:
                     for: min(remaining, Duration.milliseconds(10))
                 )
             } catch {
-                throw VoicePerformanceTracerTransportError.failed
+                if let known = normalizedTracerTransportError(error) {
+                    throw known
+                }
+                throw error
             }
         }
     }
@@ -738,7 +765,7 @@ final class DarwinVoicePerformanceTracerConnection:
 
 func normalizedTracerTransportError(
     _ error: any Error
-) -> VoicePerformanceTracerTransportError {
+) -> VoicePerformanceTracerTransportError? {
     if let error = error as? VoicePerformanceTracerTransportError {
         return error
     }
@@ -757,5 +784,10 @@ func normalizedTracerTransportError(
     if error is PerformanceControlPeerAuthenticationError {
         return .authenticationFailed
     }
-    return .failed
+    if error is PerformanceControlError
+        || error is DarwinVoicePerformanceTracerSystemError
+    {
+        return .failed
+    }
+    return nil
 }

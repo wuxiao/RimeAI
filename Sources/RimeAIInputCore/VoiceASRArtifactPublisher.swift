@@ -425,12 +425,18 @@ public final class VoiceASRArtifactPublisher: @unchecked Sendable {
         activate: Bool = false
     ) throws -> VoiceASRArtifactPublishResult {
         guard sourceDirectory.isFileURL,
-              sourceDirectory.path
-                  == sourceDirectory.standardizedFileURL.path
+              Self.isCanonicalAbsolutePath(sourceDirectory.path)
         else {
             throw VoiceASRArtifactPublisherError.sourceMustBeLocalDirectory
         }
         let source = try verifier.verifyArtifact(at: sourceDirectory)
+        guard source.artifactDirectory.isFileURL,
+              source.artifactDirectory.path.utf8.elementsEqual(
+                  sourceDirectory.path.utf8
+              )
+        else {
+            throw VoiceASRArtifactError.insecureFilesystemEntry(".")
+        }
         guard trustedCatalog.approves(source) else {
             throw VoiceASRArtifactPublisherError.untrustedArtifact(
                 source.manifest.artifactID
@@ -471,6 +477,11 @@ public final class VoiceASRArtifactPublisher: @unchecked Sendable {
     private struct OpenedRegularFile {
         let descriptor: Int32
         let status: stat
+    }
+
+    private struct OpenedSourceDirectory {
+        let descriptor: Int32
+        let namedStatus: stat
     }
 
     private func publishVerifiedSource(
@@ -771,27 +782,23 @@ public final class VoiceASRArtifactPublisher: @unchecked Sendable {
             }
             close(descriptor)
         }
+        try revalidateSecureSourceDirectory(
+            sourceRoot,
+            at: sourceDirectory
+        )
     }
 
     private func openSecureSourceDirectory(_ url: URL) throws -> Int32 {
-        var pathStatus = stat()
-        guard lstat(url.path, &pathStatus) == 0,
-              isDirectory(pathStatus),
-              pathStatus.st_uid == expectedUserID,
-              pathStatus.st_mode & mode_t(0o022) == 0
+        guard url.isFileURL,
+              Self.isCanonicalAbsolutePath(url.path)
         else {
             throw VoiceASRArtifactError.artifactRootMustBeDirectory
         }
-        let descriptor = open(
-            url.path,
-            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
-        )
-        guard descriptor >= 0 else {
-            throw VoiceASRArtifactError.artifactRootMustBeDirectory
-        }
+        let opened = try openSourceDirectoryByComponents(url.path)
+        let descriptor = opened.descriptor
         var openedStatus = stat()
         guard fstat(descriptor, &openedStatus) == 0,
-              sameFile(pathStatus, openedStatus),
+              sameFile(opened.namedStatus, openedStatus),
               isDirectory(openedStatus),
               openedStatus.st_uid == expectedUserID,
               openedStatus.st_mode & mode_t(0o022) == 0,
@@ -801,6 +808,129 @@ public final class VoiceASRArtifactPublisher: @unchecked Sendable {
             throw VoiceASRArtifactError.insecureFilesystemEntry(".")
         }
         return descriptor
+    }
+
+    private func revalidateSecureSourceDirectory(
+        _ descriptor: Int32,
+        at url: URL
+    ) throws {
+        var heldStatus = stat()
+        guard fstat(descriptor, &heldStatus) == 0,
+              isDirectory(heldStatus),
+              heldStatus.st_uid == expectedUserID,
+              heldStatus.st_mode & mode_t(0o022) == 0,
+              publisherDescriptorHasNoExtendedACL(descriptor)
+        else {
+            throw VoiceASRArtifactError.insecureFilesystemEntry(".")
+        }
+        let rebound: OpenedSourceDirectory
+        do {
+            rebound = try openSourceDirectoryByComponents(url.path)
+        } catch {
+            throw VoiceASRArtifactError.insecureFilesystemEntry(".")
+        }
+        defer { close(rebound.descriptor) }
+        var reboundStatus = stat()
+        guard fstat(rebound.descriptor, &reboundStatus) == 0,
+              sameFile(heldStatus, reboundStatus),
+              sameFile(rebound.namedStatus, reboundStatus),
+              isDirectory(reboundStatus),
+              reboundStatus.st_uid == expectedUserID,
+              reboundStatus.st_mode & mode_t(0o022) == 0,
+              publisherDescriptorHasNoExtendedACL(rebound.descriptor)
+        else {
+            throw VoiceASRArtifactError.insecureFilesystemEntry(".")
+        }
+    }
+
+    private func openSourceDirectoryByComponents(
+        _ path: String
+    ) throws -> OpenedSourceDirectory {
+        let components = path.dropFirst().split(
+            separator: "/",
+            omittingEmptySubsequences: false
+        ).map(String.init)
+        guard !components.isEmpty else {
+            throw VoiceASRArtifactError.artifactRootMustBeDirectory
+        }
+        var current = open(
+            "/",
+            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+        )
+        guard current >= 0 else {
+            throw VoiceASRArtifactError.artifactRootMustBeDirectory
+        }
+        do {
+            for (index, component) in components.enumerated() {
+                var named = stat()
+                let statusResult = component.withCString { pointer in
+                    fstatat(current, pointer, &named, AT_SYMLINK_NOFOLLOW)
+                }
+                guard statusResult == 0 else {
+                    throw VoiceASRArtifactError.artifactRootMustBeDirectory
+                }
+                guard !isSymbolicLink(named) else {
+                    throw VoiceASRArtifactError.insecureFilesystemEntry(".")
+                }
+                guard isDirectory(named) else {
+                    throw VoiceASRArtifactError.artifactRootMustBeDirectory
+                }
+                let next = component.withCString { pointer in
+                    openat(
+                        current,
+                        pointer,
+                        O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+                    )
+                }
+                guard next >= 0 else {
+                    throw VoiceASRArtifactError.insecureFilesystemEntry(".")
+                }
+                var opened = stat()
+                guard fstat(next, &opened) == 0,
+                      isDirectory(opened),
+                      sameFile(named, opened)
+                else {
+                    close(next)
+                    throw VoiceASRArtifactError.insecureFilesystemEntry(".")
+                }
+                close(current)
+                current = next
+                if index == components.count - 1 {
+                    return OpenedSourceDirectory(
+                        descriptor: current,
+                        namedStatus: named
+                    )
+                }
+            }
+        } catch {
+            close(current)
+            throw error
+        }
+        close(current)
+        throw VoiceASRArtifactError.artifactRootMustBeDirectory
+    }
+
+    private static func isCanonicalAbsolutePath(_ path: String) -> Bool {
+        guard path.utf8.count > 1,
+              path.utf8.count < 4_096,
+              path.first == "/",
+              path.last != "/",
+              path.utf8.elementsEqual(
+                  path.precomposedStringWithCanonicalMapping.utf8
+              ),
+              !path.unicodeScalars.contains(where: {
+                  $0.value < 0x20 || $0.value == 0x7F
+              })
+        else {
+            return false
+        }
+        return path.dropFirst().split(
+            separator: "/",
+            omittingEmptySubsequences: false
+        ).allSatisfy {
+            !$0.isEmpty && $0 != "." && $0 != ".."
+                && $0.utf8.count <= 255
+        }
     }
 
     private func copyRegularFile(
@@ -1600,6 +1730,10 @@ public final class VoiceASRArtifactPublisher: @unchecked Sendable {
 
     private func isRegularFile(_ status: stat) -> Bool {
         status.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG)
+    }
+
+    private func isSymbolicLink(_ status: stat) -> Bool {
+        status.st_mode & mode_t(S_IFMT) == mode_t(S_IFLNK)
     }
 }
 

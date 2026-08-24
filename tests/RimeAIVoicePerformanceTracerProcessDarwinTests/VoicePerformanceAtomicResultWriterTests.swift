@@ -678,16 +678,149 @@ struct VoicePerformanceAtomicResultWriterTests {
         #expect(wrongSize.renameCount == 0)
         #expect(wrongSize.currentTemporaryIdentity == nil)
     }
+
+    @Test("opaque destination lookup errors are not downgraded to path errors")
+    func opaqueDestinationLookupErrorIsPreserved() {
+        let unexpected = AtomicResultUnexpectedError(
+            description: "result-entry-secret-e9d1"
+        )
+        let system = ScriptedAtomicResultSystem()
+        system.entryUnexpectedErrorsAtCalls[1] = unexpected
+
+        #expect(throws: unexpected) {
+            try VoicePerformanceAtomicResultWriter(system: system).write(
+                canonicalResult: Data("x".utf8),
+                to: "/private/tmp/result.json"
+            )
+        }
+        #expect(system.createCount == 0)
+    }
+
+    @Test("opaque write errors survive successful exact temporary cleanup")
+    func opaqueWriteErrorIsPreservedAfterCleanup() {
+        let unexpected = AtomicResultUnexpectedError(
+            description: "result-write-secret-0ec4"
+        )
+        let system = ScriptedAtomicResultSystem()
+        system.writeOutcomes = [.unexpected(unexpected)]
+
+        #expect(throws: unexpected) {
+            try VoicePerformanceAtomicResultWriter(system: system).write(
+                canonicalResult: Data("x".utf8),
+                to: "/private/tmp/result.json"
+            )
+        }
+        #expect(system.currentTemporaryIdentity == nil)
+        #expect(system.removedNames.count == 1)
+        #expect(system.entries["result.json"] == nil)
+    }
+
+    @Test("opaque pre-commit rename errors survive temporary cleanup")
+    func opaqueRenameErrorIsPreservedBeforeCommit() {
+        let unexpected = AtomicResultUnexpectedError(
+            description: "result-rename-secret-50b2"
+        )
+        let system = ScriptedAtomicResultSystem()
+        system.renameUnexpectedError = unexpected
+
+        #expect(throws: unexpected) {
+            try VoicePerformanceAtomicResultWriter(system: system).write(
+                canonicalResult: Data("x".utf8),
+                to: "/private/tmp/result.json"
+            )
+        }
+        #expect(system.currentTemporaryIdentity == nil)
+        #expect(system.entries["result.json"] == nil)
+    }
+
+    @Test("opaque post-commit rename errors survive a confirmed rollback")
+    func opaqueRenameErrorIsPreservedAfterConfirmedRollback() {
+        let unexpected = AtomicResultUnexpectedError(
+            description: "result-rename-commit-secret-a7f3"
+        )
+        let system = ScriptedAtomicResultSystem()
+        system.renameUnexpectedError = unexpected
+        system.commitRenameBeforeUnexpectedError = true
+
+        #expect(throws: unexpected) {
+            try VoicePerformanceAtomicResultWriter(system: system).write(
+                canonicalResult: Data("x".utf8),
+                to: "/private/tmp/result.json"
+            )
+        }
+        #expect(system.entries["result.json"] == nil)
+        #expect(system.removedNames == ["result.json"])
+    }
+
+    @Test("an unconfirmable post-commit opaque rename keeps indeterminate priority")
+    func opaqueRenameWithUnconfirmableRollbackIsIndeterminate() {
+        let system = ScriptedAtomicResultSystem()
+        system.renameUnexpectedError = AtomicResultUnexpectedError(
+            description: "result-rename-indeterminate-secret-c38f"
+        )
+        system.commitRenameBeforeUnexpectedError = true
+        let replacement = VoicePerformanceFileIdentity(
+            device: 44,
+            inode: 4_444,
+            kind: .regular,
+            permissions: 0o600,
+            linkCount: 1,
+            owner: 501,
+            size: 1
+        )
+        system.replacementAfterRename = replacement
+
+        #expect(
+            throws: VoicePerformanceTracerProcessError
+                .resultInstallationIndeterminate
+        ) {
+            try VoicePerformanceAtomicResultWriter(system: system).write(
+                canonicalResult: Data("x".utf8),
+                to: "/private/tmp/result.json"
+            )
+        }
+        #expect(system.entries["result.json"] == replacement)
+        #expect(system.removedNames.isEmpty)
+    }
+
+    @Test("opaque parent sync errors survive a confirmed rollback")
+    func opaqueDurabilityErrorIsPreservedAfterRollback() {
+        let unexpected = AtomicResultUnexpectedError(
+            description: "result-sync-secret-b163"
+        )
+        let system = ScriptedAtomicResultSystem()
+        system.synchronizeOutcomes = [.success, .unexpected(unexpected)]
+
+        #expect(throws: unexpected) {
+            try VoicePerformanceAtomicResultWriter(system: system).write(
+                canonicalResult: Data("x".utf8),
+                to: "/private/tmp/result.json"
+            )
+        }
+        #expect(system.entries["result.json"] == nil)
+        #expect(system.removedNames == ["result.json"])
+    }
 }
 
 private enum ScriptedWriteOutcome: Sendable {
     case count(Int)
     case error(Int32)
+    case unexpected(AtomicResultUnexpectedError)
 }
 
 private enum ScriptedVoidOutcome: Sendable {
     case success
     case error(Int32)
+    case unexpected(AtomicResultUnexpectedError)
+}
+
+private struct AtomicResultUnexpectedError:
+    Error,
+    Equatable,
+    Sendable,
+    CustomStringConvertible
+{
+    let description: String
 }
 
 private final class ScriptedResultDeadline: @unchecked Sendable {
@@ -746,7 +879,10 @@ private final class ScriptedAtomicResultSystem:
     var directoryIdentityOverrides:
         [String: VoicePerformanceFileIdentity] = [:]
     var entryErrorsAtCalls: [Int: Int32] = [:]
+    var entryUnexpectedErrorsAtCalls: [Int: AtomicResultUnexpectedError] = [:]
     var reportedTemporarySizeAfterWrite: UInt64?
+    var renameUnexpectedError: AtomicResultUnexpectedError?
+    var commitRenameBeforeUnexpectedError = false
     private var entryCallCount = 0
     private var temporaryFileIdentityCallCount = 0
     private var temporaryACLCallCount = 0
@@ -784,6 +920,9 @@ private final class ScriptedAtomicResultSystem:
         -> VoicePerformanceFileIdentity?
     {
         entryCallCount += 1
+        if let error = entryUnexpectedErrorsAtCalls[entryCallCount] {
+            throw error
+        }
         if let error = entryErrorsAtCalls[entryCallCount] {
             throw VoicePerformancePOSIXError(code: error)
         }
@@ -810,6 +949,7 @@ private final class ScriptedAtomicResultSystem:
         if case .error(let code) = outcome {
             throw VoicePerformancePOSIXError(code: code)
         }
+        if case .unexpected(let error) = outcome { throw error }
     }
 
     func hasExtendedACL(fileDescriptor: Int32) throws -> Bool {
@@ -897,6 +1037,8 @@ private final class ScriptedAtomicResultSystem:
                 entries[name] = replacement
             }
             throw VoicePerformancePOSIXError(code: code)
+        case .unexpected(let error):
+            throw error
         case .count(let count):
             written.append(data[offset..<(offset + count)])
             if let name = temporaryName {
@@ -922,6 +1064,7 @@ private final class ScriptedAtomicResultSystem:
         if case .error(let code) = outcome {
             throw VoicePerformancePOSIXError(code: code)
         }
+        if case .unexpected(let error) = outcome { throw error }
     }
 
     func renameExclusive(
@@ -931,6 +1074,9 @@ private final class ScriptedAtomicResultSystem:
     ) throws {
         renameCount += 1
         didRename = true
+        if let renameUnexpectedError, !commitRenameBeforeUnexpectedError {
+            throw renameUnexpectedError
+        }
         if let winner = renameWinner {
             entries[destination] = winner
             throw VoicePerformancePOSIXError(code: EEXIST)
@@ -946,6 +1092,7 @@ private final class ScriptedAtomicResultSystem:
         if addACLAfterRename {
             descriptorsWithACL.insert(20)
         }
+        if let renameUnexpectedError { throw renameUnexpectedError }
     }
 
     func remove(named name: String, relativeTo parent: Int32) throws {

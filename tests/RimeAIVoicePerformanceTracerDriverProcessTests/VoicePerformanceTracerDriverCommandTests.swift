@@ -7,6 +7,32 @@ import Testing
 
 @Suite("Voice performance tracer driver command")
 struct VoicePerformanceTracerDriverCommandTests {
+    @Test("Darwin transport normalization preserves unexpected errors")
+    func transportNormalizationOnlyClassifiesKnownErrors() {
+        #expect(
+            VoicePerformanceDriverTransportErrorNormalizer.normalize(
+                PerformanceControlTransportError.operationTimedOut
+            ) == .timedOut
+        )
+        #expect(
+            VoicePerformanceDriverTransportErrorNormalizer.normalize(
+                PerformanceControlTransportError.peerDisconnected
+            ) == .peerDisconnected
+        )
+        #expect(
+            VoicePerformanceDriverTransportErrorNormalizer.normalize(
+                VoicePerformanceTracerProcessError.clockFailure
+            ) == .failed
+        )
+        #expect(
+            VoicePerformanceDriverTransportErrorNormalizer.normalize(
+                DriverSensitiveUnexpectedError(
+                    "driver-normalizer-secret-454a"
+                )
+            ) == nil
+        )
+    }
+
     @Test("transport conversion samples base before mach remaining time")
     func transportDeadlineNeverAddsConversionLatency() throws {
         let base = ContinuousClock().now
@@ -50,6 +76,52 @@ struct VoicePerformanceTracerDriverCommandTests {
             )
         }
         #expect(runtime.sideEffects.isEmpty)
+    }
+
+    @Test("unexpected connect errors reach the entrypoint as internal")
+    func unexpectedConnectErrorIsInternalAndRedacted() throws {
+        let fixture = try DriverCommandFixture(coldTrials: 1)
+        let secret = "driver-connect-secret-83ab"
+        let commandRuntime = RecordingDriverRuntime(
+            now: 1_000,
+            connectError: DriverSensitiveUnexpectedError(secret)
+        )
+        let processRuntime = DriverCommandEntrypointProcessRuntime(
+            fixture: fixture,
+            commandRuntime: commandRuntime
+        )
+        let executablePath = fixture.measurementPolicy.driver
+            .expectedExecutablePath
+        let arguments = [
+            executablePath,
+            "--tracer-bundle", fixture.bundlePath,
+            "--deadline-continuous-ns", "300000000000",
+        ]
+        var diagnostics: [String] = []
+
+        let status = VoicePerformanceTracerDriverEntrypoint.run(
+            arguments: arguments,
+            resolveCurrentExecutablePath: { executablePath },
+            runProcess: { argv, currentExecutablePath in
+                try VoicePerformanceTracerDriverProcess(
+                    runtime: processRuntime
+                ).run(
+                    argv: argv,
+                    currentExecutablePath: currentExecutablePath
+                )
+            },
+            writeDiagnostic: { diagnostics.append($0) }
+        )
+
+        #expect(status == 70)
+        #expect(
+            diagnostics
+                == ["rimeai-voice-performance-driver:E_INTERNAL\n"]
+        )
+        #expect(diagnostics.allSatisfy { !$0.contains(secret) })
+        #expect(commandRuntime.sideEffects == [
+            "current-generation", "bind-driver", "connect",
+        ])
     }
 
     @Test("one cold trial spawns before challenge and sends the exact handshake")
@@ -823,6 +895,7 @@ private final class RecordingDriverRuntime:
     let recorder = DriverEventRecorder()
     private let clock: DriverTestClock
     private let connection: RecordingDriverConnection?
+    private let connectError: Error?
     private var helperGenerations: [
         VoicePerformanceSupervisedProcessGeneration
     ]
@@ -852,6 +925,7 @@ private final class RecordingDriverRuntime:
     init(
         now: UInt64,
         connection: RecordingDriverConnection? = nil,
+        connectError: Error? = nil,
         helperGenerations: [
             VoicePerformanceSupervisedProcessGeneration
         ] = [],
@@ -863,6 +937,7 @@ private final class RecordingDriverRuntime:
     ) {
         clock = DriverTestClock(now: now)
         self.connection = connection
+        self.connectError = connectError
         self.helperGenerations = helperGenerations
         self.peerNonces = peerNonces
         self.failingReapProcessIDs = failingReapProcessIDs
@@ -903,6 +978,7 @@ private final class RecordingDriverRuntime:
         connectedSocketPath = socketPath
         connectedCollector = expectedCollector
         connectDeadline = deadline
+        if let connectError { throw connectError }
         guard let connection else {
             throw DriverFixtureError.unexpectedCall
         }
@@ -937,11 +1013,13 @@ private final class RecordingDriverRuntime:
                 duration
             )
             if overflow || completion >= deadline.nanoseconds {
-                throw DriverFixtureError.helperFailed
+                throw VoicePerformanceTracerProcessError
+                    .processTerminationTimedOut
             }
         }
         if failingReapProcessIDs.contains(expected.pid) {
-            throw DriverFixtureError.helperFailed
+            throw VoicePerformanceTracerProcessError
+                .processExitedUnsuccessfully
         }
         activeHelpers -= 1
     }
@@ -963,9 +1041,61 @@ private final class RecordingDriverRuntime:
     }
 }
 
+private final class DriverCommandEntrypointProcessRuntime:
+    VoicePerformanceTracerDriverProcessRuntime
+{
+    private let fixture: DriverCommandFixture
+    private let commandRuntime: RecordingDriverRuntime
+
+    init(
+        fixture: DriverCommandFixture,
+        commandRuntime: RecordingDriverRuntime
+    ) {
+        self.fixture = fixture
+        self.commandRuntime = commandRuntime
+    }
+
+    func parseArguments(
+        _ argv: [String],
+        currentExecutablePath: String
+    ) throws -> VoicePerformanceDriverProcessArguments {
+        try VoicePerformanceDriverProcessArguments.parse(
+            argv,
+            currentExecutablePath: currentExecutablePath
+        )
+    }
+
+    func verifyDriverBundle(
+        declaredPath: String
+    ) throws -> VerifiedPerformanceTracerBundleContext {
+        fixture.context
+    }
+
+    func runCommand(
+        arguments: VoicePerformanceDriverProcessArguments,
+        verifiedBundle: VerifiedPerformanceTracerBundleContext
+    ) throws {
+        try VoicePerformanceTracerDriverCommand.run(
+            arguments: arguments,
+            verifiedBundle: verifiedBundle,
+            runtime: commandRuntime
+        )
+    }
+}
+
+private struct DriverSensitiveUnexpectedError:
+    Error,
+    CustomStringConvertible
+{
+    let description: String
+
+    init(_ description: String) {
+        self.description = description
+    }
+}
+
 private enum DriverFixtureError: Error {
     case unexpectedCall
-    case helperFailed
 }
 
 private struct DriverCommandFixture {

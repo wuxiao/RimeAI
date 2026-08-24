@@ -49,6 +49,35 @@ public struct SealedPerformanceControlDriverPolicy: Equatable, Sendable {
     public let canonicalSHA256: PerformanceControlSHA256
     public let authenticatedProductionDriver: Bool
 
+    /// Emits the only driver policy accepted for the standalone performance
+    /// tracer. Its protocol identity and authority are owned by this module.
+    public static func tracerCanonicalData() throws -> Data {
+        let data = canonicalData(
+            qualification: .tracer,
+            capabilities: tracerCapabilities,
+            controlProtocol: PerformanceControlProtocolContract.identity
+        )
+        guard data.count <= maximumEncodedBytes,
+              !data.contains(0x0A),
+              !data.contains(0x0D)
+        else {
+            throw PerformanceControlError.invalidDriverPolicy
+        }
+        let decoded = try decodeCanonical(
+            data,
+            expectedControlProtocol: PerformanceControlProtocolContract.identity
+        )
+        guard decoded.qualification == .tracer,
+              decoded.capabilities == tracerCapabilities,
+              decoded.controlProtocol
+                == PerformanceControlProtocolContract.identity,
+              !decoded.authenticatedProductionDriver
+        else {
+            throw PerformanceControlError.invalidDriverPolicy
+        }
+        return data
+    }
+
     public static func decodeCanonical(
         _ data: Data,
         expectedControlProtocol: PerformanceControlProtocolIdentity

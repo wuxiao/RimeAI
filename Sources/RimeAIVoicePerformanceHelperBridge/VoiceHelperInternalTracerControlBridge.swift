@@ -23,7 +23,6 @@ public enum VoiceHelperPerformanceTracerBridgeFactory {
         try make(
             bootstrap: VoiceHelperPerformanceTracerBootstrap(layout: layout),
             measurementPolicy: measurementPolicy,
-            bundleURL: Bundle.main.bundleURL,
             peerNonceSource: securePeerNonce,
             processStartTokenSource: liveProcessStartToken
         )
@@ -32,7 +31,6 @@ public enum VoiceHelperPerformanceTracerBridgeFactory {
     static func make(
         bootstrap: VoiceHelperPerformanceTracerBootstrap,
         measurementPolicy: VoicePerformanceMeasurementPolicy,
-        bundleURL: URL,
         peerNonceSource: @Sendable () throws -> PerformanceControlNonce,
         processStartTokenSource: @Sendable () throws -> UInt64
     ) throws -> VoiceHelperPerformanceTracerBridge {
@@ -53,8 +51,7 @@ public enum VoiceHelperPerformanceTracerBridgeFactory {
                 throw VoiceHelperPerformanceTracerBridgeError.rejected
             }
             let prepared = try bootstrap.prepareEngine(
-                measurementPolicy: measurementPolicy,
-                bundleURL: bundleURL
+                measurementPolicy: measurementPolicy
             )
             let peerNonce = try peerNonceSource()
             return VoiceHelperPerformanceTracerBridge(
@@ -71,7 +68,15 @@ public enum VoiceHelperPerformanceTracerBridgeFactory {
                     prepared.verifiedReleasePolicySHA256,
                 coldTrials: measurementPolicy.coldTrials
             )
-        } catch {
+        } catch is VoiceHelperPerformanceTracerBridgeError {
+            throw VoiceHelperPerformanceTracerBridgeError.rejected
+        } catch is VoiceHelperPerformanceTracerBootstrapError {
+            throw VoiceHelperPerformanceTracerBridgeError.rejected
+        } catch is VoiceHelperReleaseBootstrapError {
+            throw VoiceHelperPerformanceTracerBridgeError.rejected
+        } catch is VoiceReleasePolicyError {
+            throw VoiceHelperPerformanceTracerBridgeError.rejected
+        } catch is PerformanceControlError {
             throw VoiceHelperPerformanceTracerBridgeError.rejected
         }
     }
@@ -282,8 +287,11 @@ public final class VoiceHelperPerformanceTracerBridge: @unchecked Sendable {
         let response: PerformanceControlWireFrame
         do {
             response = try controlBridge.receiveLoadEngine(frame)
-        } catch {
+        } catch is VoiceHelperInternalTracerControlBridgeError {
             throw failAfterUnlockedOperation()
+        } catch {
+            _ = failAfterUnlockedOperation()
+            throw error
         }
 
         lock.lock()
@@ -323,8 +331,11 @@ public final class VoiceHelperPerformanceTracerBridge: @unchecked Sendable {
         do {
             result = try controlBridge
                 .receiveLoadStartedAcknowledgement(frame)
-        } catch {
+        } catch is VoiceHelperInternalTracerControlBridgeError {
             throw failAfterUnlockedOperation()
+        } catch {
+            _ = failAfterUnlockedOperation()
+            throw error
         }
 
         lock.lock()
@@ -525,9 +536,12 @@ final class VoiceHelperInternalTracerControlBridge: @unchecked Sendable {
                     generation: helperProcessStartToken,
                     ticket: loadTicket.rawValue
                 )
-        } catch {
+        } catch is VoiceHelperInternalTracerLoadError {
             terminate()
             throw VoiceHelperInternalTracerControlBridgeError.engineLoadFailed
+        } catch {
+            terminate()
+            throw error
         }
 
         let summary: PerformanceControlEngineSummary
@@ -537,10 +551,17 @@ final class VoiceHelperInternalTracerControlBridge: @unchecked Sendable {
                 throw VoiceHelperInternalTracerControlBridgeError
                     .invalidProductDescriptor
             }
-        } catch {
+        } catch is VoiceHelperInternalTracerControlBridgeError {
             terminate()
             throw VoiceHelperInternalTracerControlBridgeError
                 .invalidProductDescriptor
+        } catch is PerformanceControlError {
+            terminate()
+            throw VoiceHelperInternalTracerControlBridgeError
+                .invalidProductDescriptor
+        } catch {
+            terminate()
+            throw error
         }
 
         lock.lock()

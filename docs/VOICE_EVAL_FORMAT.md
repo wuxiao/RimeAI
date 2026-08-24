@@ -1,5 +1,8 @@
 # 语音评测数据与质量门报告格式
 
+> 本文只维护可执行 schema 与证据边界；当前工作树和发布状态见
+> [`TASKS.md`](../TASKS.md)。
+
 状态：实现合同。本文定义离线语音质量评测的输入、归一化、聚合指标和
 quality gate。该 gate 只证明指定语料、模型、平台、延迟与资源证据满足冻结策略，
 不替代模型权利、TCC、运行态隐私、公证或干净机器等产品发布门。协议字段一律
@@ -13,6 +16,11 @@ measurement-only：它只提供严格测量，不具备获批 identity policy
 `policy_incomplete`、`quality_gate_pass: false` 和退出码 1。该限制不能由 sidecar、
 gates 或用户字段改写；未来须由新 schema 和完整 authenticated control plane 明确
 取代，不能静默升级 v3。
+
+本文同时引用三个不同命名空间的 integer `schema_version: 2`：Run schema v2、
+聚合质量报告 schema v2，以及非发布 causal tracer result schema 2。它们的 exact
+keys、语义和权限彼此独立；“都是 2”不表示可互换。tracer result 尤其不是
+performance sidecar schema v3，也不是质量报告。
 
 ## 1. 命令与退出码
 
@@ -31,6 +39,25 @@ python -m rimeai_eval collect-voice-observations \
   --artifact-dir /absolute/path/candidate-artifact \
   --output OBSERVATIONS.jsonl \
   [--hotwords-file HOTWORDS.json]
+
+rimeai-voice-evaluation-artifact-sealer \
+  --artifact-dir /absolute/canonical/path/to/evaluation-artifact
+
+rimeai-voice-performance-tracer-bundle-builder \
+  --final-bundle /absolute/controlled/output/RimeAIVoicePerformanceTracer.bundle \
+  --release-bin-dir /absolute/path/to/release/bin \
+  --repo-root /absolute/path/to/RimeAI \
+  --verified-artifact-dir /absolute/canonical/path/to/evaluation-artifact \
+  --control-socket /absolute/private/path/to/control.sock \
+  --cold-trials 1 \
+  --marketing-version 0.1.0 \
+  --build-number 1 \
+  --signing-identity "Developer ID Application: … (TEAMID)"
+
+/absolute/controlled/output/RimeAIVoicePerformanceTracer.bundle/Contents/Helpers/\
+RimeAIVoicePerformanceCollector.app/Contents/MacOS/rimeai-voice-performance-tracer \
+  --tracer-bundle /absolute/controlled/output/RimeAIVoicePerformanceTracer.bundle \
+  --result /absolute/controlled/output/voice-performance-tracer-result.json
 
 CONTROLLED_REALTIME_DRIVER | python -m rimeai_eval \
   collect-voice-performance \
@@ -57,6 +84,12 @@ python -m rimeai_eval evaluate-voice \
 | corpus、run、observations、performance sidecar 或 gates 的 JSON/schema 无效 | 2 | 无；错误写 stderr，不含原文 |
 | V0 observation 回放成功 | 0 | 不含逐样本文本的摘要；验证后的 JSONL 原子写入 `--output` |
 | observation plan、driver/制品身份、WAV、原生输出或原子安装无效 | 2 | 无；统一脱敏错误，不得留下可用 observations |
+| evaluation artifact seal 成功 | 0 | 单行 canonical receipt；exact keys 为 `artifact_id,content_sha256,verified_file_count,verified_payload_bytes` |
+| artifact sealer 用法/内容/IO/内部错误 | 64 / 65 / 74 / 70 | stdout 为空；stderr 只有固定 `E_*` 诊断 |
+| 签名 tracer bundle 构建成功 | 0 | 单行 canonical build receipt；不包含 trial 结果 |
+| tracer builder 用法/构建失败 | 64 / 70 | stdout 为空；stderr 为固定错误 |
+| 三进程 causal tracer 成功 | 0 | stdout/stderr 均为空；schema-2 result 以原子且不覆盖方式写入 `--result` |
+| causal tracer 用法/数据/内部/IO/临时/权限错误 | 64 / 65 / 70 / 74 / 75 / 77 | 不留下可用 result；stderr 只有角色化固定 `E_*` 诊断 |
 | 受控性能采集成功 | 0 | 不含逐样本数据的成功摘要；证据原子写入 `--output` |
 | collection plan、实时事件、签名身份、采样或原子输出无效 | 2 | 无；不得留下可用证据 |
 | 仅测量，未传 `--gates-config` | 0 | schema v2 聚合报告，不含 `quality_gate_pass` |
@@ -66,10 +99,21 @@ python -m rimeai_eval evaluate-voice \
 baseline 的 run 和 observations 必须成对提供。缺少其中一个属于 CLI 无效输入，
 在读取 corpus 前以退出码 2 失败。
 
+bundle builder 成功回执的 exact keys 为
+`bundle_path,measurement_policy_canonical_sha256,measurement_policy_file_sha256,
+raw_release_policy_sha256,team_identifier`。`measurement_policy_file_sha256` 是已签名
+bundle 资源中 policy 原始文件字节的 SHA-256；
+`measurement_policy_canonical_sha256` 是经严格解码后、带域分隔的权威
+canonical policy 摘要。控制帧和 tracer result 中的
+`measurement_policy_sha256` 必须绑定 canonical 摘要，不是 raw file SHA。
+具体摘要由当次 builder receipt 和 result 绑定，不在 schema 文档中维护。
+
 `CONTROLLED_REALTIME_DRIVER` 只是命令形状中的占位符，不是 `cat`、重放文件或人工
 输入。采集 CLI 和 native collector 都拒绝 regular-file stdin，但 pipe/socket/TTY
 本身不证明事件生产者或业务因果；只有固定版本、受控且与真实语音/键盘流程相连的
-driver 才能产生正式证据。当前仓库尚未把该产品 driver 接入输入法运行流程。
+driver 才能产生正式证据。当前仓库已有一条签名、固定为 tracer 资格的 causal
+driver，用于证明 fresh helper 冷加载的因果排序；它不是与真实 corpus/键盘业务
+流程相连的 authenticated production event producer，后者仍未接入输入法运行流程。
 
 ## 2. 四层证据模型
 
@@ -90,6 +134,11 @@ collection plan 与实时 boundary event 是生成第 4 层证据的控制输入
 `policy_incomplete`，不得形成质量门通过结论。提供有效 schema v3 sidecar 时仍因
 production driver 未认证而得到 `policy_incomplete`；sidecar 的 schema 或身份绑定
 无效才属于输入错误，以退出码 2 拒绝且不生成报告。
+
+causal tracer 的 schema-2 result 是一份诊断 artifact，不加入上述四层，也不是第五层。
+它可以独立保存已 attested 的 driver/helper、九帧 transcript 与冷加载时长，但不
+覆盖 corpus sessions、三个产品进程资源、键盘 trial 或 late challenges，因此不得作为
+`--performance-evidence` 传给 evaluator。
 
 ## 3. Corpus schema
 
@@ -316,6 +365,14 @@ policy, hotword_snapshot, samples, output_path
   `implementation_fingerprint`。Python 从同一个已打开并复验的 inode 流式复制到
   0700 staging 中的 0500 私有副本，native 再自验同一摘要；原始路径随后被替换也
   不会改变实际执行字节。制品目录也会在 native 进程中重新严格验证。
+- 真实 sherpa loader 把传给 ORT 的 snapshot pathname 从 `/` 起逐祖先验证：owner
+  只能是 root/euid、不得带 setid；mode `022` 非零只允许 root-owned sticky，所以
+  规范的 `/private/tmp` 保持可用。普通祖先若有 extended ACL，只接受通过有效性校验
+  且每个 entry 都是 deny 的 ACL；任何 allow/unknown/invalid/read error 都拒绝。
+  managed artifact root/source tree、snapshot parent/directory/files 与 recognizer 前后
+  rebind 则始终严格 no-ACL。clone/copy 创建名在 reopen 前即承担清理责任并绑定
+  dev/inode；snapshot directory-open 与 file-reopen 注入 `EMFILE` 均不留 residue。
+  这些回归仍须在恢复 clean build 后重新纳入统一基线。
 - descriptor、`voice_ready` 或 final 只要出现 `polish` / `polish_applied:true` 就拒绝，
   不能在 `postprocessor_id:none` 名义下混入后处理文本。
 - WAV 先转换为 16 kHz mono Float32，按实际音频时长以 session 起点的绝对 deadline
@@ -651,8 +708,10 @@ trial。
 - 聚合只输出 RTF、三进程 cohort RSS/phys-footprint、语音增量 footprint、CPU、
   energy、冷加载、制品体积和三阶段键盘延迟分布，不回显 sample/process instance
   ID。当前仓库实现了严格 loader/aggregator，以及负责连续时钟、三进程 V6
-  counter、环境和签名复验的 native collector；正式事件 driver、真实 corpus
-  驱动和真机运行证据仍未完成，不能用手填 sidecar 或重放 marker 冒充测量。
+  counter、环境和签名复验的 native collector。仓库另有已真实运行的签名 causal
+  tracer driver，但其资格固定为 tracer；能填充本 schema-3 sidecar 的正式事件 driver、
+  真实 corpus 驱动和真机运行证据仍未完成，不能用 tracer result、手填 sidecar
+  或重放 marker 冒充测量。
 
 ### 8.1 Collection plan、实时事件与 native collector
 
@@ -704,8 +763,11 @@ finish
 在任何该 generation 的模型读取前发送 begin，只能在 load probe 成功后发送 end；重放
 marker 不能成为证据。为避免 collector 自己先遍历并哈希模型文件、污染这段测量，native
 会把 artifact 的完整 manifest/inventory/hash 验证延迟到 `finish` 之后、生成 stdout
-之前；验证或身份绑定失败时整次结果被丢弃。当前仓库仍缺能兑现这些因果约束的正式
-driver，所以合成事件只验证状态机，不构成冷加载发布证据。
+之前；验证或身份绑定失败时整次结果被丢弃。第 8.2 节的 tracer 以不同协议让
+每个 run 兑现 fresh-helper 冷加载因果测量，但它不产生本节需要的
+corpus/键盘/资源事件。
+当前仓库仍缺能兑现完整 schema-3 因果约束的正式 production driver，所以合成
+事件或 tracer result 都不构成冷加载发布证据。
 
 native collector 使用单一串行执行器线性化 timer sample、boundary event 与 finish：
 
@@ -756,6 +818,103 @@ shasum -a 256 "$RIMEAI_SIGNED_COLLECTOR"
 都应进入受控 run 记录；摘要不得从签名前二进制、软链接或可变副本推导。native
 内部 usage failure 为 exit 64，其他 collection rejection 为 exit 65，stdout 为空且
 stderr 只有固定错误码；面向用户的 Python CLI 把采集失败统一映射为 exit 2。
+
+### 8.2 签名 causal tracer result schema 2
+
+这条路径专门测量“已 attested 的 fresh helper 在 collector 授权后才开始加载”。
+它先要求 `rimeai-voice-evaluation-artifact-sealer` 对 canonical 绝对目录中的冻结
+cohort 做逐文件稳定哈希，用 exclusive `manifest.json` 封印后再立即重验。已完成
+的 evaluation receipt 为：
+
+```text
+artifact_id=sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20-eval-27ffbd9e
+content_sha256=13276809093a0cd38ecb1b166041172da3421848bbdbb9a1ddbf6cb189699dc9
+verified_file_count=7
+verified_payload_bytes=199080356
+```
+
+7 个 inventory 文件包括 LICENSE/NOTICE 与 runtime 引用的 5 个模型 payload；后 5 个的
+合计是 `199068769` bytes。sealer receipt 是 evaluation-only 完整性记录，不是模型
+发行者的密码学签名，也不生成 `VoiceASRReleaseEvidence` 或 production catalog approval。
+
+builder 将 collector、driver、helper 和 exact policies 组成签名的
+`RimeAIVoicePerformanceTracer.bundle`。外层是 `CFBundlePackageType=BNDL`、不含
+`CFBundleExecutable` 的 resource-only bundle；它必须通过 Developer ID resource seal、
+strict/deep/all-architecture 验证，但 outer code-directory flags 必须为 0，不带
+hardened runtime。三个 nested `APPL` 则必须是同一 Team 的 Developer ID
+Application、有 trusted timestamp、带 hardened runtime，并且无 entitlement blob/字典。
+outer 不嵌入模型权重；签名 measurement policy 绑定 exact artifact
+path/ID/content SHA-256、七文件字节数、子进程路径/SHA-256/签名身份和协议。
+
+collector 先以 suspended 状态启动 driver，对其 effective UID、PID/start token、
+canonical path、executable SHA-256、signing identifier、Team 和 CDHash 做动态
+attestation，然后才 resume。driver 每个 trial 都以 suspended 状态启动一个从未加载该
+engine 的 fresh helper，collector 用同一套权限对 helper 验证后才 resume。每个
+trial 的 canonical transcript 恰好有九帧，顺序和方向固定为：
+
+```text
+collector→driver challenge
+collector→helper challenge
+driver→collector driver_hello
+helper→collector helper_hello(engine_state=unloaded)
+driver→collector arm_cold_load
+collector→helper load_engine
+helper→collector load_started
+collector→helper load_started_ack
+helper→collector load_ready
+```
+
+challenge/hello 绑定每 trial 派生的 session ID/plan nonce、独立 peer nonce 和 policy
+hash。helper 必须在返回 `load_started` 后等待；collector 线性化接收该帧，紧接着取
+`mach_continuous_time` 开始点并发送 `load_started_ack`，helper 只能在收到 ack 后进入
+真实 sherpa/ORT native load。collector 验证 `load_ready` 的 ticket、reply sequence、
+engine/artifact generation 后取结束点。helper 必须退出并被回收后才能进入下一
+trial；全部 trial 结束后 driver 也必须退出/回收、transport 关闭，然后 collector
+才以不覆盖原子安装发布 result。
+
+成功回收使用未 reap 的 direct child 作为 wait authority 与 PID-reuse anchor。存在一个
+合法的 exit-pending race：第一次 `waitid(WEXITED|WNOHANG|WNOWAIT)` 仍报告 running，
+随后 `proc_pid_rusage` 已因进程正在退出而返回 nil，第二次 `waitid` 可能暂时仍报告
+running。此时监督器既不接受成功，也不报 generation mismatch，而是每 10 ms 有界
+轮询，直到 `waitid` 给出 terminal 状态或 driver/helper 当前 phase deadline 到期；
+未 reap anchor 期间 PID 不会被复用。若 `proc_pid_rusage` 返回的是同 PID 但不同
+start token/process group 的 live generation，仍立即 fail-closed。
+
+result 是最多 1 MiB 的 canonical JSON，顶层 exact keys 为：
+
+```text
+authenticated_production_driver,control_protocol,control_session_nonce,
+driver_attestation,driver_policy_sha256,expected_engine,
+measurement_policy_sha256,qualification,release_policy_sha256,
+schema_version,transcript,trials
+```
+
+`schema_version` 固定为 `2`，`qualification` 固定为 `tracer`，
+`authenticated_production_driver` 固定为 `false`。`measurement_policy_sha256`
+是域分隔 canonical policy 摘要，对应 builder receipt 的
+`measurement_policy_canonical_sha256`，不是 `measurement_policy_file_sha256`。每个
+`trials[]` 还绑定 session/plan/load ticket、fresh-helper generation/attestation、artifact
+generation、`helper_exit_confirmed=true` 和正值 `cold_load_duration_ns`。
+
+合法 run 必须具有完整九帧 transcript、fresh helper 真实加载及 helper/driver
+退出回收，并保持 schema 2、`qualification=tracer`、
+`authenticated_production_driver=false`。它只是当次 process-cold 诊断，不声称
+OS 文件缓存已清空。任意数量的独立 tracer execution 都不是完整 schema-3
+collection plan 中由 authenticated production driver 产生的冷加载 trials，不能据此
+满足 gates 的最小次数或其他 sidecar 要求。
+
+exit-pending 回归必须分别覆盖 collector→driver 与 driver→helper 的
+“running→generation nil→仍 running→terminal”有界轮询；不同 live generation
+继续 fail-closed。这些自动化只证明 tracer 合同，不是模型质量、schema-3 release
+performance 或产品发布证据。
+
+虽然 tracer 的三个 peer 都由签名 bundle 提供并被 attested，期望 Team/peer 和
+driver 权限仍来自同一 tracer bundle 的诊断 policy，而非 code-pinned、已审批的
+production event authority。因此 `authenticated_production_driver=false` 不是尚待改写的
+临时值。该 result 不含 schema-3 的 corpus/run 绑定、三个产品进程资源 sessions、
+键盘三阶段、五类 late challenge 或完整分母，不得作为
+`--performance-evidence`，不得转换、补值或合并后冒充 schema-3 sidecar，也不能使
+gate、catalog、`VoiceASRReleaseEvidence` 或任何产品发布门通过。
 
 ## 9. Gates schema
 
@@ -852,6 +1011,8 @@ minimum_late_challenges_per_scenario`。所有 minimum 都是正整数；迟到�
 schema v3，aggregate 中 `gate_policy_complete`、`performance_evidence_complete` 与
 `authenticated_production_driver` 三项检查的 `evidence_complete` 均固定为 false，
 所以即使其他数值检查逐项通过，最终仍为 `policy_incomplete`/退出码 1。
+第 8.2 节的 tracer result 虽然自带同名固定 false 字段，却不是本节的可接受输入；
+它不能补全 sidecar，也不能通过 gates 把该值提升为 true。
 
 `required_subsets` 是 unique 的 `{dimension,value}` 数组；正式策略必须至少包含
 上例十个 PRD 子集，aggregate 中使用稳定键 `dimension:value`。上例列出的 23 个

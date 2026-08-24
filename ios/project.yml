@@ -8,6 +8,9 @@ settings:
   base:
     DEVELOPMENT_TEAM: S3T42U45P8
     CODE_SIGN_STYLE: Automatic
+    OTHER_CPLUSPLUSFLAGS:
+      - $(inherited)
+      - -Wno-documentation-deprecated-sync
     SWIFT_VERSION: "6.0"
     IPHONEOS_DEPLOYMENT_TARGET: "17.0"
     TARGETED_DEVICE_FAMILY: "1,2"
@@ -22,9 +25,19 @@ targets:
       - path: HostApp
         excludes:
           - Info.plist
-      - path: ../Sources/RimeAIInputCore
-        excludes:
-          - ProductDataLayout.swift
+      # Keep the iOS feasibility targets on an explicit portable-core surface.
+      # Directory-wide collection silently pulled macOS/cloud/voice-only files
+      # into generated projects whenever the shared package grew.
+      - path: ../Sources/RimeAIInputCore/CandidateSelectionTransition.swift
+      - path: ../Sources/RimeAIInputCore/CloudConfiguration.swift
+      - path: ../Sources/RimeAIInputCore/CompositionState.swift
+      - path: ../Sources/RimeAIInputCore/DaemonProtocol.swift
+      - path: ../Sources/RimeAIInputCore/FailureCircuitBreaker.swift
+      - path: ../Sources/RimeAIInputCore/InputPreferences.swift
+      - path: ../Sources/RimeAIInputCore/LocalSemanticRanker.swift
+      - path: ../Sources/RimeAIInputCore/RimeAISettingsStore.swift
+      - path: ../Sources/RimeAIInputCore/SessionContextStore.swift
+      - path: ../Sources/RimeAIInputCore/VoiceDictationKeyRouter.swift
       - path: ThirdPartyLicenses
         type: folder
         buildPhase: resources
@@ -59,10 +72,15 @@ targets:
       - path: SemanticModel
         type: folder
         buildPhase: resources
-      - path: ../Sources/RimeAIInputCore
-        excludes:
-          - ProductDataLayout.swift
-          - RimeAISettingsStore.swift
+      - path: ../Sources/RimeAIInputCore/CandidateSelectionTransition.swift
+      - path: ../Sources/RimeAIInputCore/CloudConfiguration.swift
+      - path: ../Sources/RimeAIInputCore/CompositionState.swift
+      - path: ../Sources/RimeAIInputCore/DaemonProtocol.swift
+      - path: ../Sources/RimeAIInputCore/FailureCircuitBreaker.swift
+      - path: ../Sources/RimeAIInputCore/InputPreferences.swift
+      - path: ../Sources/RimeAIInputCore/LocalSemanticRanker.swift
+      - path: ../Sources/RimeAIInputCore/SessionContextStore.swift
+      - path: ../Sources/RimeAIInputCore/VoiceDictationKeyRouter.swift
     dependencies:
       - framework: Native/RimeAINative.xcframework
     settings:
@@ -95,10 +113,6 @@ targets:
       - path: KeyboardExtension
         excludes:
           - Info.plist
-      - path: ../Sources/RimeAIInputCore
-        excludes:
-          - ProductDataLayout.swift
-          - RimeAISettingsStore.swift
       - path: ../Sources/RimeBridgeC/RimeBridgeC.cc
       - path: RimeData
         type: folder
@@ -106,6 +120,15 @@ targets:
       - path: SemanticModel
         type: folder
         buildPhase: resources
+      - path: ../Sources/RimeAIInputCore/CandidateSelectionTransition.swift
+      - path: ../Sources/RimeAIInputCore/CloudConfiguration.swift
+      - path: ../Sources/RimeAIInputCore/CompositionState.swift
+      - path: ../Sources/RimeAIInputCore/DaemonProtocol.swift
+      - path: ../Sources/RimeAIInputCore/FailureCircuitBreaker.swift
+      - path: ../Sources/RimeAIInputCore/InputPreferences.swift
+      - path: ../Sources/RimeAIInputCore/LocalSemanticRanker.swift
+      - path: ../Sources/RimeAIInputCore/SessionContextStore.swift
+      - path: ../Sources/RimeAIInputCore/VoiceDictationKeyRouter.swift
     dependencies:
       - framework: Native/RimeAINative.xcframework
     settings:
