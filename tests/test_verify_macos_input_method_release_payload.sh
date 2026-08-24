@@ -143,6 +143,10 @@ chmod 0755 \
   "${host_resources}/THIRD_PARTY_NOTICES.md"
 /usr/bin/install -m 0644 "${project_root}/datasets/ATTRIBUTION.md" \
   "${host_resources}/ATTRIBUTION.md"
+/usr/bin/install -m 0644 "${project_root}/macos/Resources/RimeAI.pdf" \
+  "${host_resources}/RimeAI.pdf"
+/usr/bin/install -m 0644 "${project_root}/macos/Resources/RimeAIMenu.pdf" \
+  "${host_resources}/RimeAIMenu.pdf"
 for license_name in \
   librime-BSD-3-Clause.txt \
   sherpa-onnx-Apache-2.0.txt \
@@ -195,6 +199,44 @@ RIMEAI_RELEASE_PAYLOAD_STUB=1 PATH="${mock_bin}:${PATH}" \
   zsh "${validator}" "${archive_file}" >/dev/null \
   || fail "valid paired Release payload fixture should pass"
 
+expect_archive_rejected() {
+  local failure_message=$1
+  build_archive
+  if RIMEAI_RELEASE_PAYLOAD_STUB=1 PATH="${mock_bin}:${PATH}" \
+    zsh "${validator}" "${archive_file}" >/dev/null 2>&1; then
+    fail "${failure_message}"
+  fi
+}
+
+menu_icon="${host_resources}/RimeAIMenu.pdf"
+menu_icon_backup="${test_root}/RimeAIMenu.pdf"
+/bin/mv "${menu_icon}" "${menu_icon_backup}"
+expect_archive_rejected \
+  "archive verifier must reject a missing menu icon"
+/bin/mv "${menu_icon_backup}" "${menu_icon}"
+
+/usr/bin/install -m 0644 "${host_resources}/RimeAI.pdf" "${menu_icon}"
+expect_archive_rejected \
+  "archive verifier must reject the legacy 24x18 menu icon"
+/usr/bin/install -m 0644 \
+  "${project_root}/macos/Resources/RimeAIMenu.pdf" "${menu_icon}"
+
+menu_icon_key=\
+':ComponentInputModeDict:tsInputModeListKey:fun.wwcn.inputmethod.RimeAI.Primary:tsInputModeMenuIconFileKey'
+/usr/libexec/PlistBuddy -c \
+  "Set ${menu_icon_key} RimeAI.pdf" "${app_bundle}/Contents/Info.plist"
+expect_archive_rejected \
+  "archive verifier must reject a drifted menu-icon reference"
+/usr/libexec/PlistBuddy -c \
+  "Set ${menu_icon_key} RimeAIMenu.pdf" "${app_bundle}/Contents/Info.plist"
+
+/usr/libexec/PlistBuddy -c \
+  'Set :TISIconIsTemplate false' "${app_bundle}/Contents/Info.plist"
+expect_archive_rejected \
+  "archive verifier must reject non-template input-source icons"
+/usr/libexec/PlistBuddy -c \
+  'Set :TISIconIsTemplate true' "${app_bundle}/Contents/Info.plist"
+
 performance_executable=\
 "${app_bundle}/Contents/MacOS/rimeai-voice-performance-tracer"
 print -- fixture > "${performance_executable}"
@@ -205,4 +247,4 @@ if RIMEAI_RELEASE_PAYLOAD_STUB=1 PATH="${mock_bin}:${PATH}" \
   fail "archive verifier must reject an extra signed tracer Mach-O"
 fi
 
-print 'PASS: paired Release archive admits only approved Mach-O paths'
+print 'PASS: paired Release archive enforces icon and Mach-O contracts'

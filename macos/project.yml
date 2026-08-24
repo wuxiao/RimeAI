@@ -29,6 +29,8 @@ targets:
         buildPhase: resources
       - path: Resources/RimeAI.pdf
         buildPhase: resources
+      - path: Resources/RimeAIMenu.pdf
+        buildPhase: resources
       - path: ../THIRD_PARTY_NOTICES.md
         buildPhase: resources
       - path: ../datasets/ATTRIBUTION.md

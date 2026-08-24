@@ -39,9 +39,9 @@
 				<key>tsInputModeIsVisibleKey</key>
 				<true/>
 				<key>tsInputModeAlternateMenuIconFileKey</key>
-				<string>RimeAI.pdf</string>
+				<string>RimeAIMenu.pdf</string>
 				<key>tsInputModeMenuIconFileKey</key>
-				<string>RimeAI.pdf</string>
+				<string>RimeAIMenu.pdf</string>
 				<key>tsInputModePaletteIconFileKey</key>
 				<string>RimeAI.pdf</string>
 				<key>tsInputModePrimaryInScriptKey</key>
@@ -81,6 +81,8 @@
 	<true/>
 	<key>TICapsLockLanguageSwitchCapable</key>
 	<false/>
+	<key>TISIconIsTemplate</key>
+	<true/>
 	<key>tsInputMethodCharacterRepertoireKey</key>
 	<array>
 		<string>zh-Hans</string>

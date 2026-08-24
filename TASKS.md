@@ -69,6 +69,7 @@ DerivedData 且启用 warnings-as-errors 的条件下建立内部基线。该基
 | 24M + n-gram 候选排序与拼音约束 beam | `DONE-INTERNAL` | Debug/Release artifact 尚待统一 |
 | 无空格混输、个人英文词和部分候选后缀 | `DONE-INTERNAL` | 部分候选只提交确认前缀，严格验证后的原始拼音后缀继续组合；原生与跨平台回归已纳入 clean baseline |
 | 设置四页、导入导出、恢复默认和可录制语音快捷键 | `DONE-INTERNAL` | 启停按依赖顺序串行收敛，daemon 必须通过协议握手与 Offline Lock 验证；真实 AppKit/服务矩阵仍属发布验收 |
+| 输入源设置页与菜单栏分面图标 | `DONE-INTERNAL` | 设置页保留逐像素一致的横向徽标，菜单栏使用 16×16 模板图标；资源、plist 与 Release ZIP 合同已锁定，本机 TIS 与菜单栏实测通过，清洁机及双外观验收仍属发布门 |
 | candidate-ID-only 云 broker 与明文历史控制 | `DONE-INTERNAL` | 真实云效果与发布未放行 |
 | 语音 V2 协议、UI、helper、XPC 代码、ASR 制品/评测/tracer | `DONE-INTERNAL` | 仍是默认关闭技术探针，不具备产品资格 |
 | iOS 离线 librime + 紧凑 n-gram 原型 | `DONE-INTERNAL` | fresh Simulator unit/UI 基线通过；非产品支持，最新真机验收未完成 |

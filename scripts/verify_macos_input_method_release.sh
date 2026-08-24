@@ -131,6 +131,72 @@ for required_resource in \
   fi
 done
 
+input_method_info="${app_bundle}/Contents/Info.plist"
+for icon_name in RimeAI.pdf RimeAIMenu.pdf; do
+  packaged_icon="${app_bundle}/Contents/Resources/${icon_name}"
+  controlled_icon="${project_root}/macos/Resources/${icon_name}"
+  if [[ ! -f "${packaged_icon}" || -L "${packaged_icon}" ]]; then
+    print -u2 "error: input-source icon is missing or unsafe: ${icon_name}"
+    exit 1
+  fi
+  if ! cmp -s "${packaged_icon}" "${controlled_icon}"; then
+    print -u2 "error: packaged input-source icon drifted: ${icon_name}"
+    exit 1
+  fi
+done
+
+verify_icon_dimensions() {
+  local icon_path=$1
+  local expected_width=$2
+  local expected_height=$3
+  local properties width height
+  if ! properties=$(sips -g pixelWidth -g pixelHeight "${icon_path}" 2>/dev/null); then
+    print -u2 "error: cannot inspect input-source icon: ${icon_path:t}"
+    exit 1
+  fi
+  width=$(print -r -- "${properties}" | awk '/pixelWidth:/ { print $2 }')
+  height=$(print -r -- "${properties}" | awk '/pixelHeight:/ { print $2 }')
+  if ! awk -v width="${width}" -v height="${height}" \
+    -v expected_width="${expected_width}" \
+    -v expected_height="${expected_height}" 'BEGIN {
+      exit !((width + 0) == (expected_width + 0) \
+        && (height + 0) == (expected_height + 0))
+    }'; then
+    print -u2 \
+      "error: unexpected input-source icon canvas: ${icon_path:t} "\
+"(${width}x${height})"
+    exit 1
+  fi
+}
+verify_icon_dimensions \
+  "${app_bundle}/Contents/Resources/RimeAI.pdf" 24 18
+verify_icon_dimensions \
+  "${app_bundle}/Contents/Resources/RimeAIMenu.pdf" 16 16
+
+if ! icon_is_template=$(/usr/libexec/PlistBuddy \
+  -c 'Print :TISIconIsTemplate' "${input_method_info}" 2>/dev/null) \
+  || [[ "${icon_is_template}" != true ]]; then
+  print -u2 "error: input-source icons must be configured as templates"
+  exit 1
+fi
+icon_contracts=(
+  ':tsInputMethodIconFileKey=RimeAI.pdf'
+  ':ComponentInputModeDict:tsInputModeListKey:fun.wwcn.inputmethod.RimeAI.Primary:tsInputModeMenuIconFileKey=RimeAIMenu.pdf'
+  ':ComponentInputModeDict:tsInputModeListKey:fun.wwcn.inputmethod.RimeAI.Primary:tsInputModeAlternateMenuIconFileKey=RimeAIMenu.pdf'
+  ':ComponentInputModeDict:tsInputModeListKey:fun.wwcn.inputmethod.RimeAI.Primary:tsInputModePaletteIconFileKey=RimeAI.pdf'
+)
+for icon_contract in "${icon_contracts[@]}"; do
+  plist_path=${icon_contract%%=*}
+  expected_icon=${icon_contract#*=}
+  if ! actual_icon=$(/usr/libexec/PlistBuddy \
+    -c "Print ${plist_path}" "${input_method_info}" 2>/dev/null) \
+    || [[ "${actual_icon}" != "${expected_icon}" ]]; then
+    print -u2 \
+      "error: input-source icon reference drifted: ${plist_path}"
+    exit 1
+  fi
+done
+
 mach_o_count=0
 bridge_found=false
 host_executable_mach_o_found=false
