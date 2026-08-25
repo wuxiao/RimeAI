@@ -55,8 +55,6 @@
 			<string>fun.wwcn.inputmethod.RimeAI.Primary</string>
 		</array>
 	</dict>
-	<key>InputMethodConnectionName</key>
-	<string>fun.wwcn.inputmethod.RimeAI_Connection</string>
 	<key>InputMethodServerControllerClass</key>
 	<string>RimeAIInputController</string>
 	<key>InputMethodServerDelegateClass</key>

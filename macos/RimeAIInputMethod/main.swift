@@ -2,6 +2,20 @@ import AppKit
 import Darwin
 import InputMethodKit
 
+enum RimeAIInputMethodServerConfiguration {
+    static func connectionName(for bundleIdentifier: String) -> String {
+        "\(bundleIdentifier).Connection"
+    }
+}
+
+enum RimeAIProcessEnvironment {
+    static var isRunningUnitTests: Bool {
+        ProcessInfo.processInfo.environment[
+            "XCTestConfigurationFilePath"
+        ] != nil || NSClassFromString("XCTestCase") != nil
+    }
+}
+
 if CommandLine.arguments.contains("--verify-cloud-credential") {
     let isAvailable: Bool
     do {
@@ -15,40 +29,38 @@ if CommandLine.arguments.contains("--verify-cloud-credential") {
 }
 
 private final class RimeAIApplicationDelegate: NSObject, NSApplicationDelegate {
-    private var inputMethodServer: IMKServer?
+    // InputMethodKit requires exactly one server that remains alive for the
+    // application's full run-loop lifetime.
+    private let inputMethodServer: IMKServer?
     private var voiceRuntime: VoiceDictationRuntime?
 
+    override init() {
+        if !RimeAIProcessEnvironment.isRunningUnitTests,
+           let bundleIdentifier = Bundle.main.bundleIdentifier {
+            inputMethodServer = IMKServer(
+                name: RimeAIInputMethodServerConfiguration.connectionName(
+                    for: bundleIdentifier
+                ),
+                bundleIdentifier: bundleIdentifier
+            )
+        } else {
+            inputMethodServer = nil
+        }
+        super.init()
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
-        guard !Self.isRunningUnitTests else {
+        guard !RimeAIProcessEnvironment.isRunningUnitTests else {
             return
         }
         voiceRuntime = MainActor.assumeIsolated {
             VoiceDictationRuntime.shared
         }
         reconcileVoiceHelperDesiredState()
-        guard
-            let connectionName = Bundle.main.object(
-                forInfoDictionaryKey: "InputMethodConnectionName"
-            ) as? String,
-            let bundleIdentifier = Bundle.main.bundleIdentifier
-        else {
-            NSApplication.shared.terminate(nil)
-            return
-        }
-        inputMethodServer = IMKServer(
-            name: connectionName,
-            bundleIdentifier: bundleIdentifier
-        )
         RimeEngine.shared.warm()
         if CommandLine.arguments.contains("--settings") {
             PrivacyCenterWindowController.shared.showWindow()
         }
-    }
-
-    private static var isRunningUnitTests: Bool {
-        ProcessInfo.processInfo.environment[
-            "XCTestConfigurationFilePath"
-        ] != nil || NSClassFromString("XCTestCase") != nil
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -115,8 +127,13 @@ private final class RimeAIApplicationDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+// Constructing the delegate also constructs IMKServer before the process first
+// accesses NSApplication.shared. InputMethodKit relies on that ordering when it
+// publishes the server's XPC endpoint during application bootstrap.
 private let applicationDelegate = RimeAIApplicationDelegate()
 private let application = NSApplication.shared
 application.setActivationPolicy(.accessory)
 application.delegate = applicationDelegate
-application.run()
+withExtendedLifetime(applicationDelegate) {
+    application.run()
+}

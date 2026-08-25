@@ -1,7 +1,23 @@
 import AppKit
 import XCTest
+@testable import RimeAIInputMethod
 
 final class InputSourceIconContractTests: XCTestCase {
+    func testInputMethodConnectionNameUsesModernIMKFallbackContract() throws {
+        let info = try XCTUnwrap(Bundle.main.infoDictionary)
+        XCTAssertNil(info["InputMethodConnectionName"])
+
+        let bundleIdentifier = try XCTUnwrap(
+            info["CFBundleIdentifier"] as? String
+        )
+        XCTAssertEqual(
+            RimeAIInputMethodServerConfiguration.connectionName(
+                for: bundleIdentifier
+            ),
+            "fun.wwcn.inputmethod.RimeAI.Connection"
+        )
+    }
+
     func testPackagedIconsUseTheirSurfaceSpecificCanvas() throws {
         let inputMethodIconURL = try XCTUnwrap(
             Bundle.main.url(forResource: "RimeAI", withExtension: "pdf")
