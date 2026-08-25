@@ -2,10 +2,10 @@
 
 | 项目 | 当前值 |
 |---|---|
-| 更新日期 | 2026-08-24 |
+| 更新日期 | 2026-08-25 |
 | 产品发布状态 | `NOT RELEASED` |
-| 当前工作树状态 | 可复现内部基线已通过；工作树仍未收口且不可发布 |
-| 当前最高优先级 | 收口 `REPO-001`，随后推进 `KBD-001` 真实键盘效果闭环 |
+| 当前工作树状态 | 当前功能边界按可审查提交收口；产品仍不可发布 |
+| 当前最高优先级 | 推进 `KBD-001` 真实键盘效果闭环 |
 
 本文件是唯一任务状态源。PRD、产品设计、技术设计和专项协议不再维护重复
 checkbox 或路线状态。
@@ -28,12 +28,11 @@ checkbox 或路线状态。
 | BUILD-002 | `DONE-INTERNAL` | 修复 shell 入口与 harness 可执行位 | tracked 入口和被嵌套调用的 shell 脚本为 `100755`；直接调用及 release contract harness 通过 |
 | BUILD-003 | `DONE-INTERNAL` | 固定 iOS 工程唯一生成源 | `ios/project.yml` 使用显式源文件清单；独立 regeneration check 与生成的 pbxproj 完全一致 |
 | VERIFY-001 | `DONE-INTERNAL` | 为当前完整工作树建立 clean 验证基线 | 同一工作树快照的 fresh Swift/Python、macOS、iOS、C/C++、shell gates 全部通过；命令族与结果记录于技术设计 |
-| REPO-001 | `IN-PROGRESS` | 收口当前未提交变更 | 所有预期新增文件进入版本控制；变更按可审查边界拆分；无意删除或生成物不进入提交 |
+| REPO-001 | `DONE-INTERNAL` | 收口当前未提交变更 | 所有预期新增文件进入版本控制；变更按可审查边界拆分；无意删除或生成物不进入提交 |
 
-当前工作树已在清除外部 header 搜索路径、使用全新 Swift scratch/Xcode
-DerivedData 且启用 warnings-as-errors 的条件下建立内部基线。该基线只证明源码、
-工程生成和本地 contract tests 可复现，不替代签名、公证、清洁机、真机或真实数据
-发布验收。
+当前工作树已按功能边界拆分提交，且在清除外部 header 搜索路径、使用全新 Swift
+scratch/Xcode DerivedData 且启用 warnings-as-errors 的条件下保持内部基线。该
+基线不替代签名、公证、清洁机、真机或真实数据发布验收。
 
 ## P1：macOS 键盘与云增强
 
@@ -67,6 +66,7 @@ DerivedData 且启用 warnings-as-errors 的条件下建立内部基线。该基
 |---|---|---|
 | Rime 同步主链、稳定候选与独立语义位 | `DONE-INTERNAL` | 同一工作树快照的 SwiftPM、macOS 与 iOS 严格基线已通过 |
 | 24M + n-gram 候选排序与拼音约束 beam | `DONE-INTERNAL` | Debug/Release artifact 尚待统一 |
+| 真实键盘交互冻结集 v1 | `DONE-INTERNAL` | 七类真实键盘场景、实际候选面板读取、接受/撤销/退格报告器与 0.60 复评入口已建立；Secure Input、stale result 与完整 KBD-001 数据集仍未关闭 |
 | 无空格混输、个人英文词和部分候选后缀 | `DONE-INTERNAL` | 部分候选只提交确认前缀，严格验证后的原始拼音后缀继续组合；原生与跨平台回归已纳入 clean baseline |
 | 设置四页、导入导出、恢复默认和可录制语音快捷键 | `DONE-INTERNAL` | 启停按依赖顺序串行收敛，daemon 必须通过协议握手与 Offline Lock 验证；真实 AppKit/服务矩阵仍属发布验收 |
 | 输入源设置页与菜单栏分面图标 | `DONE-INTERNAL` | 设置页保留逐像素一致的横向徽标，菜单栏使用 16×16 模板图标；资源、plist 与 Release ZIP 合同已锁定，本机 TIS 与菜单栏实测通过，清洁机及双外观验收仍属发布门 |

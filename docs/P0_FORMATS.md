@@ -58,6 +58,63 @@
 
 报告对数值四舍五入到六位小数。延迟使用单调时钟测量实际外部进程尝试，并报告 nearest-rank P50/P95；熔断后直接回退的样本不稀释模型延迟。
 
+## 真实键盘交互观测
+
+`datasets/keyboard-interaction-v1.jsonl` 冻结七类必须覆盖的键盘场景：
+`exact`、`abbreviated`、`near-sound`、`missing-syllable`、
+`partial-selection`、`mixed-composition` 和 `delete-composition`。每行声明
+原始按键串、期望进入面板的候选、最终可见合同、选择键、撤销/退格探针和等待
+时间。采集器按当前候选面板中的实际排名动态选择目标候选，因此本地语义重排
+改变顺序时不需要修改场景。
+
+采集前置条件：
+
+- macOS 已授权 Script Editor/Terminal 使用辅助功能与键盘事件；
+- TextEdit 已有一个可见正文窗口；
+- 当前输入源已选择 RimeAI；
+- 输出路径不得覆盖场景文件。
+
+```bash
+script/collect_real_keyboard_evaluation.sh .rimeai/reports/keyboard-v1.jsonl
+python3 -m rimeai_eval evaluate-keyboard \
+  .rimeai/reports/keyboard-v1.jsonl
+```
+
+观测文件同样使用 UTF-8 JSON Lines：
+
+```json
+{
+  "schema_version": 1,
+  "id": "keyboard-exact-ceshi",
+  "category": "exact",
+  "pinyin": "ceshi",
+  "expected_text": "测试",
+  "final_text": "测试",
+  "candidate_in_pool": true,
+  "candidate_pool_source": "displayed-panel-semantic",
+  "candidate_rank": 1,
+  "accepted": true,
+  "revert_probe": true,
+  "reverted": true,
+  "text_after_revert": "",
+  "backspace_probe": false,
+  "backspace_cleared": false
+}
+```
+
+指标口径：
+
+- `candidate_pool_inclusion`：除删除探针外，目标候选出现在真实候选面板中的比例。
+- `conditional_accuracy`：仅在目标已进池时，最终可见文本符合场景合同的比例。
+- `accepted`：除删除探针外，最终可见文本符合场景合同的比例。
+- `reverted`：在空文档起点执行一次宿主撤销后回到空文档的比例；
+  `text_after_revert` 保留撤销后证据。
+- `backspace_cleared`：仅对退格探针计算，按场景声明的退格次数清空组合的比例。
+
+观测包含拼音和上屏文本，只在 `.rimeai` 本机证据目录生成，不进入版本控制。
+候选进池必须读取实际显示面板，不能用离线 Rime 进程替代，因为本地语义层会
+重排候选项。
+
 ## 外部排序器配置
 
 ```json

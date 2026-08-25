@@ -29,6 +29,11 @@ from .evaluation import (
     ContextRepeatRanker,
     evaluate_dataset,
 )
+from .keyboard_evaluation import (
+    KeyboardEvaluationError,
+    evaluate_keyboard_observations,
+    load_keyboard_observations,
+)
 from .ngram_ranker import (
     NGramModelError,
     load_ngram_model,
@@ -291,6 +296,12 @@ def _build_parser() -> argparse.ArgumentParser:
     sentence_parser.add_argument(
         "--min-confidence", type=float, default=0.0
     )
+
+    keyboard_parser = subparsers.add_parser(
+        "evaluate-keyboard",
+        help="evaluate frozen real-keyboard interaction observations",
+    )
+    keyboard_parser.add_argument("observations", type=Path)
 
     train_beam_parser = subparsers.add_parser(
         "train-beam-decoder",
@@ -952,6 +963,20 @@ def _evaluate_sentence(
     return 0
 
 
+def _evaluate_keyboard(observations_path: Path) -> int:
+    try:
+        observations = load_keyboard_observations(observations_path)
+        report = evaluate_keyboard_observations(
+            observations,
+            dataset_path=observations_path,
+        )
+    except (KeyboardEvaluationError, OSError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+    return 0
+
+
 def _sha256_path(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as file:
@@ -1135,6 +1160,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             args.min_confidence,
             args.details_output,
         )
+    if args.command == "evaluate-keyboard":
+        return _evaluate_keyboard(args.observations)
     if args.command == "train-beam-decoder":
         return _train_beam_decoder(
             args.datasets,
