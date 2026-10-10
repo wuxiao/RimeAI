@@ -424,9 +424,9 @@ func semanticResultRejectsOutOfRangeOrInjectedPayloads() {
         decision: .rankedCandidate
     )
 
-    #expect(!injected.isDisplayable(for: token, candidates: candidates))
+    #expect(!injected.isValid(for: token, candidates: candidates))
     #expect(
-        !invalidConfidence.isDisplayable(
+        !invalidConfidence.isValid(
             for: token,
             candidates: candidates
         )
@@ -476,16 +476,24 @@ func semanticAbstentionsAreValidVisibleModelDecisions() {
     )
 
     #expect(sameTop.isValid(for: token, candidates: candidates))
-    #expect(sameTop.candidatePresentation == .sameTopCandidate)
     #expect(
-        sameTop.candidatePresentation.title(mainCandidate: "飞机")
+        sameTop.candidatePresentation(characterSet: .simplified)
+            == .sameTopCandidate
+    )
+    #expect(
+        sameTop.candidatePresentation(characterSet: .simplified)
+            .title(mainCandidate: "飞机")
             == "✦ AI 建议：飞机（与 Rime 首选一致）"
     )
     #expect(belowConfidence.isValid(for: token, candidates: candidates))
-    #expect(belowConfidence.candidatePresentation == .belowConfidence)
+    #expect(
+        belowConfidence.candidatePresentation(characterSet: .simplified)
+            == .belowConfidence
+    )
     #expect(insufficientCandidates.isValid(for: token, candidates: candidates))
     #expect(
-        insufficientCandidates.candidatePresentation == .insufficientCandidates
+        insufficientCandidates.candidatePresentation(characterSet: .simplified)
+            == .insufficientCandidates
     )
 }
 
@@ -635,5 +643,5 @@ func daemonCannotInjectAClientOnlyMixedComposition() {
     )
 
     #expect(!result.isValid(for: token, candidates: ["这个"]))
-    #expect(result.candidatePresentation == .failure)
+    #expect(result.candidatePresentation(characterSet: .simplified) == .failure)
 }

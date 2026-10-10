@@ -12,6 +12,8 @@
     <string>rimeai_cloud_broker</string>
     <string>--socket</string>
     <string>__SOCKET__</string>
+    <string>--rime-dictionary</string>
+    <string>__RIME_DICTIONARY__</string>
   </array>
   <key>WorkingDirectory</key>
   <string>__BROKER_ROOT__</string>

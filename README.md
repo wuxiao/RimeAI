@@ -26,7 +26,7 @@ RimeAI 是面向 Apple Silicon Mac 的 Rime 本地优先语义输入引擎。Rim
 |---|---|
 | macOS 键盘主线 | 内部实现已覆盖受控 librime、稳定候选、语义建议、整句、无空格混输、设置与安全输入保护；fresh 严格构建与测试已通过 |
 | 本地语义模型 | macOS daemon 已有 24M 神经排序器、n-gram 融合与 beam decoder；Debug/本机安装路径仍使用浮点 24M，Release 制品使用 INT8 ONNX，尚待统一 |
-| 可选云增强 | `wwcn New API Gateway`、`glm-5.3`、candidate-ID-only 链路已实现；真实冻结集、目标网络、费用与发布验收未完成 |
+| 可选云增强 | `wwcn New API Gateway`、默认 `glm-5.3-flash`（可选 `glm-5.3`）、candidate-ID-only 链路已实现；真实冻结集、目标网络、费用与发布验收未完成 |
 | 语音听写 | 默认关闭的内部技术探针；协议、UI、helper、评测 backend 和诊断 tracer 已实现，但没有获批产品模型、正式语料、TCC/设备与发布证据 |
 | iOS | 离线 librime + 紧凑 n-gram 可行性工程；fresh Simulator unit/UI 已通过，24M 模型与最新真机验收未完成 |
 | 公开分发 | 未放行；仍需工作树收口、公证、清洁机、宿主/安全输入、网络、许可证和真实用户指标 |

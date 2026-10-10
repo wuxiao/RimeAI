@@ -9,7 +9,8 @@
 ## 1. 产品边界
 
 - 当前服务为 `wwcn New API Gateway`，固定 endpoint
-  `https://newapi.wwcn.fun/v1`，排序模型 `glm-5.3`。
+  `https://newapi.wwcn.fun/v1`，默认排序模型 `glm-5.3-flash`，
+  可选 `glm-5.3`。
 - 文件和类中的 `qwen` 名称是历史遗留，不代表当前阿里云 Qwen 配置。
 - 云增强默认关闭，只有本机存在有效 API Key 且用户启用后才运行。
 - 云端只能返回本次候选池中的 ID，不能自由生成、扩写或静默改写文本。

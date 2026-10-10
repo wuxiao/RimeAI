@@ -1,4 +1,4 @@
-"""Strict OpenAI-compatible Qwen client that can only return candidate IDs."""
+"""Strict OpenAI-compatible Qwen client for candidate choice or generation."""
 
 from __future__ import annotations
 
@@ -6,15 +6,20 @@ import json
 import math
 from threading import Lock
 from time import monotonic
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Sequence
 from urllib import error, request
+
+if TYPE_CHECKING:  # pragma: no cover - typing only, runtime injection
+    from rimeai_eval.pinyin_guard import PinyinGuard
 
 
 ENDPOINT = "https://newapi.wwcn.fun/v1"
 PROVIDER = "wwcn New API Gateway"
 ALLOWED_MODELS = {
+    "glm-5.3-flash",
     "glm-5.3",
 }
+GENERATE_MINIMUM_CONFIDENCE = 0.60
 
 
 class QwenBrokerError(RuntimeError):
@@ -32,6 +37,7 @@ class QwenCandidateRanker:
         *,
         api_key_loader: Optional[Callable[[], str]] = None,
         endpoint: str = ENDPOINT,
+        pinyin_guard: Optional["PinyinGuard"] = None,
     ) -> None:
         if endpoint.rstrip("/") != ENDPOINT:
             raise ValueError("the Qwen endpoint is fixed by the product contract")
@@ -39,6 +45,11 @@ class QwenCandidateRanker:
         self._api_key: Optional[str] = None
         self._api_key_lock = Lock()
         self._endpoint = ENDPOINT
+        self._pinyin_guard = pinyin_guard
+
+    @property
+    def generation_enabled(self) -> bool:
+        return self._pinyin_guard is not None
 
     def rank(self, cloud_request: Dict[str, Any]) -> Dict[str, Any]:
         started = monotonic()
@@ -51,18 +62,31 @@ class QwenCandidateRanker:
         }
         prompt = {
             "task": (
-                "Choose the single best Chinese input-method candidate. "
-                "Correct a likely pinyin typo only when evidence is decisive. "
-                "Return an existing candidate_id; never create text."
+                "Decide what the user is typing in pinyin. Either pick the "
+                "single best existing candidate, or compose the intended "
+                "Chinese sentence yourself. Composing is preferred: whenever "
+                "any plausible Chinese reading of the pinyin exists, choose "
+                "generate instead of abstaining. A composed sentence must be "
+                "Han-only, at most 30 characters, contain no punctuation or "
+                "spaces, and read exactly as the typed pinyin character by "
+                "character (full syllables or first-letter abbreviation). "
+                "When the typed pinyin looks misspelled but you can read a "
+                "plausible intended sentence through it, still generate: the "
+                "user is asking for intelligent pinyin correction, not "
+                "strict literal transcription. Only abstain when no defensible "
+                "reading exists."
             ),
             "pinyin": cloud_request["pinyin"],
             "recent_context": cloud_request["recent_context"],
             "history_snippets": cloud_request["history_snippets"],
             "candidates": candidates,
             "output_contract": {
-                "decision": "choose | keep | abstain",
-                "candidate_id": "existing ID or null",
-                "confidence": "0..1 for choose, otherwise null",
+                "decision": "choose | keep | abstain | generate",
+                "candidate_id": "existing ID for choose, otherwise null",
+                "text": (
+                    "composed Han-only sentence for generate, otherwise null"
+                ),
+                "confidence": "0..1 for choose/generate, otherwise null",
                 "reason": (
                     "context_match | history_match | typo_match | "
                     "rime_rank | uncertain"
@@ -75,9 +99,10 @@ class QwenCandidateRanker:
                 {
                     "role": "system",
                     "content": (
-                        "You are a constrained Chinese IME reranker. Output "
-                        "one JSON object only, under 100 characters. Never "
-                        "output corrected text."
+                        "You are a constrained Chinese IME assistant. "
+                        "Output one JSON object only. Composed text may "
+                        "only appear inside the text field of a generate "
+                        "decision."
                     ),
                 },
                 {
@@ -90,7 +115,7 @@ class QwenCandidateRanker:
                 },
             ],
             "temperature": 0,
-            "max_tokens": 100,
+            "max_tokens": 256,
             "thinking": {"type": "disabled"},
             "response_format": {"type": "json_object"},
         }
@@ -116,6 +141,7 @@ class QwenCandidateRanker:
         return self._validate_decision(
             decision,
             candidate_by_id=candidate_by_id,
+            pinyin=cloud_request["pinyin"],
         )
 
     def embed_texts(self, texts: Sequence[str]) -> List[List[float]]:
@@ -160,6 +186,7 @@ class QwenCandidateRanker:
         decision: Any,
         *,
         candidate_by_id: Dict[str, Dict[str, Any]],
+        pinyin: str,
     ) -> Dict[str, Any]:
         if not isinstance(decision, dict):
             raise QwenBrokerError("Qwen decision is not an object")
@@ -176,15 +203,23 @@ class QwenCandidateRanker:
         }
         if reason not in allowed_reasons:
             reason = "uncertain"
-        if action not in {"choose", "keep", "abstain"}:
+        if action not in {"choose", "keep", "abstain", "generate"}:
             raise QwenBrokerError("Qwen decision is unsupported")
-        if action != "choose":
+        if action in {"keep", "abstain"}:
             return {
                 "decision": action,
                 "candidate_id": None,
                 "confidence": None,
                 "reason": reason,
             }
+        if action == "generate":
+            return self._validate_generated_decision(
+                decision,
+                candidate_by_id=candidate_by_id,
+                pinyin=pinyin,
+                confidence=confidence,
+                reason=reason,
+            )
         if (
             not isinstance(candidate_id, str)
             or candidate_id not in candidate_by_id
@@ -218,6 +253,55 @@ class QwenCandidateRanker:
             "candidate_id": candidate_id,
             "confidence": float(confidence),
             "reason": reason,
+        }
+
+    def _validate_generated_decision(
+        self,
+        decision: Dict[str, Any],
+        *,
+        candidate_by_id: Dict[str, Dict[str, Any]],
+        pinyin: str,
+        confidence: Any,
+        reason: str,
+    ) -> Dict[str, Any]:
+        text = decision.get("text")
+        if (
+            not isinstance(text, str)
+            or not text
+            or decision.get("candidate_id") is not None
+            or not isinstance(confidence, (int, float))
+            or isinstance(confidence, bool)
+            or not math.isfinite(confidence)
+            or not 0 <= confidence <= 1
+        ):
+            raise QwenBrokerError("Qwen generated sentence is invalid")
+        guard = self._pinyin_guard
+        if guard is None or confidence < GENERATE_MINIMUM_CONFIDENCE:
+            return {
+                "decision": "abstain",
+                "candidate_id": None,
+                "confidence": None,
+                "reason": "uncertain",
+            }
+        # The dictionary alignment check is the anti-hallucination gate:
+        # every character must read exactly as the typed pinyin.
+        if not guard.matches(text, pinyin):
+            return {
+                "decision": "abstain",
+                "candidate_id": None,
+                "confidence": None,
+                "reason": "uncertain",
+            }
+        # Deliberately NOT collapsing generate==top-candidate into keep
+        # here: the client owns dedup and surfaces "cloud agrees with the
+        # top candidate" visibly. Converting at this layer would silence
+        # the LLM's participation before the client can show it.
+        return {
+            "decision": "generate",
+            "candidate_id": None,
+            "confidence": float(confidence),
+            "reason": reason,
+            "text": text,
         }
 
     def _post_json(

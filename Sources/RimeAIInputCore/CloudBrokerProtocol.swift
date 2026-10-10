@@ -4,6 +4,7 @@ public enum CloudCandidateSource: String, Codable, Sendable {
     case rimeExact = "rime_exact"
     case rimeFuzzy = "rime_fuzzy"
     case userTerm = "user_term"
+    case cloudGenerated = "cloud_generated"
 }
 
 public struct CloudCandidate: Codable, Equatable, Sendable {
@@ -207,6 +208,40 @@ public enum CloudInferenceDecision: String, Codable, Sendable {
     case choose
     case keep
     case abstain
+    case generate
+}
+
+/// Structural deep-defense checks for cloud-generated sentence text. The
+/// broker already enforces pinyin alignment against the Rime dictionary;
+/// this mirrors those bounds on the client so a malformed or hostile
+/// response can never reach presentation.
+public enum CloudGeneratedSentencePolicy {
+    public static let maximumCharacterCount = 30
+    public static let minimumConfidence = 0.60
+
+    public static func allows(
+        text: String,
+        pinyin: String,
+        confidence: Double
+    ) -> Bool {
+        guard text.count <= maximumCharacterCount,
+              confidence.isFinite,
+              confidence >= minimumConfidence
+        else {
+            return false
+        }
+        // Han-only, matching the broker's PinyinGuard dictionary domain.
+        let isHanOnly = !text.isEmpty && text.unicodeScalars.allSatisfy {
+            (0x3400 ... 0x9FFF).contains($0.value)
+        }
+        guard isHanOnly else {
+            return false
+        }
+        // Cheap necessary condition: every character consumes at least one
+        // pinyin letter even under first-letter abbreviation.
+        let letters = pinyin.unicodeScalars.filter { $0.value != 39 }
+        return text.unicodeScalars.count <= letters.count
+    }
 }
 
 public enum CloudSemanticPresentationResolver {
@@ -216,7 +251,19 @@ public enum CloudSemanticPresentationResolver {
         cloudDecision: CloudInferenceDecision?
     ) -> SemanticCandidatePresentation {
         if localRequestWasScheduled, current != .failure {
-            return current
+            // 本地已有可采纳候选或仍在分析时保持本地展示；本地只剩
+            // 负面诊断（候选不足/未覆盖等）时，云端表态更有信息量。
+            switch current {
+            case .candidate,
+                 .sameTopCandidate,
+                 .analyzing,
+                 .idle,
+                 .cloudAnalyzing,
+                 .scriptMismatch:
+                return current
+            default:
+                break
+            }
         }
         switch cloudDecision {
         case .keep:
@@ -224,6 +271,10 @@ public enum CloudSemanticPresentationResolver {
         case .abstain:
             return .cloudBelowConfidence
         case .choose:
+            return current
+        case .generate:
+            // A generate decision that failed client-side validation keeps
+            // whatever the local pipeline is already showing.
             return current
         case nil:
             return localRequestWasScheduled ? current : .cloudFailure
@@ -256,6 +307,12 @@ public struct CloudInferenceResponse: Codable, Equatable, Sendable {
     public let reason: CloudInferenceReason
     public let modelID: String
     public let elapsedMilliseconds: Double
+    /// Present only for `.generate`. Older brokers omit the field and it
+    /// decodes as nil.
+    public let generatedText: String?
+    /// The broker echoes the request pinyin verbatim so the client can
+    /// reject misaligned or cross-request payloads byte for byte.
+    public let generatedPinyin: String?
 
     public init(
         schemaVersion: Int = 1,
@@ -273,7 +330,9 @@ public struct CloudInferenceResponse: Codable, Equatable, Sendable {
         confidence: Double?,
         reason: CloudInferenceReason,
         modelID: String,
-        elapsedMilliseconds: Double
+        elapsedMilliseconds: Double,
+        generatedText: String? = nil,
+        generatedPinyin: String? = nil
     ) {
         self.schemaVersion = schemaVersion
         self.type = type
@@ -291,6 +350,8 @@ public struct CloudInferenceResponse: Codable, Equatable, Sendable {
         self.reason = reason
         self.modelID = modelID
         self.elapsedMilliseconds = elapsedMilliseconds
+        self.generatedText = generatedText
+        self.generatedPinyin = generatedPinyin
     }
 
     public func matches(_ request: CloudInferenceRequest) -> Bool {
@@ -323,6 +384,8 @@ public struct CloudInferenceResponse: Codable, Equatable, Sendable {
                 return nil
             }
             return request.candidates.first { $0.id == candidateID }
+        case .generate:
+            return nil
         case .keep, .abstain:
             return nil
         }
@@ -340,6 +403,8 @@ public struct CloudInferenceResponse: Codable, Equatable, Sendable {
         switch decision {
         case .choose:
             guard let candidateID,
+                  generatedText == nil,
+                  generatedPinyin == nil,
                   let candidate = request.candidates.first(
                       where: { $0.id == candidateID }
                   ),
@@ -351,8 +416,26 @@ public struct CloudInferenceResponse: Codable, Equatable, Sendable {
                 return false
             }
             return true
+        case .generate:
+            guard candidateID == nil,
+                  let text = generatedText,
+                  let echoedPinyin = generatedPinyin,
+                  echoedPinyin == request.pinyin,
+                  let confidence,
+                  CloudGeneratedSentencePolicy.allows(
+                      text: text,
+                      pinyin: request.pinyin,
+                      confidence: confidence
+                  )
+            else {
+                return false
+            }
+            return true
         case .keep, .abstain:
-            return candidateID == nil && confidence == nil
+            return candidateID == nil
+                && confidence == nil
+                && generatedText == nil
+                && generatedPinyin == nil
         }
     }
 
@@ -373,5 +456,7 @@ public struct CloudInferenceResponse: Codable, Equatable, Sendable {
         case reason
         case modelID = "model_id"
         case elapsedMilliseconds = "elapsed_ms"
+        case generatedText = "generated_text"
+        case generatedPinyin = "generated_pinyin"
     }
 }

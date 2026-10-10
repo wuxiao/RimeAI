@@ -6,8 +6,10 @@ final class CandidatePanelController: NSObject {
     private let backgroundView: NSVisualEffectView
     private let mainCandidatesStack: NSStackView
     private let semanticButton: NSButton
+    private let pageIndicator: NSTextField
     private var mainSelectionHandler: ((Int) -> Void)?
     private var semanticSelectionHandler: (() -> Void)?
+    private var pageIndicatorVisible = false
     private var hasVisibleContent = false
 
     override init() {
@@ -22,6 +24,7 @@ final class CandidatePanelController: NSObject {
         )
         mainCandidatesStack = NSStackView()
         semanticButton = NSButton()
+        pageIndicator = NSTextField(labelWithString: "")
         super.init()
 
         panel.level = .popUpMenu
@@ -60,13 +63,28 @@ final class CandidatePanelController: NSObject {
         semanticButton.action = #selector(acceptSemanticCandidate(_:))
         semanticButton.toolTip = "Tab 接受本地语义候选"
         backgroundView.addSubview(semanticButton)
+
+        pageIndicator.isBezeled = false
+        pageIndicator.isEditable = false
+        pageIndicator.drawsBackground = false
+        pageIndicator.alignment = .right
+        pageIndicator.font = .monospacedDigitSystemFont(
+            ofSize: 11,
+            weight: .regular
+        )
+        pageIndicator.textColor = .secondaryLabelColor
+        pageIndicator.isHidden = true
+        backgroundView.addSubview(pageIndicator)
     }
 
     func update(
-        mainCandidates: [String],
+        visibleCandidates: [String],
+        primaryCandidate: String?,
+        pageLabel: String?,
         semanticPresentation: SemanticCandidatePresentation,
         suggestionSource: HistoryCommitSource,
         contextCharacterCount: Int,
+        cloudInFlight: Bool,
         onMainSelection: @escaping (Int) -> Void,
         onSemanticSelection: @escaping () -> Void
     ) {
@@ -77,7 +95,7 @@ final class CandidatePanelController: NSObject {
             mainCandidatesStack.removeArrangedSubview(view)
             view.removeFromSuperview()
         }
-        for (index, candidate) in mainCandidates.enumerated() {
+        for (index, candidate) in visibleCandidates.enumerated() {
             let button = NSButton(
                 title: "\(index + 1) \(candidate)",
                 target: self,
@@ -91,6 +109,9 @@ final class CandidatePanelController: NSObject {
             mainCandidatesStack.addArrangedSubview(button)
         }
 
+        pageIndicator.stringValue = pageLabel ?? ""
+        pageIndicatorVisible = pageLabel != nil
+
         var semanticTitle: String
         if case let .candidate(text, _, _) = semanticPresentation {
             switch suggestionSource {
@@ -98,13 +119,26 @@ final class CandidatePanelController: NSObject {
                 semanticTitle = "☁︎ Qwen 建议：\(text)"
             case .cloudFuzzy:
                 semanticTitle = "☁︎ Qwen 纠错：\(text)"
+            case .cloudGenerated:
+                semanticTitle = "☁︎ LLM 生成：\(text)"
             case .rimeMain, .localSemantic, .rawPinyin:
                 semanticTitle = semanticPresentation.title
             }
         } else {
             semanticTitle = semanticPresentation.title(
-                mainCandidate: mainCandidates.first
+                mainCandidate: primaryCandidate
             )
+        }
+        if cloudInFlight {
+            // 云端请求在途：本地可选候选保留原文追加提示，负面诊断等
+            // 不可选状态直接让位给云端分析中，AI 参与始终可见。
+            if semanticPresentation.isSelectable {
+                semanticTitle += " · ☁︎ 云端分析中…"
+            } else {
+                semanticTitle = SemanticCandidatePresentation
+                    .cloudAnalyzing
+                    .title
+            }
         }
         if contextCharacterCount > 0 {
             semanticTitle += " · 上下文 \(contextCharacterCount) 字"
@@ -118,21 +152,28 @@ final class CandidatePanelController: NSObject {
                 ? "Tab 接受中英混输候选"
                 : suggestionSource == .cloudFuzzy
                 ? "Tab 接受 Qwen 纠错候选"
-                : suggestionSource == .cloudExact
-                    ? "Tab 接受 Qwen 语义候选"
-                    : "Tab 接受本地语义候选")
+                : suggestionSource == .cloudGenerated
+                    ? "Tab 接受 LLM 生成整句"
+                    : suggestionSource == .cloudExact
+                        ? "Tab 接受 Qwen 语义候选"
+                        : "Tab 接受本地语义候选")
             : semanticTitle
 
+        let showsMainCandidates = !visibleCandidates.isEmpty
         let contentWidth = min(
             960,
             max(
                 260,
-                mainCandidatesStack.fittingSize.width + 16,
+                // 分页指示器占据的 64pt 必须计入面板宽度，否则 stack
+                // 比 fittingSize 窄 64pt，候选按钮被压缩成省略号。
+                mainCandidatesStack.fittingSize.width + 16
+                    + (pageIndicatorVisible ? 64 : 0),
                 semanticButton.fittingSize.width + 24
             )
         )
-        let showsMainCandidates = !mainCandidates.isEmpty
-        let contentHeight: CGFloat = showsMainCandidates ? 72 : 38
+        // 候选按钮与语义按钮分层不重叠；面板高度按"候选 + 语义"两段
+        // 容纳，长 LLM 文本会被自然换行而非被压住。
+        let contentHeight: CGFloat = showsMainCandidates ? 96 : 56
         hasVisibleContent = showsMainCandidates
             || semanticPresentation.isSelectable
         panel.setContentSize(
@@ -181,17 +222,24 @@ final class CandidatePanelController: NSObject {
             origin: .zero,
             size: NSSize(width: width, height: height)
         )
+        pageIndicator.frame = NSRect(
+            x: width - 8 - 56,
+            y: showsMainCandidates ? 44 : 0,
+            width: 56,
+            height: 16
+        )
+        pageIndicator.isHidden = !pageIndicatorVisible
         mainCandidatesStack.frame = NSRect(
             x: 8,
-            y: showsMainCandidates ? 37 : 0,
-            width: width - 16,
-            height: showsMainCandidates ? 30 : 0
+            y: showsMainCandidates ? 64 : 0,
+            width: width - 16 - (pageIndicatorVisible ? 64 : 0),
+            height: showsMainCandidates ? 28 : 0
         )
         semanticButton.frame = NSRect(
             x: 8,
             y: 5,
             width: width - 16,
-            height: 28
+            height: showsMainCandidates ? 56 : 46
         )
     }
 

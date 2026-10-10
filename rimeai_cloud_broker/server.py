@@ -12,6 +12,7 @@ from pathlib import Path
 import re
 import socket
 import stat
+import sys
 import struct
 from time import monotonic
 from typing import Any, Dict, Optional, Protocol, Set, Tuple
@@ -183,11 +184,30 @@ def validate_decision(
     if action in {"keep", "abstain"}:
         if candidate_id is not None or confidence is not None:
             raise ValueError("non-choice decision contains a candidate")
+        if decision.get("text") is not None:
+            raise ValueError("non-generate decision contains text")
+        return decision
+    if action == "generate":
+        text = decision.get("text")
+        if (
+            candidate_id is not None
+            or not isinstance(text, str)
+            or not text
+            or len(text.encode()) > 120
+            or not isinstance(confidence, (int, float))
+            or isinstance(confidence, bool)
+            or not math.isfinite(confidence)
+            or not 0.60 <= confidence <= 1
+        ):
+            raise ValueError("generated sentence is invalid")
+        # Pinyin alignment was already enforced by the ranker's dictionary
+        # guard; this layer mirrors its structural bounds only.
         return decision
     candidate_ids = {item["id"] for item in cloud_request["candidates"]}
     if (
         action != "choose"
         or candidate_id not in candidate_ids
+        or decision.get("text") is not None
         or not isinstance(confidence, (int, float))
         or isinstance(confidence, bool)
         or not math.isfinite(confidence)
@@ -213,10 +233,12 @@ class CloudBrokerServer:
         socket_path: Path,
         ranker: CandidateRanker,
         history_indexer: Optional[HistoryEmbeddingIndexer] = None,
+        text_generation_enabled: bool = False,
     ):
         self.socket_path = socket_path
         self.ranker = ranker
         self.history_indexer = history_indexer
+        self.text_generation_enabled = text_generation_enabled
         self._server: Optional[asyncio.AbstractServer] = None
         self._tasks: Set[asyncio.Task[Any]] = set()
         self._index_task: Optional[asyncio.Task[Any]] = None
@@ -329,6 +351,7 @@ class CloudBrokerServer:
             return
         lock = asyncio.Lock()
         hello = False
+        client_capabilities: Set[str] = set()
         pending: Dict[str, asyncio.Task[Any]] = {}
         latest: Dict[Tuple[str, str], int] = {}
         try:
@@ -350,7 +373,22 @@ class CloudBrokerServer:
                         message.get("client_id"), 256
                     ):
                         break
+                    advertised = message.get("capabilities")
+                    if isinstance(advertised, list):
+                        client_capabilities = {
+                            item
+                            for item in advertised
+                            if isinstance(item, str) and 0 < len(item) <= 64
+                        }
                     hello = True
+                    capabilities = [
+                        "candidate-id-only",
+                        "cancel",
+                        "latest-request-wins",
+                        "history-generation",
+                    ]
+                    if self.text_generation_enabled:
+                        capabilities.append("text-generation")
                     await self._write(
                         writer,
                         lock,
@@ -362,12 +400,7 @@ class CloudBrokerServer:
                             "provider": PROVIDER,
                             "endpoint": ENDPOINT,
                             "models": sorted(ALLOWED_MODELS),
-                            "capabilities": [
-                                "candidate-id-only",
-                                "cancel",
-                                "latest-request-wins",
-                                "history-generation",
-                            ],
+                            "capabilities": capabilities,
                         },
                     )
                     continue
@@ -396,7 +429,14 @@ class CloudBrokerServer:
                         old_task.cancel()
                     pending.pop(old_id, None)
                 task = asyncio.create_task(
-                    self._run(cloud_request, key, latest, writer, lock)
+                    self._run(
+                        cloud_request,
+                        key,
+                        latest,
+                        writer,
+                        lock,
+                        client_capabilities,
+                    )
                 )
                 pending[cloud_request["request_id"]] = task
                 self._tasks.add(task)
@@ -417,7 +457,12 @@ class CloudBrokerServer:
         latest: Dict[Tuple[str, str], int],
         writer: asyncio.StreamWriter,
         lock: asyncio.Lock,
+        client_capabilities: Set[str],
     ) -> None:
+        sys.stderr.write(
+            f"[cloud] enter revision={cloud_request['revision']}\n"
+        )
+        sys.stderr.flush()
         started = monotonic()
         budget_seconds = cloud_request["deadline_ms"] / 1000
         try:
@@ -447,7 +492,19 @@ class CloudBrokerServer:
                 timeout=remaining,
             )
             decision = validate_decision(raw_decision, cloud_request)
-        except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
+        except asyncio.TimeoutError:
+            sys.stderr.write(
+                f"[cloud] timeout remaining={remaining:.2f}s\n"
+            )
+            sys.stderr.flush()
+            return
+        except asyncio.CancelledError:
+            sys.stderr.write("[cloud] cancelled\n")
+            sys.stderr.flush()
+            return
+        except Exception as exc:
+            sys.stderr.write(f"[cloud] error {type(exc).__name__}: {exc}\n")
+            sys.stderr.flush()
             return
         if latest.get(key) != cloud_request["revision"]:
             return
@@ -463,28 +520,50 @@ class CloudBrokerServer:
         elapsed = (monotonic() - started) * 1000
         if elapsed > cloud_request["deadline_ms"]:
             return
-        await self._write(
-            writer,
-            lock,
-            {
-                "schema_version": 1,
-                "type": "result",
-                "status": "ok",
-                "request_id": cloud_request["request_id"],
-                "composition_id": cloud_request["composition_id"],
-                "revision": cloud_request["revision"],
-                "app_session_id": cloud_request["app_session_id"],
-                "client_session_id": cloud_request["client_session_id"],
-                "candidate_pool_hash": cloud_request["candidate_pool_hash"],
-                "history_generation": cloud_request["history_generation"],
-                "decision": decision["decision"],
-                "candidate_id": decision["candidate_id"],
-                "confidence": decision["confidence"],
-                "reason": decision["reason"],
-                "model_id": cloud_request["model_id"],
-                "elapsed_ms": round(elapsed, 3),
-            },
+        # Decision observability: the log is a 0600 local file and never
+        # records pinyin or generated text, only the decision shape.
+        sys.stderr.write(
+            f"[cloud] decision={decision['decision']} "
+            f"elapsed={elapsed:.0f}ms\n"
         )
+        sys.stderr.flush()
+        if (
+            decision["decision"] == "generate"
+            and "text-generation" not in client_capabilities
+        ):
+            # Clients that did not advertise text-generation cannot decode a
+            # generate decision; a decode failure tears down their whole
+            # connection, so downgrade to keep instead.
+            decision = {
+                "decision": "keep",
+                "candidate_id": None,
+                "confidence": None,
+                "reason": "rime_rank",
+            }
+        response: Dict[str, Any] = {
+            "schema_version": 1,
+            "type": "result",
+            "status": "ok",
+            "request_id": cloud_request["request_id"],
+            "composition_id": cloud_request["composition_id"],
+            "revision": cloud_request["revision"],
+            "app_session_id": cloud_request["app_session_id"],
+            "client_session_id": cloud_request["client_session_id"],
+            "candidate_pool_hash": cloud_request["candidate_pool_hash"],
+            "history_generation": cloud_request["history_generation"],
+            "decision": decision["decision"],
+            "candidate_id": decision["candidate_id"],
+            "confidence": decision["confidence"],
+            "reason": decision["reason"],
+            "model_id": cloud_request["model_id"],
+            "elapsed_ms": round(elapsed, 3),
+        }
+        if decision["decision"] == "generate":
+            response["generated_text"] = decision["text"]
+            # Echo the request pinyin verbatim: the client compares byte
+            # for byte, and normalization would strip apostrophes.
+            response["generated_pinyin"] = cloud_request["pinyin"]
+        await self._write(writer, lock, response)
 
     def _prepare_history_request(
         self,

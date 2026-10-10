@@ -6,6 +6,7 @@ public enum HistoryCommitSource: String, Codable, Sendable {
     case localSemantic = "local_semantic"
     case cloudExact = "cloud_exact"
     case cloudFuzzy = "cloud_fuzzy"
+    case cloudGenerated = "cloud_generated"
     case rawPinyin = "raw_pinyin"
 }
 

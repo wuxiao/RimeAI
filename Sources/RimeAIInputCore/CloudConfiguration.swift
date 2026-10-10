@@ -9,6 +9,7 @@ public enum RimeAICloudConfiguration {
         string: "https://newapi.wwcn.fun/v1"
     )!
     public static let rankingModelIDs = [
+        "glm-5.3-flash",
         "glm-5.3",
     ]
     public static let defaultRankingModelID = rankingModelIDs[0]

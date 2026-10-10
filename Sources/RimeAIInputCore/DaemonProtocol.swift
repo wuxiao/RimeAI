@@ -459,9 +459,6 @@ public struct SemanticInferenceResult: Codable, Sendable {
         return nil
     }
 
-    public var candidatePresentation: SemanticCandidatePresentation {
-        candidatePresentation(characterSet: .simplified)
-    }
 
     public func candidatePresentation(
         characterSet: RimeAICharacterSetPreference
@@ -473,8 +470,18 @@ public struct SemanticInferenceResult: Codable, Sendable {
         }
         switch decision {
         case .rankedCandidate:
+            // The Rime dictionary contains traditional entries and the
+            // engine applies script options asynchronously, so a ranked
+            // candidate must also match the user's script preference.
+            let candidate = rankedCandidate ?? ""
+            guard SemanticCandidateScriptPolicy.allows(
+                text: candidate,
+                characterSet: characterSet
+            ) else {
+                return .scriptMismatch
+            }
             return .candidate(
-                text: rankedCandidate ?? "",
+                text: candidate,
                 decision: decision,
                 confidence: confidence
             )
@@ -550,14 +557,6 @@ public struct SemanticInferenceResult: Codable, Sendable {
         case nil:
             return false
         }
-    }
-
-    public func isDisplayable(
-        for token: CompositionToken,
-        candidates: [String]
-    ) -> Bool {
-        isValid(for: token, candidates: candidates)
-            && candidatePresentation.isSelectable
     }
 
     enum CodingKeys: String, CodingKey {

@@ -2,6 +2,7 @@ import argparse
 import asyncio
 from pathlib import Path
 import signal
+import sys
 from typing import Optional, Sequence
 
 from .qwen import QwenCandidateRanker
@@ -21,10 +22,35 @@ def _parser() -> argparse.ArgumentParser:
         / "runtime"
         / "rimeai-cloud.sock",
     )
+    parser.add_argument(
+        "--rime-dictionary",
+        type=Path,
+        default=None,
+        help="Rime dictionary for pinyin alignment of generated sentences",
+    )
     return parser
 
 
-async def _run(socket_path: Path) -> None:
+def _load_pinyin_guard(path: Optional[Path]):
+    if path is None:
+        return None
+    try:
+        from rimeai_eval.pinyin_guard import PinyinGuard
+
+        return PinyinGuard.from_rime_dictionary(path)
+    except Exception as exc:  # noqa: BLE001 - degrade, never fail startup
+        print(
+            f"rimeai-cloud-broker: pinyin guard unavailable ({exc}); "
+            "text generation stays disabled",
+            file=sys.stderr,
+        )
+        return None
+
+
+async def _run(
+    socket_path: Path,
+    rime_dictionary: Optional[Path],
+) -> None:
     history_root = (
         Path.home()
         / "Library"
@@ -32,13 +58,16 @@ async def _run(socket_path: Path) -> None:
         / "RimeAI"
         / "History"
     )
+    pinyin_guard = _load_pinyin_guard(rime_dictionary)
+    ranker = QwenCandidateRanker(pinyin_guard=pinyin_guard)
     server = CloudBrokerServer(
         socket_path,
-        QwenCandidateRanker(),
+        ranker,
         HistoryEmbeddingIndexer(
             history_root / "history.sqlite3",
             history_root / "history-hnsw-v1.bin",
         ),
+        text_generation_enabled=ranker.generation_enabled,
     )
     await server.start()
     stop = asyncio.Event()
@@ -53,7 +82,7 @@ async def _run(socket_path: Path) -> None:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _parser().parse_args(argv)
-    asyncio.run(_run(args.socket))
+    asyncio.run(_run(args.socket, args.rime_dictionary))
     return 0
 
 

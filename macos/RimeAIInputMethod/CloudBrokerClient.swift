@@ -25,11 +25,16 @@ final class CloudBrokerClient: @unchecked Sendable {
         let schemaVersion = 1
         let type = "hello"
         let clientID: String
+        /// Advertises that this client can decode `generate` decisions.
+        /// Brokers that do not know the capability simply ignore it, and
+        /// this client keeps working with brokers that never send it.
+        let capabilities = ["text-generation"]
 
         enum CodingKeys: String, CodingKey {
             case schemaVersion = "schema_version"
             case type
             case clientID = "client_id"
+            case capabilities
         }
     }
 

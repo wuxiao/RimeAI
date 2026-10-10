@@ -19,10 +19,12 @@ final class RimeAIInputController: IMKInputController,
     private var historyEnglishTokensLoading = false
     private var historyEnglishTokensGeneration: UInt64 = 0
     private var debounceWorkItem: DispatchWorkItem?
+    private var cloudDebounceWorkItem: DispatchWorkItem?
     private var pendingRequestID: String?
     private var pendingRequestStartedAt: TimeInterval?
     private var pendingCloudRequestID: String?
     private var pendingCloudBuildCancellation: CloudCandidateBuildCancellation?
+    private var cloudInFlight = false
     private var semanticPresentation: SemanticCandidatePresentation = .idle
     private var semanticHistorySource: HistoryCommitSource = .localSemantic
     private var semanticCloudCandidate: CloudCandidate?
@@ -191,30 +193,36 @@ final class RimeAIInputController: IMKInputController,
         case 51:
             return deleteBackward(client: client)
         case 53:
-            guard !composition.pinyin.isEmpty else {
+            guard composition.hasComposition else {
                 return false
             }
             resetComposition(client: client)
             return true
         case 36, 76:
-            guard !composition.pinyin.isEmpty else {
+            guard composition.hasComposition else {
                 return false
             }
             commitText(
-                composition.pinyin,
+                composition.rawPrefixString + composition.pinyin,
                 source: .rawPinyin,
-                client: client
+                client: client,
+                historyPinyin: composition.historyPinyin
             )
             return true
         case 48:
             guard let semanticCandidate = composition.semanticCandidate else {
-                return false
+                // 有 composition（含仅前缀）时 Tab 不能直通，否则宿主
+                // 对 marked range 的原生处理会吞掉编码区。
+                return composition.hasComposition
             }
             selectSemanticCandidate(semanticCandidate, client: client)
             return true
         case 49:
             if !composition.mainCandidates.isEmpty {
-                selectMainCandidate(index: 0, client: client)
+                selectMainCandidate(
+                    index: currentCommitCandidateIndex,
+                    client: client
+                )
                 return true
             }
             if let semanticCandidate = composition.semanticCandidate {
@@ -223,18 +231,43 @@ final class RimeAIInputController: IMKInputController,
             }
             guard composition.pinyin.isEmpty else {
                 commitText(
-                    composition.pinyin,
+                    composition.rawPrefixString + composition.pinyin,
                     source: .rawPinyin,
-                    client: client
+                    client: client,
+                    historyPinyin: composition.historyPinyin
                 )
                 return true
+            }
+            if composition.hasComposition {
+                // 仅前缀状态：Space 提交前缀定稿，空格字面随后按
+                // 现有宽度偏好处理。
+                flushCompositionAsFinal(client: client)
             }
             if let literal = transformedLiteral(" ") {
                 client.insertText(literal, replacementRange: notFoundRange)
                 return true
             }
             return false
+        case 27, 24:
+            guard composition.hasComposition else {
+                break
+            }
+            let moved = event.keyCode == 24
+                ? composition.advanceCandidatePage()
+                : composition.retreatCandidatePage()
+            if moved {
+                refreshCandidatePanelIfActive()
+            }
+            return true
         case 123, 124, 125, 126, 116, 121:
+            if composition.pinyin.isEmpty,
+               !composition.prefixSegments.isEmpty
+            {
+                // 仅前缀状态同样存在 marked text，方向键直通会使
+                // marked range 与状态失联，先吞掉。
+                invalidateCurrentResult()
+                return true
+            }
             invalidateCurrentResult()
             clearContextForCurrentApplication()
             return false
@@ -244,17 +277,24 @@ final class RimeAIInputController: IMKInputController,
 
         let characters = event.charactersIgnoringModifiers ?? ""
         if let candidateIndex = numericCandidateIndex(from: characters),
-           !composition.pinyin.isEmpty
+           composition.hasComposition
         {
-            guard candidateIndex < composition.mainCandidates.count else {
+            if !composition.pinyin.isEmpty {
+                if let globalIndex = composition.globalCandidateIndex(
+                    forPageSlot: candidateIndex + 1
+                ) {
+                    selectMainCandidate(index: globalIndex, client: client)
+                }
                 return true
             }
-            selectMainCandidate(index: candidateIndex, client: client)
-            return true
+            // 仅前缀状态无候选可选：先提交前缀，数字键作为普通
+            // 字符放行。
+            flushCompositionAsFinal(client: client)
+            return false
         }
 
         if event.modifierFlags.contains(.shift),
-           composition.pinyin.isEmpty
+           !composition.hasComposition
         {
             return false
         }
@@ -269,13 +309,27 @@ final class RimeAIInputController: IMKInputController,
             return true
         }
 
-        let literal = transformedLiteral(event.characters ?? characters)
-        if !composition.pinyin.isEmpty {
-            selectMainCandidate(index: 0, client: client)
-            if let literal {
-                client.insertText(literal, replacementRange: notFoundRange)
-                return true
-            }
+        let keyCharacters = event.characters ?? characters
+        if let scalar = keyCharacters.unicodeScalars.first,
+           keyCharacters.unicodeScalars.count == 1,
+           let literalText = RimeAIInputTextTransformer
+               .compositionLiteralText(
+                   scalar,
+                   preferences: settings.inputPreferences
+               )
+        {
+            // 标点/符号进入 composition，绝不触发上屏。
+            appendCompositionLiteral(literalText, client: client)
+            configureVoiceHotKey()
+            return true
+        }
+
+        let literal = transformedLiteral(keyCharacters)
+        if composition.hasComposition {
+            // 未映射符号：先整段提交（前缀定稿 + 当前内容）再放行
+            // 该符号，保持"符号出现在文本流"的既有语义。
+            flushCompositionAsFinal(client: client)
+            return false
         } else if let literal {
             client.insertText(literal, replacementRange: notFoundRange)
             return true
@@ -296,19 +350,32 @@ final class RimeAIInputController: IMKInputController,
         cancelVoiceDictation()
         adoptActiveClient(sender as AnyObject)
         if !composition.mainCandidates.isEmpty {
-            selectMainCandidate(index: 0, client: client)
+            selectMainCandidate(
+                index: currentCommitCandidateIndex,
+                client: client
+            )
         } else if !composition.pinyin.isEmpty {
             commitText(
-                composition.pinyin,
+                composition.rawPrefixString + composition.pinyin,
                 source: .rawPinyin,
-                client: client
+                client: client,
+                historyPinyin: composition.historyPinyin
+            )
+        } else if composition.hasComposition {
+            // 仅前缀状态（如刚输入标点后焦点切换）：提交定稿文本，
+            // 不残留 marked text。
+            commitText(
+                composition.committedPrefixText,
+                source: .rimeMain,
+                client: client,
+                historyPinyin: composition.prefixHistoryPinyin
             )
         }
     }
 
     override nonisolated func composedString(_ sender: Any!) -> Any! {
         MainActor.assumeIsolated {
-            composition.pinyin
+            composition.displayString
         }
     }
 
@@ -316,13 +383,15 @@ final class RimeAIInputController: IMKInputController,
         _ sender: Any!
     ) -> NSAttributedString! {
         let original = MainActor.assumeIsolated {
-            composition.pinyin
+            composition.displayString
         }
         return NSAttributedString(string: original)
     }
 
     override nonisolated func candidates(_ sender: Any!) -> [Any]! {
         MainActor.assumeIsolated {
+            // IMK 协议兜底回调，无实际显示路径；候选分页仅存在于
+            // 自绘 CandidatePanelController，此处维持全量返回。
             composition.mainCandidates
         }
     }
@@ -619,7 +688,7 @@ final class RimeAIInputController: IMKInputController,
         return settings.voiceEnabled
             && isHostActive
             && settings.isAIAllowed(for: bundleIdentifier)
-            && composition.pinyin.isEmpty
+            && !composition.hasComposition
             && client.markedRange().location == NSNotFound
             && !composition.isSecureInput
             && !IsSecureEventInputEnabled()
@@ -709,7 +778,7 @@ final class RimeAIInputController: IMKInputController,
         let rimeInput = rawInput.lowercased()
         let candidates = RimeEngine.shared.candidates(
             for: rimeInput,
-            limit: 10
+            limit: 50
         )
         let mixedSuggestion = resolveMixedComposition(
             rawInput: rawInput
@@ -720,7 +789,23 @@ final class RimeAIInputController: IMKInputController,
             if composition.pinyin.isEmpty {
                 return
             }
-            resetComposition(client: client)
+            if composition.prefixSegments.isEmpty {
+                resetComposition(client: client)
+            } else {
+                // 前缀仍在编辑中：只清活跃段，保留定稿前缀与显示。
+                composition.clearActivePinyin()
+                invalidateInference(clearPresentation: true)
+                mixedCompositionSuggestion = nil
+                client.setMarkedText(
+                    composition.displayString,
+                    selectionRange: NSRange(
+                        location: composition.displayString.utf16.count,
+                        length: 0
+                    ),
+                    replacementRange: notFoundRange
+                )
+                candidatePanel.hide()
+            }
             return
         }
         let token = composition.replaceInput(
@@ -732,9 +817,9 @@ final class RimeAIInputController: IMKInputController,
         semanticCloudCandidate = nil
         cloudSuggestionApplied = false
         client.setMarkedText(
-            rawInput,
+            composition.displayString,
             selectionRange: NSRange(
-                location: rawInput.utf16.count,
+                location: composition.displayString.utf16.count,
                 length: 0
             ),
             replacementRange: notFoundRange
@@ -829,18 +914,123 @@ final class RimeAIInputController: IMKInputController,
         }
     }
 
-    private func deleteBackward(client: any IMKTextInput) -> Bool {
-        guard !composition.pinyin.isEmpty else {
+    /// 提交基准索引：翻页后为当前页第一个候选，未翻页时即全局首选；
+    /// 页状态异常时回落 0。Space、IMK 强制提交与 flush-then-dispatch
+    /// 共用，保证"当前高亮项上屏"的体验一致。
+    private var currentCommitCandidateIndex: Int {
+        composition.globalCandidateIndex(forPageSlot: 1) ?? 0
+    }
+
+    /// 标点/符号进入 composition：定稿活跃段并追加字面量段，绝不
+    /// 触发上屏。面板与推断随之收敛到"仅前缀"状态。
+    private func appendCompositionLiteral(
+        _ text: String,
+        client: any IMKTextInput
+    ) {
+        cancelVoiceDictation()
+        invalidateInference(clearPresentation: true)
+        mixedCompositionSuggestion = nil
+        semanticCloudCandidate = nil
+        cloudSuggestionApplied = false
+        semanticPresentation = .unavailable
+        semanticContextCharacterCount = 0
+        composition.appendLiteral(text)
+        client.setMarkedText(
+            composition.displayString,
+            selectionRange: NSRange(
+                location: composition.displayString.utf16.count,
+                length: 0
+            ),
+            replacementRange: notFoundRange
+        )
+        candidatePanel.hide()
+        configureVoiceHotKey()
+    }
+
+    /// flush-then-dispatch：把整段 composition（定稿前缀 + 活跃内容）
+    /// 作为最终文本提交。活跃段有候选时取 Rime 首选，无候选（混输
+    /// 态等）回落原始字母，与 `appendLiteral` 的定稿语义一致；语义
+    /// 候选不参与，AI 候选仅可经 Tab 显式采用。
+    @discardableResult
+    private func flushCompositionAsFinal(client: any IMKTextInput) -> Bool {
+        guard composition.hasComposition else {
             return false
         }
-        var updated = composition.pinyin
-        updated.removeLast()
-        if updated.isEmpty {
-            resetComposition(client: client)
-        } else {
-            compositionInput(updated, client: client)
+        if !composition.pinyin.isEmpty {
+            if !composition.mainCandidates.isEmpty {
+                selectMainCandidate(
+                    index: currentCommitCandidateIndex,
+                    client: client
+                )
+            } else {
+                commitText(
+                    composition.rawPrefixString + composition.pinyin,
+                    source: .rawPinyin,
+                    client: client,
+                    historyPinyin: composition.historyPinyin
+                )
+            }
+            return true
         }
-        return true
+        return commitText(
+            composition.committedPrefixText,
+            source: .rimeMain,
+            client: client,
+            historyPinyin: composition.prefixHistoryPinyin
+        )
+    }
+
+    private func deleteBackward(client: any IMKTextInput) -> Bool {
+        if !composition.pinyin.isEmpty {
+            var updated = composition.pinyin
+            updated.removeLast()
+            if updated.isEmpty {
+                if composition.prefixSegments.isEmpty {
+                    resetComposition(client: client)
+                } else {
+                    // 活跃段删空但前缀仍在编辑：保留前缀与显示。
+                    composition.clearActivePinyin()
+                    invalidateInference(clearPresentation: true)
+                    mixedCompositionSuggestion = nil
+                    client.setMarkedText(
+                        composition.displayString,
+                        selectionRange: NSRange(
+                            location: composition.displayString.utf16.count,
+                            length: 0
+                        ),
+                        replacementRange: notFoundRange
+                    )
+                    candidatePanel.hide()
+                }
+            } else {
+                compositionInput(updated, client: client)
+            }
+            return true
+        }
+        if composition.popTrailingLiteral() != nil {
+            // 删除末尾标点，前缀其余部分保持。
+            invalidateInference(clearPresentation: true)
+            client.setMarkedText(
+                composition.displayString,
+                selectionRange: NSRange(
+                    location: composition.displayString.utf16.count,
+                    length: 0
+                ),
+                replacementRange: notFoundRange
+            )
+            return true
+        }
+        if let revived = composition.reviveLastPinyinSegment() {
+            // 拼音段复活为活跃段继续编辑；preserve 防止查询失败时
+            // 丢失整个 buffer。
+            compositionInput(
+                revived,
+                client: client,
+                preserveInputOnLookupFailure: true
+            )
+            return true
+        }
+        return false
     }
 
     private func scheduleInference(
@@ -917,19 +1107,54 @@ final class RimeAIInputController: IMKInputController,
                         token: token
                     )
                 }
-                if cloudAllowed {
-                    self.buildAndSendCloudInference(
-                        pinyin: pinyin,
-                        bundleIdentifier: currentBundleIdentifier,
-                        token: token,
-                        localRequestWasScheduled: localRequest != nil
-                    )
-                }
             }
         }
         debounceWorkItem = workItem
         DispatchQueue.main.asyncAfter(
             deadline: .now() + .milliseconds(100),
+            execute: workItem
+        )
+        if cloudAllowed {
+            scheduleCloudInference(
+                pinyin: pinyin,
+                bundleIdentifier: currentBundleIdentifier,
+                token: token,
+                localRequestWasScheduled: localRequest != nil
+            )
+        }
+    }
+
+    /// 击键停顿 1000 ms 后才发云端请求：latest-request-wins 下连续击键
+    /// 期间发出的云端请求必然被下一次击键取消，只会白白消耗一次 LLM
+    /// 往返；等停顿再发，大模型结果才有机会真正到达候选面板。
+    private func scheduleCloudInference(
+        pinyin: String,
+        bundleIdentifier: String,
+        token: CompositionToken,
+        localRequestWasScheduled: Bool
+    ) {
+        cloudDebounceWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self,
+                      self.composition.token == token,
+                      !self.composition.isSelecting,
+                      !self.composition.isSecureInput,
+                      !IsSecureEventInputEnabled()
+                else {
+                    return
+                }
+                self.buildAndSendCloudInference(
+                    pinyin: pinyin,
+                    bundleIdentifier: bundleIdentifier,
+                    token: token,
+                    localRequestWasScheduled: localRequestWasScheduled
+                )
+            }
+        }
+        cloudDebounceWorkItem = workItem
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + .milliseconds(1_000),
             execute: workItem
         )
     }
@@ -993,7 +1218,8 @@ final class RimeAIInputController: IMKInputController,
             }
             let pool = RimeCloudCandidatePoolBuilder.build(
                 for: pinyin,
-                cancellation: buildCancellation
+                cancellation: buildCancellation,
+                characterSet: self.settings.characterSet
             )
             let historyService = RimeAIHistoryService.shared
             let historySnapshot = try? historyService.contextSnapshot(
@@ -1001,16 +1227,17 @@ final class RimeAIInputController: IMKInputController,
                     maxRecentCharacters: 600,
                     maximumSnippetCount: 8
                 )
+            // 网络层不再设软上限：拼音拼出有把握的中文通常几秒完成，
+            // 长拼音/复杂整句建议需要更久。协议 clamp（4000ms）仍保
+            // 留着作最后保险，墙钟 deadlineAt 仍是 4s 但只在 envelope
+            // 接近超时后才截断（broker/客户端共享同一 deadline）。
             let remainingMilliseconds = max(
                 1,
-                min(
-                    800,
-                    Int(
-                        (
-                            deadlineAt
-                                - ProcessInfo.processInfo.systemUptime
-                        ) * 1_000
-                    )
+                Int(
+                    (
+                        deadlineAt
+                            - ProcessInfo.processInfo.systemUptime
+                    ) * 1_000
                 )
             )
             let request = CloudInferenceRequest(
@@ -1064,6 +1291,8 @@ final class RimeAIInputController: IMKInputController,
                 }
                 self.pendingCloudBuildCancellation = nil
                 self.settings.record(.cloudRequestStarted)
+                self.cloudInFlight = true
+                self.refreshCandidatePanelIfActive()
                 CloudBrokerClient.shared.infer(
                     request,
                     apiKey: apiKey
@@ -1090,9 +1319,13 @@ final class RimeAIInputController: IMKInputController,
         localRequestWasScheduled: Bool
     ) {
         guard pendingCloudRequestID == request.requestID else {
+            // 迟到/被替换的响应：计入 stale 而不是无声丢弃。
+            settings.record(.staleResult)
             return
         }
         pendingCloudRequestID = nil
+        cloudInFlight = false
+        refreshCandidatePanelIfActive()
         guard !IsSecureEventInputEnabled() else {
             enterSecureInputIfPossible()
             return
@@ -1134,6 +1367,18 @@ final class RimeAIInputController: IMKInputController,
             )
             return
         }
+        if result.decision == .generate {
+            // 响应确实回来了：无论后续展示与否都留下痕迹，避免
+            // 生成链路出现无法诊断的静默。
+            settings.record(.cloudGenerateReceived)
+            applyCloudGeneratedResult(
+                result,
+                request: request,
+                token: token,
+                localRequestWasScheduled: localRequestWasScheduled
+            )
+            return
+        }
         guard let candidate = result.selectedCandidate(for: request),
               let confidence = result.confidence
         else {
@@ -1143,8 +1388,24 @@ final class RimeAIInputController: IMKInputController,
             )
             return
         }
+        // 池内候选可能因 Rime 选项竞态混入繁体：就地转换为用户字形
+        // 后展示，而不是静默丢弃。
+        guard let renderedCandidate = SemanticCandidateScriptPolicy.sanitized(
+            text: candidate.text,
+            characterSet: settings.characterSet
+        ) else {
+            settings.record(.sentenceScriptMismatch)
+            applyCloudFallback(
+                localRequestWasScheduled: localRequestWasScheduled,
+                decision: .abstain
+            )
+            return
+        }
+        let displayText = renderedCandidate == candidate.text
+            ? candidate.text
+            : renderedCandidate
         guard composition.applySemanticCandidate(
-            candidate.text,
+            displayText,
             token: token,
             decision: .rankedCandidate
         ) else {
@@ -1154,10 +1415,22 @@ final class RimeAIInputController: IMKInputController,
         semanticHistorySource = candidate.source == .rimeFuzzy
             ? .cloudFuzzy
             : .cloudExact
-        semanticCloudCandidate = candidate
+        // 候选被字形修正过时本地保存渲染后的文本，Tab 上屏与展示一致。
+        let storedCandidate = renderedCandidate == candidate.text
+            ? candidate
+            : CloudCandidate(
+                id: candidate.id,
+                text: renderedCandidate,
+                source: candidate.source,
+                rimeIndex: candidate.rimeIndex,
+                consumedLength: candidate.consumedLength,
+                alignedPinyin: candidate.alignedPinyin,
+                editCost: candidate.editCost
+            )
+        semanticCloudCandidate = storedCandidate
         cloudSuggestionApplied = true
         semanticPresentation = .candidate(
-            text: candidate.text,
+            text: displayText,
             decision: .rankedCandidate,
             confidence: confidence
         )
@@ -1167,6 +1440,81 @@ final class RimeAIInputController: IMKInputController,
         if candidate.source == .rimeFuzzy {
             settings.record(.cloudCorrectionShown)
         }
+        refreshCandidatePanelIfActive()
+    }
+
+    /// 云端生成式整句：生成文本已通过 broker 字典对齐校验与客户端
+    /// 结构校验，这里先转换字形再处理与首选的重复——重复不再静默，
+    /// 而是明示云端表态，让 AI 参与始终可见。
+    private func applyCloudGeneratedResult(
+        _ result: CloudInferenceResponse,
+        request: CloudInferenceRequest,
+        token: CompositionToken,
+        localRequestWasScheduled: Bool
+    ) {
+        guard let text = result.generatedText,
+              let confidence = result.confidence
+        else {
+            applyCloudFallback(
+                localRequestWasScheduled: localRequestWasScheduled,
+                decision: .abstain
+            )
+            return
+        }
+        // 生成整句可能含繁体字：就地转换到用户字形后再比较与展示。
+        guard let renderedText = SemanticCandidateScriptPolicy.sanitized(
+            text: text,
+            characterSet: settings.characterSet
+        ) else {
+            settings.record(.sentenceScriptMismatch)
+            applyCloudFallback(
+                localRequestWasScheduled: localRequestWasScheduled,
+                decision: .abstain
+            )
+            return
+        }
+        // 与 Rime 首选相同：明示"云端与首选一致"而不是静默 keep，
+        // 用户在本地无法重排的场景（如完整候选不足）也能看到 AI 表态。
+        if renderedText == composition.mainCandidates.first {
+            semanticPresentation = .cloudSameTopCandidate
+            refreshCandidatePanelIfActive()
+            return
+        }
+        // 本地已展示相同文本（典型为本地整句建议先到）：不覆盖。
+        if cloudSuggestionApplied,
+           case let .candidate(displayed, _, _) = semanticPresentation,
+           displayed == renderedText
+        {
+            return
+        }
+        guard composition.applySemanticCandidate(
+            renderedText,
+            token: token,
+            decision: .sentenceSuggestion
+        ) else {
+            settings.record(.cloudInvalidResult)
+            return
+        }
+        let candidate = CloudCandidate(
+            text: renderedText,
+            source: .cloudGenerated,
+            rimeIndex: nil,
+            consumedLength: request.pinyin.count,
+            alignedPinyin: result.generatedPinyin ?? request.pinyin,
+            editCost: 0
+        )
+        semanticHistorySource = .cloudGenerated
+        semanticCloudCandidate = candidate
+        cloudSuggestionApplied = true
+        semanticPresentation = .candidate(
+            text: renderedText,
+            decision: .sentenceSuggestion,
+            confidence: confidence
+        )
+        semanticContextCharacterCount = request.recentContext.count
+            + request.historySnippets.reduce(0) { $0 + $1.text.count }
+        settings.record(.cloudSuggestionShown)
+        settings.record(.cloudGeneratedShown)
         refreshCandidatePanelIfActive()
     }
 
@@ -1282,6 +1630,30 @@ final class RimeAIInputController: IMKInputController,
             refreshCandidatePanelIfActive()
             return
         case .scriptMismatch:
+            // 字形不符不再静默丢弃：就地转换为用户设置的字形后照常
+            // 展示（繁体整句转简体），仅无法转换时才拒绝。
+            if let decision = result.resolvedDecision,
+               let sanitized = SemanticCandidateScriptPolicy.sanitized(
+                   text: result.displayCandidate,
+                   characterSet: settings.characterSet
+               ),
+               composition.applySemanticCandidate(
+                   sanitized,
+                   token: token,
+                   decision: decision
+               )
+            {
+                semanticPresentation = .candidate(
+                    text: sanitized,
+                    decision: decision,
+                    confidence: result.confidence ?? 0
+                )
+                semanticHistorySource = .localSemantic
+                semanticCloudCandidate = nil
+                settings.record(.resultShown)
+                refreshCandidatePanelIfActive()
+                return
+            }
             settings.record(.sentenceScriptMismatch)
             refreshCandidatePanelIfActive()
             return
@@ -1337,19 +1709,29 @@ final class RimeAIInputController: IMKInputController,
     }
 
     private func renderCandidatePanel(client: any IMKTextInput) {
+        let pageOffset = composition.candidatePage
+            * CompositionState.candidatesPerPage
         candidatePanel.update(
-            mainCandidates: composition.mainCandidates,
+            visibleCandidates: composition.visibleMainCandidates,
+            primaryCandidate: composition.mainCandidates.first,
+            pageLabel: composition.candidatePageCount > 1
+                ? "\(composition.candidatePage + 1)/\(composition.candidatePageCount)"
+                : nil,
             semanticPresentation: semanticPresentation,
             suggestionSource: semanticHistorySource,
             contextCharacterCount: semanticContextCharacterCount,
-            onMainSelection: { [weak self] index in
+            cloudInFlight: cloudInFlight,
+            onMainSelection: { [weak self] localIndex in
                 guard let self,
                       let client = self.activeClientObject
                         as? any IMKTextInput
                 else {
                     return
                 }
-                self.selectMainCandidate(index: index, client: client)
+                self.selectMainCandidate(
+                    index: pageOffset + localIndex,
+                    client: client
+                )
             },
             onSemanticSelection: { [weak self] in
                 guard let self,
@@ -1465,6 +1847,16 @@ final class RimeAIInputController: IMKInputController,
             enterSecureInput(client: client)
             return
         }
+        // 最后一道字形关口：能转换就转换（与展示一致），仅无法转换
+        // 时拒绝上屏。
+        guard let committedDisplay = SemanticCandidateScriptPolicy.sanitized(
+            text: candidate,
+            characterSet: settings.characterSet
+        ) else {
+            settings.record(.sentenceScriptMismatch)
+            return
+        }
+        let candidate = committedDisplay
         let decision = composition.semanticCandidateDecision
         if decision != .mixedComposition,
            let index = composition.mainCandidates.firstIndex(of: candidate)
@@ -1516,9 +1908,10 @@ final class RimeAIInputController: IMKInputController,
             committedCandidate = candidate
         }
         guard commitText(
-            committedCandidate,
+            composition.committedPrefixText + committedCandidate,
             source: semanticHistorySource,
-            client: client
+            client: client,
+            historyPinyin: composition.prefixHistoryPinyin + originalInput
         ) else {
             return
         }
@@ -1539,11 +1932,15 @@ final class RimeAIInputController: IMKInputController,
         settings.record(.semanticAccepted)
         if semanticHistorySource == .cloudExact
             || semanticHistorySource == .cloudFuzzy
+            || semanticHistorySource == .cloudGenerated
         {
             settings.record(.cloudSuggestionAccepted)
         }
         if semanticHistorySource == .cloudFuzzy {
             settings.record(.cloudCorrectionAccepted)
+        }
+        if semanticHistorySource == .cloudGenerated {
+            settings.record(.cloudGeneratedAccepted)
         }
         if decision == .sentenceSuggestion {
             settings.record(.semanticSentenceAccepted)
@@ -1579,12 +1976,20 @@ final class RimeAIInputController: IMKInputController,
                 enterSecureInput(client: client)
             },
             insertConfirmedPrefix: { [self] text, pinyin in
-                insertCommittedText(
-                    text,
-                    pinyin: pinyin,
+                let fullText = composition.committedPrefixText + text
+                let fullPinyin = composition.prefixHistoryPinyin + pinyin
+                let inserted = insertCommittedText(
+                    fullText,
+                    pinyin: fullPinyin,
                     source: source,
                     client: client
                 )
+                if inserted {
+                    // 前缀已并入正式文本：立即冲刷，防止后续提交把
+                    // 同一段内容二次插入。
+                    composition.flushPrefix()
+                }
+                return inserted
             },
             retainMarkedComposition: { [self] remainingInput in
                 compositionInput(
@@ -1610,12 +2015,12 @@ final class RimeAIInputController: IMKInputController,
     private func commitText(
         _ text: String,
         source: HistoryCommitSource,
-        client: any IMKTextInput
+        client: any IMKTextInput,
+        historyPinyin: String
     ) -> Bool {
-        let pinyin = composition.pinyin
         guard insertCommittedText(
             text,
-            pinyin: pinyin,
+            pinyin: historyPinyin,
             source: source,
             client: client
         ) else {
@@ -1759,6 +2164,9 @@ final class RimeAIInputController: IMKInputController,
     private func invalidateInference(clearPresentation: Bool = false) {
         debounceWorkItem?.cancel()
         debounceWorkItem = nil
+        cloudDebounceWorkItem?.cancel()
+        cloudDebounceWorkItem = nil
+        cloudInFlight = false
         if let pendingRequestID {
             DaemonClient.shared.cancel(requestID: pendingRequestID)
             settings.record(.requestCancelled)
@@ -1902,7 +2310,7 @@ final class RimeAIInputController: IMKInputController,
               applicationSessionID(for: inputClient) == appSessionID,
               currentBundleIdentifier
                 == (inputClient.bundleIdentifier() ?? "unknown-client"),
-              composition.pinyin.isEmpty,
+              !composition.hasComposition,
               inputClient.markedRange().location == NSNotFound,
               !composition.isSecureInput,
               !IsSecureEventInputEnabled(),
