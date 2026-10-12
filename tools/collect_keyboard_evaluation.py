@@ -9,7 +9,8 @@ import subprocess
 import sys
 import tempfile
 import time
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from collections.abc import Sequence
+from typing import Any
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -92,7 +93,7 @@ def send_key(key: str) -> None:
     )
 
 
-def type_composition(scenario: Dict[str, Any]) -> None:
+def type_composition(scenario: dict[str, Any]) -> None:
     lines = [
         'tell application "System Events"',
         'tell process "TextEdit"',
@@ -111,7 +112,7 @@ def select_keys(keys: Sequence[str]) -> None:
         send_key(key)
 
 
-def displayed_candidates() -> Tuple[List[str], str]:
+def displayed_candidates() -> tuple[list[str], str]:
     script = (
         'tell application "System Events"\n'
         'tell process "RimeAIInputMethod"\n'
@@ -134,7 +135,7 @@ def displayed_candidates() -> Tuple[List[str], str]:
     for _ in range(20):
         raw = run_apple_script(script)
         source = "displayed-panel-top10"
-        candidates: List[str] = []
+        candidates: list[str] = []
         for line in raw.splitlines():
             match = NUMBERED_CANDIDATE.match(line)
             if match:
@@ -160,8 +161,8 @@ def undo() -> None:
     )
 
 
-def load_scenarios(path: Path) -> List[Dict[str, Any]]:
-    scenarios: List[Dict[str, Any]] = []
+def load_scenarios(path: Path) -> list[dict[str, Any]]:
+    scenarios: list[dict[str, Any]] = []
     identifiers = set()
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
@@ -240,25 +241,30 @@ def require_selected_input_method() -> None:
 def collect(
     scenarios_path: Path,
     output_path: Path,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     if output_path.resolve() == scenarios_path.resolve():
         raise KeyboardCollectionError("--output must not overwrite scenarios")
     if sys.platform != "darwin":
         raise KeyboardCollectionError("keyboard collection requires macOS")
     require_selected_input_method()
     scenarios = load_scenarios(scenarios_path)
-    observations: List[Dict[str, Any]] = []
+    observations: list[dict[str, Any]] = []
     for scenario in scenarios:
         clear_document()
         type_composition(scenario)
         candidates, pool_source = displayed_candidates()
         candidate_in_pool = scenario["pool_text"] in candidates
-        candidate_rank: Optional[int] = None
+        candidate_rank: int | None = None
         keys = list(scenario["selection_keys"])
         if candidate_in_pool:
             candidate_rank = candidates.index(scenario["pool_text"]) + 1
             if scenario["category"] != "mixed-composition":
-                keys = ["space" if candidate_rank == 1 else str(candidate_rank)]
+                # 候选面板每页 5 项，数字键只映射页内槽位：目标在后续
+                # 页时先按 `=`（向后翻页）再按页内数字键。
+                page, slot = divmod(candidate_rank - 1, 5)
+                keys = ["="] * page + (
+                    ["space"] if slot == 0 and page == 0 else [str(slot + 1)]
+                )
                 if scenario["category"] == "partial-selection":
                     keys.append("space")
 
@@ -269,7 +275,7 @@ def collect(
             scenario["category"] != "delete-composition"
             and final_text == scenario["expected_text"]
         )
-        text_after_revert: Optional[str] = None
+        text_after_revert: str | None = None
         reverted = False
         if scenario["revert_probe"]:
             undo()
@@ -291,7 +297,7 @@ def collect(
             final_text = read_document()
             backspace_cleared = final_text == scenario["expected_text"]
 
-        record: Dict[str, Any] = {
+        record: dict[str, Any] = {
             "schema_version": 1,
             "id": scenario["id"],
             "category": scenario["category"],

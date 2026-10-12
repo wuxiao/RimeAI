@@ -587,16 +587,17 @@ private final class PerformanceTracerBundleVerifierFixture {
             + VoicePerformanceTracerBundleLayout.driverExecutableSuffix
         let helperPath = bundlePath
             + VoicePerformanceTracerBundleLayout.helperExecutableSuffix
+        let policyPrefix = "{\"cold_trials\":3,"
+            + "\"collector\":{\"expected_cdhash\":\"\(String(repeating: "1", count: 40))\","
+            + "\"expected_executable_path\":\"\(collectorPath)\","
+            + "\"expected_executable_sha256\":\"\(String(repeating: "a", count: 64))\","
+            + "\"expected_signing_identifier\":\"\(VoicePerformanceMeasurementPolicy.requiredCollectorSigningIdentifier)\","
+            + "\"expected_team_identifier\":\"ABCDEFGHIJ\"},"
+            + "\"control_protocol\":{\"id\":\"\(protocolID)\",\"sha256\":\"\(protocolSHA)\"},"
+            + "\"control_session_nonce\":\"\(String(repeating: "7", count: 64))\","
+            + "\"control_socket_path\":\"/tmp/rimeai-performance.sock\","
         measurementPolicyData = Data(
-            ("{\"cold_trials\":3,"
-                + "\"collector\":{\"expected_cdhash\":\"\(String(repeating: "1", count: 40))\","
-                + "\"expected_executable_path\":\"\(collectorPath)\","
-                + "\"expected_executable_sha256\":\"\(String(repeating: "a", count: 64))\","
-                + "\"expected_signing_identifier\":\"\(VoicePerformanceMeasurementPolicy.requiredCollectorSigningIdentifier)\","
-                + "\"expected_team_identifier\":\"ABCDEFGHIJ\"},"
-                + "\"control_protocol\":{\"id\":\"\(protocolID)\",\"sha256\":\"\(protocolSHA)\"},"
-                + "\"control_session_nonce\":\"\(String(repeating: "7", count: 64))\","
-                + "\"control_socket_path\":\"/tmp/rimeai-performance.sock\","
+            (policyPrefix
                 + "\"driver\":{\"expected_cdhash\":\"\(String(repeating: "2", count: 40))\","
                 + "\"expected_executable_path\":\"\(driverPath)\","
                 + "\"expected_executable_sha256\":\"\(String(repeating: "b", count: 64))\","

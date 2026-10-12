@@ -171,42 +171,20 @@ struct RimeAISettingsStoreTests {
         ])
     }
 
-    @Test("personal English learning stores normalized bounded tokens only")
+    @Test("personal English tokens normalize to bounded lowercase tokens only")
     func personalEnglishTokens() {
-        let (store, _) = makeStore()
+        let (store, defaults) = makeStore()
 
-        store.learnPersonalEnglishTokens([
-            "API", "timeout", "x", "包含中文", String(repeating: "a", count: 33),
-        ])
+        // Learning moved to the L1 phrasebook (adoptUserTokens); the
+        // legacy defaults key only needs to read back normalized.
+        defaults.set(
+            ["api", "timeout", "x", "包含中文", String(repeating: "a", count: 33)],
+            forKey: RimeAISettingsStore.Keys.personalEnglishTokens
+        )
 
         #expect(store.personalEnglishTokens == ["api", "timeout"])
         store.resetAllProductData()
         #expect(store.personalEnglishTokens.isEmpty)
-    }
-
-    @Test("personal English learning evicts the oldest token at capacity")
-    func personalEnglishTokenEviction() {
-        let (store, _) = makeStore()
-        for index in 0 ..< 256 {
-            store.learnPersonalEnglishTokens([
-                "term\(Self.letters(for: index))"
-            ])
-        }
-        let oldest = "termaaa"
-        store.learnPersonalEnglishTokens(["zzzznew"])
-
-        #expect(store.personalEnglishTokens.count == 256)
-        #expect(!store.personalEnglishTokens.contains(oldest))
-        #expect(store.personalEnglishTokens.contains("zzzznew"))
-    }
-
-    private static func letters(for value: Int) -> String {
-        let scalars = [
-            UnicodeScalar(97 + (value / 676) % 26)!,
-            UnicodeScalar(97 + (value / 26) % 26)!,
-            UnicodeScalar(97 + value % 26)!,
-        ]
-        return String(String.UnicodeScalarView(scalars))
     }
 
     @Test("diagnostic counters do not masquerade as policy changes")
@@ -287,7 +265,7 @@ struct RimeAISettingsStoreTests {
         store.voiceShortcut = shortcut
 
         let snapshot = store.exportSnapshot()
-        #expect(snapshot.schemaVersion == 6)
+        #expect(snapshot.schemaVersion == 8)
         #expect(snapshot.voiceEnabled == false)
         #expect(snapshot.voiceRimeHotwordsEnabled)
         #expect(snapshot.voiceShortcut == shortcut)
@@ -614,7 +592,7 @@ struct RimeAISettingsStoreTests {
 
     @Test("restore defaults is one settings change and preserves learned data")
     func restoreDefaultsPreservesNonSettingsData() throws {
-        let (store, _) = makeStore()
+        let (store, defaults) = makeStore()
         store.aiEnabled = false
         store.cloudConfigured = true
         store.voiceEnabled = true
@@ -625,7 +603,10 @@ struct RimeAISettingsStoreTests {
         store.contextPolicy = .smart
         store.disabledAIApplications = ["com.example.NoAI"]
         store.record(.resultShown)
-        store.learnPersonalEnglishTokens(["retained"])
+        defaults.set(
+            ["retained"],
+            forKey: RimeAISettingsStore.Keys.personalEnglishTokens
+        )
         let changes = NotificationCounter()
         let observer = NotificationCenter.default.addObserver(
             forName: .rimeAISettingsDidChange,
@@ -655,17 +636,143 @@ struct RimeAISettingsStoreTests {
         let errors: [RimeAISettingsImportError] = [
             .invalidDocument,
             .documentTooLarge,
-            .unsupportedSchemaVersion(7),
+            .unsupportedSchemaVersion(8),
             .offlineLockRequired,
             .unsupportedCloudProvider,
             .unsupportedCloudEndpoint,
             .unsupportedCloudModelID,
             .cloudCredentialRequired,
             .voiceRequiresAI,
+            .continuationRequiresAI,
             .applicationPolicyLimitExceeded,
         ]
         for error in errors {
             #expect(error.errorDescription?.isEmpty == false)
         }
+    }
+
+    @Test("continuation suggestion is an explicit opt-in, off by default")
+    func continuationSuggestionDefaultsFalse() {
+        let (store, _) = makeStore()
+
+        #expect(!store.continuationSuggestionEnabled)
+        store.continuationSuggestionEnabled = true
+        #expect(store.continuationSuggestionEnabled)
+        store.resetAllProductData()
+        #expect(!store.continuationSuggestionEnabled)
+    }
+
+    @Test("schema 7 exports carry the continuation opt-in; 5/6 imports migrate")
+    func continuationExportRoundTripBumpsSchemaVersion() throws {
+        let (store, _) = makeStore()
+        store.continuationSuggestionEnabled = true
+        let exported = store.exportSnapshot()
+        #expect(exported.schemaVersion == 8)
+        #expect(exported.continuationSuggestionEnabled)
+
+        let (destination, _) = makeStore()
+        try destination.applyImport(exported, hasCloudCredential: false)
+        #expect(destination.continuationSuggestionEnabled)
+        #expect(destination.exportSnapshot() == exported)
+
+        // schema 6 documents predate the key: migrate to the default
+        var object = try #require(
+            JSONSerialization.jsonObject(
+                with: JSONEncoder().encode(exported)
+            ) as? [String: Any]
+        )
+        object["schemaVersion"] = 6
+        object.removeValue(forKey: "continuationSuggestionEnabled")
+        let legacySix = try JSONSerialization.data(withJSONObject: object)
+        let (sixStore, _) = makeStore()
+        try sixStore.applyImport(legacySix, hasCloudCredential: false)
+        #expect(!sixStore.continuationSuggestionEnabled)
+        #expect(sixStore.exportSnapshot().schemaVersion == 8)
+
+        // schema 5 documents keep the voice shortcut migration
+        let legacyFive = RimeAISettingsExport(
+            schemaVersion: 5,
+            aiEnabled: true,
+            offlineLockEnabled: true,
+            contextPolicy: .standard,
+            disabledAIApplications: [],
+            disabledContextApplications: [],
+            diagnostics: [:]
+        )
+        var fiveObject = try #require(
+            JSONSerialization.jsonObject(
+                with: JSONEncoder().encode(legacyFive)
+            ) as? [String: Any]
+        )
+        fiveObject.removeValue(forKey: "voiceShortcut")
+        fiveObject.removeValue(forKey: "continuationSuggestionEnabled")
+        let (fiveStore, _) = makeStore()
+        try fiveStore.applyImport(
+            JSONSerialization.data(withJSONObject: fiveObject),
+            hasCloudCredential: false
+        )
+        #expect(fiveStore.voiceShortcut == .default)
+        #expect(!fiveStore.continuationSuggestionEnabled)
+    }
+
+    @Test("continuation opt-in requires AI on import and stays atomic")
+    func continuationImportRequiresAI() throws {
+        let (store, _) = makeStore()
+        store.contextPolicy = .smart
+        let before = store.exportSnapshot()
+        let snapshot = RimeAISettingsExport(
+            aiEnabled: false,
+            offlineLockEnabled: true,
+            continuationSuggestionEnabled: true,
+            contextPolicy: .standard,
+            disabledAIApplications: [],
+            disabledContextApplications: [],
+            diagnostics: [:]
+        )
+
+        #expect(throws: RimeAISettingsImportError.continuationRequiresAI) {
+            try store.applyImport(snapshot, hasCloudCredential: false)
+        }
+        #expect(store.exportSnapshot() == before)
+    }
+
+    @Test("schema 8 exports carrying the removed pinyinAlignment import cleanly")
+    func legacyPinyinAlignmentExportImports() throws {
+        let (store, _) = makeStore()
+        let exported = store.exportSnapshot()
+        #expect(exported.schemaVersion == 8)
+
+        // The alignment tier was removed without a schema bump: older
+        // schema-8 documents still carry `pinyinAlignment`, which the
+        // decoder must ignore (unknown keys never fail Codable).
+        var object = try #require(
+            JSONSerialization.jsonObject(
+                with: JSONEncoder().encode(exported)
+            ) as? [String: Any]
+        )
+        object["pinyinAlignment"] = "loose"
+        try store.applyImport(
+            JSONSerialization.data(withJSONObject: object),
+            hasCloudCredential: false
+        )
+        #expect(store.exportSnapshot() == exported)
+
+        // Round-tripping never re-introduces the field.
+        let roundTripped = try #require(
+            JSONSerialization.jsonObject(
+                with: JSONEncoder().encode(store.exportSnapshot())
+            ) as? [String: Any]
+        )
+        #expect(roundTripped["pinyinAlignment"] == nil)
+    }
+
+    @Test("history commit source continuation raw value round trips")
+    func historyCommitSourceContinuationRawValue() throws {
+        #expect(HistoryCommitSource.continuation.rawValue == "continuation")
+        let decoded = try JSONDecoder().decode(
+            HistoryCommitSource.self,
+            from: Data("\"continuation\"".utf8)
+        )
+        #expect(decoded == .continuation)
     }
 }

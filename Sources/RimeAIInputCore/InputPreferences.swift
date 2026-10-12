@@ -176,6 +176,21 @@ public enum RimeAIInputTextTransformer {
         return nil
     }
 
+    /// 空缓冲（composition 尚未开始，即该键是第一个字符）时：标点表
+    /// 字符直接上屏的文本；返回 nil 表示该键不走直接上屏路径（仍按
+    /// composition 字面量或放行处理）。文本沿用 `compositionLiteralText`
+    /// 的映射（chinese 风格转全角标点，western 风格原样）。
+    public static func leadingLiteralCommitText(
+        _ scalar: UnicodeScalar,
+        hasComposition: Bool,
+        preferences: RimeAIInputPreferences
+    ) -> String? {
+        guard !hasComposition, isPunctuationLiteral(scalar) else {
+            return nil
+        }
+        return compositionLiteralText(scalar, preferences: preferences)
+    }
+
     /// Returns a replacement only when the literal should be consumed by the
     /// input method. Letters remain available to the pinyin composition path.
     public static func transformedLiteral(

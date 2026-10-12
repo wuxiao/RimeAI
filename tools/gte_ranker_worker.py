@@ -13,7 +13,7 @@ from transformers import AutoTokenizer
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from rimeai_eval.candidate_policy import (
+from rimeai_runtime.candidate_policy import (
     build_semantic_pairs,
     partition_full_length_candidates,
 )

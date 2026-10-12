@@ -137,6 +137,65 @@ struct MixedCompositionResolverTests {
         #expect(suggestion == nil)
     }
 
+    @Test("leading letters that cannot begin a pinyin syllable form a raw English prefix")
+    func leadingNonPinyinPrefix() {
+        let resolver = MixedCompositionResolver()
+        let suggestion = resolver.resolve(rawInput: "inihao") { pinyin, _ in
+            ["nihao": ["你好"]][pinyin] ?? []
+        }
+
+        #expect(suggestion?.text == "i你好")
+        #expect(suggestion?.segments == [
+            MixedCompositionSegment(kind: .ascii, rawText: "i", renderedText: "i"),
+            MixedCompositionSegment(kind: .pinyin, rawText: "nihao", renderedText: "你好"),
+        ])
+    }
+
+    @Test("a leading i/u/v run stays one raw prefix")
+    func leadingNonPinyinRun() {
+        let resolver = MixedCompositionResolver()
+        let suggestion = resolver.resolve(rawInput: "uvwang") { pinyin, _ in
+            ["wang": ["王"]][pinyin] ?? []
+        }
+
+        #expect(suggestion?.text == "uv王")
+        #expect(suggestion?.segments == [
+            MixedCompositionSegment(kind: .ascii, rawText: "uv", renderedText: "uv"),
+            MixedCompositionSegment(kind: .pinyin, rawText: "wang", renderedText: "王"),
+        ])
+    }
+
+    @Test("a raw prefix requires the remainder to be complete pinyin")
+    func rawPrefixRequiresPinyinRemainder() {
+        let resolver = MixedCompositionResolver()
+        let suggestion = resolver.resolve(rawInput: "iphone") { pinyin, _ in
+            ["phone": ["不支持"]][pinyin] ?? []
+        }
+
+        #expect(suggestion == nil)
+    }
+
+    @Test("raw lead split separates non-initial letters from a pinyin remainder")
+    func rawLeadSplit() {
+        let split1 = MixedCompositionResolver.rawLeadSplit(of: "inihao")
+        #expect(split1?.lead == "i")
+        #expect(split1?.remainder == "nihao")
+        let split2 = MixedCompositionResolver.rawLeadSplit(of: "uvwang")
+        #expect(split2?.lead == "uv")
+        #expect(split2?.remainder == "wang")
+        let split3 = MixedCompositionResolver.rawLeadSplit(of: "UVnihao")
+        #expect(split3?.lead == "uv")
+        #expect(split3?.remainder == "nihao")
+    }
+
+    @Test("raw lead split requires a complete pinyin remainder")
+    func rawLeadSplitRejectsNonPinyinRemainder() {
+        #expect(MixedCompositionResolver.rawLeadSplit(of: "iphone") == nil)
+        #expect(MixedCompositionResolver.rawLeadSplit(of: "iuu") == nil)
+        #expect(MixedCompositionResolver.rawLeadSplit(of: "nihao") == nil)
+        #expect(MixedCompositionResolver.rawLeadSplit(of: "") == nil)
+    }
+
     @Test("candidate lookups have an independent hard budget")
     func lookupBudget() {
         let resolver = MixedCompositionResolver(

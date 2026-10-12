@@ -49,6 +49,13 @@ class BeamSuggestion:
     reason: str = "suggestion"
 
 
+@dataclass(frozen=True)
+class SegmentDecodeInput:
+    pinyin: str
+    separator: str
+    committed_text: str
+
+
 class BeamSentenceDecoder:
     def __init__(
         self,
@@ -232,6 +239,62 @@ class BeamSentenceDecoder:
             )
         )
         return BeamSuggestion(text, confidence, margin, "suggestion")
+
+    def suggest_segments(
+        self,
+        *,
+        context: str,
+        segments: Sequence[SegmentDecodeInput],
+        active_candidates: Sequence[str],
+    ) -> BeamSuggestion:
+        if not active_candidates:
+            return BeamSuggestion("", 0.0, 0.0, "no_candidate")
+        confidences: List[float] = []
+        margins: List[float] = []
+        pieces: List[str] = []
+        accumulated = context
+        for index, segment in enumerate(segments):
+            is_last = index == len(segments) - 1
+            if is_last:
+                baseline = active_candidates[0]
+                candidates: Sequence[str] = active_candidates
+            elif segment.committed_text:
+                baseline = segment.committed_text
+                candidates = [segment.committed_text]
+            else:
+                baseline = ""
+                candidates = []
+            suggestion = (
+                self.suggest(
+                    context=accumulated,
+                    pinyin=segment.pinyin,
+                    candidates=candidates,
+                )
+                if candidates
+                else None
+            )
+            if suggestion is not None and suggestion.text:
+                segment_text = suggestion.text
+                confidences.append(suggestion.confidence)
+                margins.append(suggestion.margin)
+            else:
+                segment_text = baseline
+                if (
+                    suggestion is not None
+                    and suggestion.reason == "below_threshold"
+                ):
+                    margins.append(suggestion.margin)
+            pieces.append(segment_text + segment.separator)
+            accumulated += segment_text + segment.separator
+        text = "".join(pieces)
+        if len(text) > MAX_SENTENCE_CHARACTERS:
+            return BeamSuggestion("", 0.0, 0.0, "too_long")
+        if not margins:
+            return BeamSuggestion("", 0.0, 0.0, "no_change")
+        margin = min(margins)
+        if margin < self.config.threshold:
+            return BeamSuggestion("", 0.0, margin, "below_threshold")
+        return BeamSuggestion(text, min(confidences), margin, "suggestion")
 
 
 def train_beam_decoder_config(

@@ -5,7 +5,6 @@ from pathlib import Path
 import re
 from typing import Dict, FrozenSet, List, Optional, Set
 
-
 _HAN_TEXT = re.compile(r"^[\u3400-\u9fff]+$")
 _PINYIN = re.compile(r"^[a-zv]+$")
 
@@ -88,28 +87,26 @@ class PinyinGuard:
         ):
             return None
 
-        paths = {"": []}
+        paths = {0: []}
         for character in text:
             variants = self.pronunciations.get(character)
             if not variants:
                 return None
             next_paths = {}
-            for prefix, parts in paths.items():
+            for offset, parts in paths.items():
                 for variant in sorted(variants):
                     # Match Rime's abbreviated pinyin: a syllable may be
                     # typed in full or reduced to its first letter.
-                    forms = (
-                        (variant,) if len(variant) == 1
-                        else (variant, variant[0])
-                    )
-                    for form in forms:
-                        combined = prefix + form
-                        if normalized.startswith(combined):
+                    forms = [variant]
+                    if len(variant) > 1:
+                        forms.append(variant[0])
+                    for form in dict.fromkeys(forms):
+                        if normalized.startswith(form, offset):
                             next_paths.setdefault(
-                                combined,
+                                offset + len(form),
                                 parts + [variant],
                             )
             if not next_paths:
                 return None
             paths = next_paths
-        return paths.get(normalized)
+        return paths.get(len(normalized))

@@ -3,63 +3,73 @@
 from __future__ import annotations
 
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
-import ctypes
+import contextlib
 import json
 import math
 import os
-from pathlib import Path
 import re
-import socket
+import sqlite3
 import stat
 import sys
-import struct
+from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from time import monotonic
-from typing import Any, Dict, Optional, Protocol, Set, Tuple
+from typing import Any, Protocol
 
-from .qwen import ALLOWED_MODELS, ENDPOINT, PROVIDER
-from .history_index import HistoryEmbeddingIndexer
+from rimeai_runtime.localipc import (
+    AlreadyListeningError,
+    ExistingSocketUnverifiableError,
+    NotASocketPathError,
+    PeerIdentityError,
+    RuntimeDirectoryIsSymlinkError,
+    SocketPathTooLongError,
+    peer_uid,
+    prepare_unix_listener_socket,
+)
+
+from rimeai_daemon.segment_policy import (
+    split_segmented_text,
+    validate_pinyin_segments,
+)
+
+from .history_index import (
+    EMBEDDING_INDEXING_ENABLED,
+    HistoryEmbeddingIndexer,
+)
+from .qwen import (
+    ALLOWED_MODELS,
+    CONTINUATION_ALLOWED_MODELS,
+    ENDPOINT,
+    GENERATE_MAXIMUM_CHARACTERS,
+    PROVIDER,
+    _han_count,
+)
 
 
 class CandidateRanker(Protocol):
-    def rank(self, request: Dict[str, Any]) -> Dict[str, Any]: ...
+    def rank(
+        self, cloud_request: dict[str, Any]
+    ) -> dict[str, Any]: ...
+
+    def rank_continuation(
+        self, cloud_request: dict[str, Any]
+    ) -> dict[str, Any]: ...
+
+    def embed_texts(
+        self, texts: Sequence[str]
+    ) -> list[list[float]]: ...
 
 
 class CloudBrokerConfigurationError(ValueError):
     pass
 
 
-def _peer_uid(file_descriptor: int) -> int:
-    try:
-        libc = ctypes.CDLL(None, use_errno=True)
-        getpeereid = libc.getpeereid
-    except AttributeError:
-        if not hasattr(socket, "SO_PEERCRED"):
-            raise CloudBrokerConfigurationError("peer identity is unavailable")
-        peer = socket.socket(fileno=os.dup(file_descriptor))
-        try:
-            raw = peer.getsockopt(
-                socket.SOL_SOCKET,
-                socket.SO_PEERCRED,
-                struct.calcsize("3i"),
-            )
-        finally:
-            peer.close()
-        _, uid, _ = struct.unpack("3i", raw)
-        return uid
-    uid = ctypes.c_uint()
-    gid = ctypes.c_uint()
-    if getpeereid(file_descriptor, ctypes.byref(uid), ctypes.byref(gid)) != 0:
-        number = ctypes.get_errno()
-        raise OSError(number, os.strerror(number))
-    return int(uid.value)
-
-
 def _bounded_string(value: Any, maximum: int) -> bool:
     return isinstance(value, str) and 0 < len(value.encode()) <= maximum
 
 
-def validate_request(message: Any) -> Dict[str, Any]:
+def validate_request(message: Any) -> dict[str, Any]:
     if not isinstance(message, dict):
         raise ValueError("request must be an object")
     if message.get("type") != "inference":
@@ -72,12 +82,14 @@ def validate_request(message: Any) -> Dict[str, Any]:
         "bundle_id": 512,
         "app_session_id": 512,
         "client_session_id": 256,
-        "candidate_pool_hash": 128,
         "pinyin": 256,
     }.items():
         if not _bounded_string(message.get(field), maximum):
             raise ValueError(f"{field} is invalid")
-    if re.fullmatch(r"[a-z']+", message["pinyin"]) is None:
+    # The raw mixed composition (Chinese pinyin interleaved with English
+    # words) is the input, so letters of both cases are accepted — mirror
+    # of Swift CloudInferenceRequest.isValid (tier removal 2026-10-13).
+    if re.fullmatch(r"[A-Za-z']+", message["pinyin"]) is None:
         raise ValueError("pinyin is invalid")
     if message.get("model_id") not in ALLOWED_MODELS:
         raise ValueError("model is not allowed")
@@ -85,9 +97,9 @@ def validate_request(message: Any) -> Dict[str, Any]:
     if (
         not isinstance(deadline, int)
         or isinstance(deadline, bool)
-        or not 1 <= deadline <= 4000
+        or not 1 <= deadline <= 30000
     ):
-        raise ValueError("deadline must be from 1 to 4000 ms")
+        raise ValueError("deadline must be from 1 to 30000 ms")
     revision = message.get("revision")
     generation = message.get("history_generation")
     if (
@@ -101,7 +113,6 @@ def validate_request(message: Any) -> Dict[str, Any]:
         raise ValueError("revision or history generation is invalid")
     recent = message.get("recent_context")
     snippets = message.get("history_snippets")
-    candidates = message.get("candidates")
     if (
         not isinstance(recent, str)
         or len(recent) > 600
@@ -124,49 +135,98 @@ def validate_request(message: Any) -> Dict[str, Any]:
             or not math.isfinite(snippet["score"])
         ):
             raise ValueError("history snippet is invalid")
-    if not isinstance(candidates, list) or not 1 <= len(candidates) <= 50:
-        raise ValueError("candidate count is invalid")
-    candidate_ids = set()
-    for candidate in candidates:
+    # The generation contract never reads the candidate pool (product
+    # decision 2026-10-12 removed choose/keep ranking): candidates and
+    # candidate_pool_hash are accepted-but-ignored so a not-yet-rebuilt
+    # client keeps working through the transition.
+    if message.get("candidate_pool_hash") is not None and not (
+        _bounded_string(message.get("candidate_pool_hash"), 128)
+    ):
+        raise ValueError("candidate pool hash is invalid")
+    segments = message.get("segments")
+    if segments is not None:
+        # Canonicalize to the three known keys so the response echo and the
+        # prompt stay byte-stable against the Swift mirror.
+        message["segments"] = validate_pinyin_segments(
+            segments, active_pinyin=message["pinyin"]
+        )
+    return message
+
+
+def validate_continuation_request(message: Any) -> dict[str, Any]:
+    if not isinstance(message, dict):
+        raise ValueError("request must be an object")
+    if message.get("type") != "continuation":
+        raise ValueError("request type is invalid")
+    if not _bounded_string(message.get("api_key"), 512):
+        raise ValueError("cloud credential is invalid")
+    for field, maximum in {
+        "request_id": 256,
+        "client_session_id": 256,
+        "bundle_id": 512,
+        "model_id": 128,
+    }.items():
+        if not _bounded_string(message.get(field), maximum):
+            raise ValueError(f"{field} is invalid")
+    if message.get("model_id") not in CONTINUATION_ALLOWED_MODELS:
+        raise ValueError("model is not allowed")
+    deadline = message.get("deadline_ms")
+    if (
+        not isinstance(deadline, int)
+        or isinstance(deadline, bool)
+        or not 1 <= deadline <= 30000
+    ):
+        raise ValueError("deadline must be from 1 to 30000 ms")
+    generation = message.get("history_generation")
+    if generation is not None and (
+        not isinstance(generation, int)
+        or isinstance(generation, bool)
+        or generation < 0
+    ):
+        raise ValueError("history generation is invalid")
+    recent = message.get("recent_context")
+    if (
+        not isinstance(recent, str)
+        or len(recent) > 400
+        or "\x00" in recent
+        or _han_count(recent) < 4
+    ):
+        raise ValueError("recent context is invalid")
+    snippets = message.get("history_snippets")
+    if not isinstance(snippets, list) or len(snippets) > 8:
+        raise ValueError("history snippets are invalid")
+    # Mirrors the inference-path snippet validation above deliberately:
+    # both layers keep their own copy of the gate, like every other
+    # duplicated check in this module.
+    for snippet in snippets:
         if (
-            not isinstance(candidate, dict)
-            or not _bounded_string(candidate.get("id"), 128)
-            or not _bounded_string(candidate.get("text"), 512)
-            or "\n" in candidate["text"]
-            or candidate.get("source")
-            not in {"rime_exact", "rime_fuzzy", "user_term"}
-            or candidate.get("consumed_start") != 0
-            or candidate.get("consumed_length") != len(message["pinyin"])
-            or not _bounded_string(candidate.get("aligned_pinyin"), 256)
-            or re.fullmatch(r"[a-z']+", candidate["aligned_pinyin"]) is None
-            or not isinstance(candidate.get("edit_cost"), (int, float))
-            or isinstance(candidate.get("edit_cost"), bool)
-            or not math.isfinite(candidate["edit_cost"])
-            or not 0 <= candidate["edit_cost"] <= 1
-            or (
-                candidate["source"] == "rime_exact"
-                and candidate["edit_cost"] != 0
-            )
-            or (
-                candidate.get("rime_index") is not None
-                and (
-                    not isinstance(candidate["rime_index"], int)
-                    or isinstance(candidate["rime_index"], bool)
-                    or not 0 <= candidate["rime_index"] < 50
-                )
-            )
+            not isinstance(snippet, dict)
+            or not _bounded_string(snippet.get("id"), 128)
+            or not _bounded_string(snippet.get("text"), 4096)
+            or "\x00" in snippet["text"]
+            or not _bounded_string(snippet.get("bundle_id"), 512)
+            or not isinstance(snippet.get("committed_at_ms"), int)
+            or isinstance(snippet.get("committed_at_ms"), bool)
+            or not isinstance(snippet.get("score"), (int, float))
+            or isinstance(snippet.get("score"), bool)
+            or not math.isfinite(snippet["score"])
         ):
-            raise ValueError("candidate is invalid")
-        candidate_ids.add(candidate["id"])
-    if len(candidate_ids) != len(candidates):
-        raise ValueError("candidate IDs must be unique")
+            raise ValueError("history snippet is invalid")
     return message
 
 
 def validate_decision(
     decision: Any,
-    cloud_request: Dict[str, Any],
-) -> Dict[str, Any]:
+    cloud_request: dict[str, Any],
+) -> dict[str, Any]:
+    """Protocol-shape check for ranker decisions, mirroring the ranker's
+    structural gates (deliberate duplication, like every gate in this
+    module). The only decisions are generate and abstain (product decision
+    2026-10-12 removed choose/keep ranking); pinyin alignment is the
+    model's job, never checked here. Transitional exception: `_run`
+    fabricates a `keep` decision for clients that did not advertise
+    text-generation — that bypasses this validator on purpose and dies
+    with the legacy client support."""
     if not isinstance(decision, dict):
         raise ValueError("decision must be an object")
     action = decision.get("decision")
@@ -181,49 +241,34 @@ def validate_decision(
         "uncertain",
     }:
         raise ValueError("decision reason is invalid")
-    if action in {"keep", "abstain"}:
+    if action == "abstain":
         if candidate_id is not None or confidence is not None:
             raise ValueError("non-choice decision contains a candidate")
         if decision.get("text") is not None:
             raise ValueError("non-generate decision contains text")
         return decision
-    if action == "generate":
-        text = decision.get("text")
-        if (
-            candidate_id is not None
-            or not isinstance(text, str)
-            or not text
-            or len(text.encode()) > 120
-            or not isinstance(confidence, (int, float))
-            or isinstance(confidence, bool)
-            or not math.isfinite(confidence)
-            or not 0.60 <= confidence <= 1
-        ):
-            raise ValueError("generated sentence is invalid")
-        # Pinyin alignment was already enforced by the ranker's dictionary
-        # guard; this layer mirrors its structural bounds only.
-        return decision
-    candidate_ids = {item["id"] for item in cloud_request["candidates"]}
+    text = decision.get("text")
     if (
-        action != "choose"
-        or candidate_id not in candidate_ids
-        or decision.get("text") is not None
+        action != "generate"
+        or candidate_id is not None
+        or not isinstance(text, str)
+        or not text
         or not isinstance(confidence, (int, float))
         or isinstance(confidence, bool)
         or not math.isfinite(confidence)
-        or not 0 <= confidence <= 1
+        or not 0 < confidence <= 1
     ):
-        raise ValueError("choice is not constrained to the candidate pool")
-    candidate = next(
-        item
-        for item in cloud_request["candidates"]
-        if item["id"] == candidate_id
-    )
-    minimum_confidence = (
-        0.98 if candidate["source"] == "rime_fuzzy" else 0.85
-    )
-    if confidence < minimum_confidence:
-        raise ValueError("choice is below the product confidence threshold")
+        raise ValueError("generated sentence is invalid")
+    segments = cloud_request.get("segments")
+    if (
+        len(text) > GENERATE_MAXIMUM_CHARACTERS
+        or any(ord(char) < 0x20 or ord(char) == 0x7F for char in text)
+        or (
+            segments is not None
+            and split_segmented_text(text, segments) is None
+        )
+    ):
+        raise ValueError("generated sentence is invalid")
     return decision
 
 
@@ -232,16 +277,19 @@ class CloudBrokerServer:
         self,
         socket_path: Path,
         ranker: CandidateRanker,
-        history_indexer: Optional[HistoryEmbeddingIndexer] = None,
-        text_generation_enabled: bool = False,
+        history_indexer: HistoryEmbeddingIndexer | None = None,
+        activity_notifier: Callable[[], None] | None = None,
     ):
         self.socket_path = socket_path
         self.ranker = ranker
         self.history_indexer = history_indexer
-        self.text_generation_enabled = text_generation_enabled
-        self._server: Optional[asyncio.AbstractServer] = None
-        self._tasks: Set[asyncio.Task[Any]] = set()
-        self._index_task: Optional[asyncio.Task[Any]] = None
+        # Mirrors the daemon server: called for every accepted inference /
+        # continuation request so a co-located idle scheduler (consolidation)
+        # can tell "user is typing" from "process has merely been up".
+        self._activity_notifier = activity_notifier
+        self._server: asyncio.AbstractServer | None = None
+        self._tasks: set[asyncio.Task[Any]] = set()
+        self._index_task: asyncio.Task[Any] | None = None
         # Cancellation cannot interrupt a blocking urllib call already in a
         # thread. A single worker ensures obsolete calls cannot fan out into
         # concurrent paid requests while latest-request-wins suppresses them.
@@ -251,40 +299,31 @@ class CloudBrokerServer:
         )
 
     async def start(self) -> None:
-        if len(os.fsencode(self.socket_path)) > 103:
-            raise CloudBrokerConfigurationError("socket path is too long")
-        parent = self.socket_path.parent
-        if parent.exists() and parent.is_symlink():
-            raise CloudBrokerConfigurationError("runtime path is a symlink")
-        parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        os.chmod(parent, 0o700)
-        if self.socket_path.exists() or self.socket_path.is_symlink():
-            mode = self.socket_path.lstat().st_mode
-            if not stat.S_ISSOCK(mode):
-                raise CloudBrokerConfigurationError("refusing non-socket path")
-            probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            probe.settimeout(0.1)
-            try:
-                probe.connect(str(self.socket_path))
-            except (ConnectionRefusedError, FileNotFoundError):
-                pass
-            except OSError as exc:
-                raise CloudBrokerConfigurationError(
-                    "cannot verify existing cloud socket"
-                ) from exc
-            else:
-                raise CloudBrokerConfigurationError(
-                    "another cloud broker is already running"
-                )
-            finally:
-                probe.close()
-            self.socket_path.unlink()
-        self._server = await asyncio.start_unix_server(
-            self._handle_client,
-            path=str(self.socket_path),
-            limit=1_048_576,
-        )
-        os.chmod(self.socket_path, 0o600)
+        try:
+            self._server = await prepare_unix_listener_socket(
+                self.socket_path,
+                self._handle_client,
+            )
+        except SocketPathTooLongError as failure:
+            raise CloudBrokerConfigurationError(
+                "socket path is too long"
+            ) from failure
+        except RuntimeDirectoryIsSymlinkError as failure:
+            raise CloudBrokerConfigurationError(
+                "runtime path is a symlink"
+            ) from failure
+        except NotASocketPathError as failure:
+            raise CloudBrokerConfigurationError(
+                "refusing non-socket path"
+            ) from failure
+        except ExistingSocketUnverifiableError as failure:
+            raise CloudBrokerConfigurationError(
+                "cannot verify existing cloud socket"
+            ) from failure.cause
+        except AlreadyListeningError as failure:
+            raise CloudBrokerConfigurationError(
+                "another cloud broker is already running"
+            ) from failure
         if self.history_indexer is not None:
             self._index_task = asyncio.create_task(self._index_loop())
 
@@ -314,21 +353,29 @@ class CloudBrokerServer:
             await self._server.serve_forever()
 
     async def _index_loop(self) -> None:
+        if self.history_indexer is None:
+            return
+        indexer = self.history_indexer
+        # With indexing disabled, run_once only drains stale pending jobs;
+        # no reason to wake every 5s — an hourly sweep keeps new rows from
+        # piling up while the kill switch stays off.
+        interval = 5 if EMBEDDING_INDEXING_ENABLED else 3600
         while True:
             try:
-                await asyncio.to_thread(
-                    self.history_indexer.run_once,
-                    self.ranker,
+                await asyncio.to_thread(indexer.run_once, self.ranker)
+            except Exception as error:
+                sys.stderr.write(
+                    f"[cloud] index loop error "
+                    f"{type(error).__name__}: {error}\n"
                 )
-            except Exception:
-                pass
-            await asyncio.sleep(5)
+                sys.stderr.flush()
+            await asyncio.sleep(interval)
 
     async def _write(
         self,
         writer: asyncio.StreamWriter,
         lock: asyncio.Lock,
-        payload: Dict[str, Any],
+        payload: dict[str, Any],
     ) -> None:
         encoded = (
             json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
@@ -345,18 +392,24 @@ class CloudBrokerServer:
     ) -> None:
         peer = writer.get_extra_info("socket")
         try:
-            if peer is None or _peer_uid(peer.fileno()) != os.geteuid():
+            if peer is None or peer_uid(peer.fileno()) != os.geteuid():
                 return
-        except (OSError, CloudBrokerConfigurationError):
+        except (OSError, PeerIdentityError):
             return
         lock = asyncio.Lock()
         hello = False
-        client_capabilities: Set[str] = set()
-        pending: Dict[str, asyncio.Task[Any]] = {}
-        latest: Dict[Tuple[str, str], int] = {}
+        client_capabilities: set[str] = set()
+        pending: dict[str, asyncio.Task[Any]] = {}
+        pending_continuations: dict[str, asyncio.Task[Any]] = {}
+        latest: dict[tuple[str, str], int] = {}
         try:
             while not reader.at_eof():
-                line = await reader.readline()
+                try:
+                    line = await reader.readline()
+                except (ValueError, asyncio.LimitOverrunError):
+                    # Overlong line: the reader's limit was exceeded, not a
+                    # decode failure; drop the connection without a frame.
+                    break
                 if not line:
                     break
                 try:
@@ -386,9 +439,9 @@ class CloudBrokerServer:
                         "cancel",
                         "latest-request-wins",
                         "history-generation",
+                        "text-generation",
+                        "continuation-generation",
                     ]
-                    if self.text_generation_enabled:
-                        capabilities.append("text-generation")
                     await self._write(
                         writer,
                         lock,
@@ -406,8 +459,44 @@ class CloudBrokerServer:
                     continue
                 if message_type == "cancel":
                     request_id = message.get("request_id")
-                    if isinstance(request_id, str) and request_id in pending:
-                        pending[request_id].cancel()
+                    if isinstance(request_id, str):
+                        task = pending.get(request_id)
+                        if task is None:
+                            task = pending_continuations.get(request_id)
+                        if task is not None:
+                            task.cancel()
+                    continue
+                if message_type == "continuation":
+                    try:
+                        continuation_request = validate_continuation_request(
+                            message
+                        )
+                    except ValueError:
+                        continue
+                    if self._activity_notifier is not None:
+                        self._activity_notifier()
+                    # Latest-wins: a new continuation supersedes any
+                    # in-flight one; the client only ever wants the
+                    # suggestion for the most recent commit.
+                    for old_id, old_task in tuple(
+                        pending_continuations.items()
+                    ):
+                        if not old_task.done():
+                            old_task.cancel()
+                        pending_continuations.pop(old_id, None)
+                    task = asyncio.create_task(
+                        self._run_continuation(
+                            continuation_request,
+                            writer,
+                            lock,
+                            client_capabilities,
+                        )
+                    )
+                    pending_continuations[
+                        continuation_request["request_id"]
+                    ] = task
+                    self._tasks.add(task)
+                    task.add_done_callback(self._tasks.discard)
                     continue
                 if message_type != "inference":
                     continue
@@ -415,6 +504,8 @@ class CloudBrokerServer:
                     cloud_request = validate_request(message)
                 except ValueError:
                     continue
+                if self._activity_notifier is not None:
+                    self._activity_notifier()
                 key = (
                     cloud_request["app_session_id"],
                     cloud_request["composition_id"],
@@ -444,27 +535,25 @@ class CloudBrokerServer:
         finally:
             for task in pending.values():
                 task.cancel()
+            for task in pending_continuations.values():
+                task.cancel()
             writer.close()
-            try:
+            with contextlib.suppress(BrokenPipeError, ConnectionResetError):
                 await writer.wait_closed()
-            except (BrokenPipeError, ConnectionResetError):
-                pass
 
     async def _run(
         self,
-        cloud_request: Dict[str, Any],
-        key: Tuple[str, str],
-        latest: Dict[Tuple[str, str], int],
+        cloud_request: dict[str, Any],
+        key: tuple[str, str],
+        latest: dict[tuple[str, str], int],
         writer: asyncio.StreamWriter,
         lock: asyncio.Lock,
-        client_capabilities: Set[str],
+        client_capabilities: set[str],
     ) -> None:
-        sys.stderr.write(
-            f"[cloud] enter revision={cloud_request['revision']}\n"
-        )
-        sys.stderr.flush()
         started = monotonic()
         budget_seconds = cloud_request["deadline_ms"] / 1000
+        remaining = budget_seconds
+        revision = cloud_request["revision"]
         try:
             if self.history_indexer is not None:
                 remaining = budget_seconds - (monotonic() - started)
@@ -494,16 +583,20 @@ class CloudBrokerServer:
             decision = validate_decision(raw_decision, cloud_request)
         except asyncio.TimeoutError:
             sys.stderr.write(
-                f"[cloud] timeout remaining={remaining:.2f}s\n"
+                f"[cloud] timeout revision={revision} "
+                f"remaining={remaining:.2f}s\n"
             )
             sys.stderr.flush()
             return
         except asyncio.CancelledError:
-            sys.stderr.write("[cloud] cancelled\n")
+            sys.stderr.write(f"[cloud] cancelled revision={revision}\n")
             sys.stderr.flush()
             return
         except Exception as exc:
-            sys.stderr.write(f"[cloud] error {type(exc).__name__}: {exc}\n")
+            sys.stderr.write(
+                f"[cloud] error revision={revision} "
+                f"{type(exc).__name__}: {exc}\n"
+            )
             sys.stderr.flush()
             return
         if latest.get(key) != cloud_request["revision"]:
@@ -524,6 +617,7 @@ class CloudBrokerServer:
         # records pinyin or generated text, only the decision shape.
         sys.stderr.write(
             f"[cloud] decision={decision['decision']} "
+            f"segments={len(cloud_request.get('segments') or ())} "
             f"elapsed={elapsed:.0f}ms\n"
         )
         sys.stderr.flush()
@@ -540,7 +634,7 @@ class CloudBrokerServer:
                 "confidence": None,
                 "reason": "rime_rank",
             }
-        response: Dict[str, Any] = {
+        response: dict[str, Any] = {
             "schema_version": 1,
             "type": "result",
             "status": "ok",
@@ -549,7 +643,6 @@ class CloudBrokerServer:
             "revision": cloud_request["revision"],
             "app_session_id": cloud_request["app_session_id"],
             "client_session_id": cloud_request["client_session_id"],
-            "candidate_pool_hash": cloud_request["candidate_pool_hash"],
             "history_generation": cloud_request["history_generation"],
             "decision": decision["decision"],
             "candidate_id": decision["candidate_id"],
@@ -558,22 +651,134 @@ class CloudBrokerServer:
             "model_id": cloud_request["model_id"],
             "elapsed_ms": round(elapsed, 3),
         }
+        # Transitional echo: clients rebuilt after the candidate-pool
+        # removal no longer send candidate_pool_hash; older clients still
+        # compare it byte for byte, so echo it only when present.
+        if cloud_request.get("candidate_pool_hash") is not None:
+            response["candidate_pool_hash"] = cloud_request[
+                "candidate_pool_hash"
+            ]
         if decision["decision"] == "generate":
             response["generated_text"] = decision["text"]
             # Echo the request pinyin verbatim: the client compares byte
             # for byte, and normalization would strip apostrophes.
             response["generated_pinyin"] = cloud_request["pinyin"]
+            segments = cloud_request.get("segments")
+            if segments is not None:
+                # Canonical JSON echo of the validated segments; the client
+                # compares this string byte for byte.
+                response["generated_segments"] = json.dumps(
+                    segments,
+                    sort_keys=True,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
         await self._write(writer, lock, response)
+
+    async def _run_continuation(
+        self,
+        cloud_request: dict[str, Any],
+        writer: asyncio.StreamWriter,
+        lock: asyncio.Lock,
+        client_capabilities: set[str],
+    ) -> None:
+        started = monotonic()
+        budget_seconds = cloud_request["deadline_ms"] / 1000
+        request_id = cloud_request["request_id"]
+
+        async def respond(
+            decision: str,
+            generated_text: str | None,
+            confidence: float | None,
+            reason: str | None,
+        ) -> None:
+            response: dict[str, Any] = {
+                "schema_version": 1,
+                "type": "result",
+                "status": "ok",
+                "request_id": request_id,
+                "decision": decision,
+                "confidence": confidence,
+                "reason": reason,
+                "model_id": cloud_request["model_id"],
+                "elapsed_ms": round((monotonic() - started) * 1000, 3),
+            }
+            if decision == "generate":
+                response["generated_text"] = generated_text
+            await self._write(writer, lock, response)
+
+        if "continuation-generation" not in client_capabilities:
+            # Old clients cannot decode a suggestion; answer abstain so
+            # they degrade silently instead of tearing down the
+            # connection on an unknown frame.
+            await respond("abstain", None, None, "capability_absent")
+            return
+        remaining = budget_seconds
+        try:
+            remaining = budget_seconds - (monotonic() - started)
+            if remaining <= 0:
+                return
+            decision = await asyncio.wait_for(
+                asyncio.get_running_loop().run_in_executor(
+                    self._rank_executor,
+                    self.ranker.rank_continuation,
+                    cloud_request,
+                ),
+                timeout=remaining,
+            )
+        except asyncio.TimeoutError:
+            sys.stderr.write(
+                f"[cloud] continuation timeout request={request_id}\n"
+            )
+            sys.stderr.flush()
+            return
+        except asyncio.CancelledError:
+            sys.stderr.write(
+                f"[cloud] continuation cancelled request={request_id}\n"
+            )
+            sys.stderr.flush()
+            return
+        except Exception as exc:
+            sys.stderr.write(
+                f"[cloud] continuation error request={request_id} "
+                f"{type(exc).__name__}: {exc}\n"
+            )
+            sys.stderr.flush()
+            return
+        elapsed = (monotonic() - started) * 1000
+        if elapsed > cloud_request["deadline_ms"]:
+            return
+        sys.stderr.write(
+            f"[cloud] continuation decision={decision['decision']} "
+            f"elapsed={elapsed:.0f}ms\n"
+        )
+        sys.stderr.flush()
+        await respond(
+            decision["decision"],
+            decision.get("generated_text"),
+            decision.get("confidence"),
+            decision.get("reason"),
+        )
 
     def _prepare_history_request(
         self,
-        cloud_request: Dict[str, Any],
-    ) -> Optional[Dict[str, Any]]:
+        cloud_request: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Generation-drift gate: drop the request when the visible history
+        generation moved under the client's feet.
+
+        Purely optional bookkeeping — a transient storage failure degrades
+        to serving the request unchecked instead of dropping the response
+        (the prompt carries no history content, so nothing else depends on
+        this read)."""
         assert self.history_indexer is not None
-        generation = self.history_indexer.generation()
+        try:
+            generation = self.history_indexer.generation()
+        except (OSError, sqlite3.Error):
+            return cloud_request
         if (
             generation is not None
             and generation != cloud_request["history_generation"]
         ):
             return None
-        return self.history_indexer.augment_request(cloud_request)
+        return cloud_request

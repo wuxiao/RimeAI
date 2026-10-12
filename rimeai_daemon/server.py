@@ -1,24 +1,37 @@
 """Versioned Unix Domain Socket server with fail-closed request scheduling."""
+from __future__ import annotations
 
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
-import ctypes
+import contextlib
 import json
 import math
 import os
-from pathlib import Path
 import re
-import socket
 import stat
-import struct
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from time import monotonic
-from typing import Any, Dict, Optional, Protocol, Set, Tuple
+from typing import Any, Protocol
+
+from rimeai_runtime.localipc import (
+    AlreadyListeningError,
+    ExistingSocketUnverifiableError,
+    NotASocketPathError,
+    PeerIdentityError,
+    RuntimeDirectoryIsSymlinkError,
+    SocketPathTooLongError,
+    peer_uid,
+    prepare_unix_listener_socket,
+)
+
+from .segment_policy import validate_pinyin_segments
 
 
 class InferenceEngine(Protocol):
     artifact_id: str
 
-    def infer(self, request: Dict[str, Any]) -> Dict[str, Any]:
+    def infer(self, request: dict[str, Any]) -> dict[str, Any]:
         ...
 
 
@@ -26,46 +39,13 @@ class DaemonConfigurationError(ValueError):
     pass
 
 
-def _peer_uid(file_descriptor: int) -> int:
-    try:
-        libc = ctypes.CDLL(None, use_errno=True)
-        getpeereid = libc.getpeereid
-    except AttributeError:
-        if hasattr(socket, "SO_PEERCRED"):
-            peer_socket = socket.socket(fileno=os.dup(file_descriptor))
-            try:
-                credentials = peer_socket.getsockopt(
-                    socket.SOL_SOCKET,
-                    socket.SO_PEERCRED,
-                    struct.calcsize("3i"),
-                )
-            finally:
-                peer_socket.close()
-            _, uid, _ = struct.unpack("3i", credentials)
-            return uid
-        raise DaemonConfigurationError(
-            "this platform cannot verify Unix socket peer identity"
-        )
-    uid = ctypes.c_uint()
-    gid = ctypes.c_uint()
-    result = getpeereid(
-        ctypes.c_int(file_descriptor),
-        ctypes.byref(uid),
-        ctypes.byref(gid),
-    )
-    if result != 0:
-        error_number = ctypes.get_errno()
-        raise OSError(error_number, os.strerror(error_number))
-    return int(uid.value)
-
-
 def _error_response(
     *,
     status: str,
-    request_id: Optional[str] = None,
-    reason: Optional[str] = None,
-) -> Dict[str, Any]:
-    response: Dict[str, Any] = {
+    request_id: str | None = None,
+    reason: str | None = None,
+) -> dict[str, Any]:
+    response: dict[str, Any] = {
         "schema_version": 1,
         "type": "result",
         "status": status,
@@ -77,7 +57,7 @@ def _error_response(
     return response
 
 
-def _validate_inference_request(message: Any) -> Dict[str, Any]:
+def _validate_inference_request(message: Any) -> dict[str, Any]:
     if not isinstance(message, dict):
         raise ValueError("message must be an object")
     required_strings = (
@@ -109,7 +89,8 @@ def _validate_inference_request(message: Any) -> Dict[str, Any]:
     context_policy = message.get("context_policy")
     context = message.get("context")
     if (
-        context_policy not in {"strict", "standard", "smart"}
+        not isinstance(context_policy, str)
+        or context_policy not in {"strict", "standard", "smart"}
         or not isinstance(context, str)
     ):
         raise ValueError("context policy is invalid")
@@ -135,7 +116,20 @@ def _validate_inference_request(message: Any) -> Dict[str, Any]:
         message.get("sensitive"), bool
     ):
         raise ValueError("request policy flags must be booleans")
-    return {
+    domain = message.get("domain")
+    if domain is not None and (
+        not isinstance(domain, str)
+        or len(domain) > 64
+        or not domain.replace("-", "").replace("_", "").isalnum()
+        or domain != domain.lower()
+    ):
+        raise ValueError("domain must be a bounded lowercase identifier")
+    segments = message.get("segments")
+    if segments is not None:
+        segments = validate_pinyin_segments(
+            segments, active_pinyin=message["pinyin"]
+        )
+    result = {
         field: message[field]
         for field in (
             "request_id",
@@ -151,18 +145,30 @@ def _validate_inference_request(message: Any) -> Dict[str, Any]:
             "sensitive",
         )
     }
+    if domain is not None:
+        result["domain"] = domain
+    if segments is not None:
+        result["segments"] = segments
+    return result
 
 
 class RimeAIDaemonServer:
-    def __init__(self, socket_path: Path, engine: InferenceEngine):
+    def __init__(
+        self,
+        socket_path: Path,
+        engine: InferenceEngine,
+        *,
+        activity_notifier: Callable[[], None] | None = None,
+    ):
         self.socket_path = socket_path
         self.engine = engine
-        self._server: Optional[asyncio.AbstractServer] = None
+        self._activity_notifier = activity_notifier
+        self._server: asyncio.AbstractServer | None = None
         self._inference_executor = ThreadPoolExecutor(
             max_workers=1,
             thread_name_prefix="rimeai-inference",
         )
-        self._all_tasks: Set["asyncio.Task[Any]"] = set()
+        self._all_tasks: set[asyncio.Task[Any]] = set()
         self._consecutive_failures = 0
         self._circuit_open_until = 0.0
 
@@ -172,46 +178,31 @@ class RimeAIDaemonServer:
             self._circuit_open_until = monotonic() + 30
 
     async def start(self) -> None:
-        if len(os.fsencode(self.socket_path)) > 103:
+        try:
+            self._server = await prepare_unix_listener_socket(
+                self.socket_path,
+                self._handle_client,
+            )
+        except SocketPathTooLongError as error:
             raise DaemonConfigurationError(
                 "Unix socket path exceeds the macOS 103-byte limit"
-            )
-        parent = self.socket_path.parent
-        if parent.exists() and parent.is_symlink():
+            ) from error
+        except RuntimeDirectoryIsSymlinkError as error:
             raise DaemonConfigurationError(
                 "runtime directory must not be a symbolic link"
-            )
-        parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        os.chmod(parent, 0o700)
-        if self.socket_path.exists() or self.socket_path.is_symlink():
-            mode = self.socket_path.lstat().st_mode
-            if not stat.S_ISSOCK(mode):
-                raise DaemonConfigurationError(
-                    "refusing to replace a non-socket runtime path"
-                )
-            probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            probe.settimeout(0.1)
-            try:
-                probe.connect(str(self.socket_path))
-            except (ConnectionRefusedError, FileNotFoundError):
-                pass
-            except OSError as error:
-                raise DaemonConfigurationError(
-                    f"cannot verify existing runtime socket: {error}"
-                ) from error
-            else:
-                raise DaemonConfigurationError(
-                    "another RimeAI daemon is already running"
-                )
-            finally:
-                probe.close()
-            self.socket_path.unlink()
-        self._server = await asyncio.start_unix_server(
-            self._handle_client,
-            path=str(self.socket_path),
-            limit=1024 * 1024,
-        )
-        os.chmod(self.socket_path, 0o600)
+            ) from error
+        except NotASocketPathError as error:
+            raise DaemonConfigurationError(
+                "refusing to replace a non-socket runtime path"
+            ) from error
+        except ExistingSocketUnverifiableError as failure:
+            raise DaemonConfigurationError(
+                f"cannot verify existing runtime socket: {failure.cause}"
+            ) from failure.cause
+        except AlreadyListeningError as error:
+            raise DaemonConfigurationError(
+                "another RimeAI daemon is already running"
+            ) from error
 
     async def close(self) -> None:
         if self._server is not None:
@@ -226,7 +217,10 @@ class RimeAIDaemonServer:
             mode = self.socket_path.lstat().st_mode
             if stat.S_ISSOCK(mode):
                 self.socket_path.unlink()
-        self._inference_executor.shutdown(wait=True, cancel_futures=True)
+        # A stuck engine call cannot be interrupted mid-inference; waiting
+        # here would block the event loop up to the request deadline. The
+        # interpreter joins the worker at exit (bounded by that deadline).
+        self._inference_executor.shutdown(wait=False, cancel_futures=True)
 
     async def serve_forever(self) -> None:
         if self._server is None:
@@ -238,7 +232,7 @@ class RimeAIDaemonServer:
         self,
         writer: asyncio.StreamWriter,
         lock: asyncio.Lock,
-        payload: Dict[str, Any],
+        payload: dict[str, Any],
     ) -> None:
         encoded = (
             json.dumps(
@@ -264,20 +258,20 @@ class RimeAIDaemonServer:
             await writer.wait_closed()
             return
         try:
-            if _peer_uid(peer_socket.fileno()) != os.geteuid():
+            if peer_uid(peer_socket.fileno()) != os.geteuid():
                 writer.close()
                 await writer.wait_closed()
                 return
-        except (OSError, DaemonConfigurationError):
+        except (OSError, PeerIdentityError):
             writer.close()
             await writer.wait_closed()
             return
 
         write_lock = asyncio.Lock()
         hello_complete = False
-        pending_by_key: Dict[Tuple[str, str], "asyncio.Task[Any]"] = {}
-        pending_by_id: Dict[str, "asyncio.Task[Any]"] = {}
-        latest_revision: Dict[Tuple[str, str], int] = {}
+        pending_by_key: dict[tuple[str, str], asyncio.Task[Any]] = {}
+        pending_by_id: dict[str, asyncio.Task[Any]] = {}
+        latest_revision: dict[tuple[str, str], int] = {}
         try:
             while not reader.at_eof():
                 try:
@@ -375,6 +369,8 @@ class RimeAIDaemonServer:
                         _error_response(status="unsupported_message"),
                     )
                     continue
+                if self._activity_notifier is not None:
+                    self._activity_notifier()
                 try:
                     request = _validate_inference_request(message)
                 except ValueError:
@@ -429,6 +425,8 @@ class RimeAIDaemonServer:
                     )
                     continue
                 latest_revision[key] = request["revision"]
+                if len(latest_revision) > 1_024:
+                    latest_revision.pop(next(iter(latest_revision)))
                 previous_task = pending_by_key.get(key)
                 if previous_task is not None:
                     previous_task.cancel()
@@ -448,7 +446,7 @@ class RimeAIDaemonServer:
                 def cleanup(
                     completed: "asyncio.Task[Any]",
                     *,
-                    current_key: Tuple[str, str] = key,
+                    current_key: tuple[str, str] = key,
                     current_id: str = request_id,
                 ) -> None:
                     self._all_tasks.discard(completed)
@@ -462,16 +460,14 @@ class RimeAIDaemonServer:
             for task in list(pending_by_id.values()):
                 task.cancel()
             writer.close()
-            try:
+            with contextlib.suppress(BrokenPipeError, ConnectionResetError):
                 await writer.wait_closed()
-            except (BrokenPipeError, ConnectionResetError):
-                pass
 
     async def _run_inference(
         self,
-        request: Dict[str, Any],
-        key: Tuple[str, str],
-        latest_revision: Dict[Tuple[str, str], int],
+        request: dict[str, Any],
+        key: tuple[str, str],
+        latest_revision: dict[tuple[str, str], int],
         writer: asyncio.StreamWriter,
         write_lock: asyncio.Lock,
     ) -> None:

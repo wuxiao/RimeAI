@@ -1,4 +1,4 @@
-from rimeai_eval.candidate_policy import (
+from rimeai_runtime.candidate_policy import (
     build_semantic_pairs,
     partition_full_length_candidates,
 )

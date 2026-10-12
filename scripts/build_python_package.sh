@@ -32,7 +32,10 @@ trap cleanup EXIT
 
 mkdir -p \
   "${stage_dir}/rimeai_eval" \
+  "${stage_dir}/rimeai_runtime" \
   "${stage_dir}/rimeai_daemon" \
+  "${stage_dir}/rimeai_cloud_broker" \
+  "${stage_dir}/tools" \
   "${stage_dir}/tests" \
   "${output_dir}"
 
@@ -45,8 +48,27 @@ rsync -a \
 rsync -a \
   --exclude='._*' \
   --exclude='__pycache__' \
+  "${project_root}/rimeai_runtime/" \
+  "${stage_dir}/rimeai_runtime/"
+
+rsync -a \
+  --exclude='._*' \
+  --exclude='__pycache__' \
   "${project_root}/rimeai_daemon/" \
   "${stage_dir}/rimeai_daemon/"
+
+rsync -a \
+  --exclude='._*' \
+  --exclude='__pycache__' \
+  "${project_root}/rimeai_cloud_broker/" \
+  "${stage_dir}/rimeai_cloud_broker/"
+
+# tests/test_release_manifest.py imports this module; staging it keeps the
+# staged test tree import-complete without shipping the rest of tools/.
+rsync -a \
+  --exclude='._*' \
+  "${project_root}/tools/release_manifest.py" \
+  "${stage_dir}/tools/release_manifest.py"
 
 rsync -a \
   --exclude='._*' \

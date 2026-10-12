@@ -117,6 +117,11 @@ rsync -a \
   --exclude='__pycache__' \
   "${project_root}/rimeai_eval/" \
   "${daemon_bundle_dir}/rimeai_eval/"
+rsync -a --delete \
+  --exclude='._*' \
+  --exclude='__pycache__' \
+  "${project_root}/rimeai_runtime/" \
+  "${daemon_bundle_dir}/rimeai_runtime/"
 install -m 600 "${source_language_model}" "${language_model}"
 install -m 600 "${source_beam_config}" "${beam_config}"
 install -m 600 "${source_rime_dictionary}" "${rime_dictionary}"

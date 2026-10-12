@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from typing import Any
 
 from rimeai_daemon.engine import LocalInferenceEngine
 
@@ -13,15 +14,39 @@ class _Ranker:
 
 
 class _SentenceDecoder:
-    def __init__(self, text="", confidence=0.0, reason="no_change"):
+    def __init__(
+        self,
+        text="",
+        confidence=0.0,
+        reason="no_change",
+        segment_text=None,
+        segment_confidence=0.0,
+        segment_reason="no_change",
+    ):
         self.result = SimpleNamespace(
             text=text,
             confidence=confidence,
             reason=reason,
         )
+        self.segment_text = segment_text
+        self.segment_confidence = segment_confidence
+        self.segment_reason = segment_reason
+        self.calls = []
+        self.segment_calls = []
 
     def suggest(self, *, context, pinyin, candidates):
+        self.calls.append((context, pinyin, list(candidates)))
         return self.result
+
+    def suggest_segments(self, *, context, segments, active_candidates):
+        self.segment_calls.append(
+            (context, list(segments), list(active_candidates))
+        )
+        return SimpleNamespace(
+            text=self.segment_text,
+            confidence=self.segment_confidence,
+            reason=self.segment_reason,
+        )
 
 
 def _engine(
@@ -31,15 +56,24 @@ def _engine(
     sentence="",
     sentence_confidence=0.0,
     sentence_reason="no_change",
+    segment="",
+    segment_confidence=0.0,
+    segment_reason="no_change",
 ):
-    engine = LocalInferenceEngine.__new__(LocalInferenceEngine)
+    engine: Any = LocalInferenceEngine.__new__(LocalInferenceEngine)
     engine._ranker = _Ranker(ranking, confidence)
     engine._sentence_decoder = _SentenceDecoder(
         sentence,
         sentence_confidence,
         sentence_reason,
+        segment_text=segment,
+        segment_confidence=segment_confidence,
+        segment_reason=segment_reason,
     )
     engine._ranker_min_confidence = 0.55
+    engine._user_lm_path = None
+    engine._user_lm = None
+    engine._user_lm_mtime = None
     return engine
 
 
@@ -211,3 +245,208 @@ def test_low_confidence_sentence_does_not_override_ranked_candidate():
     assert result["ranked_candidate"] == "命令"
     assert result["sentence_suggestion"] == ""
     assert result["confidence"] == 0.99
+
+
+def _segmented_request(*, allow_sentence=True):
+    request = _request(allow_sentence=allow_sentence)
+    request["pinyin"] = "shi"
+    request["segments"] = [
+        {"pinyin": "mingling", "separator": "，", "committed_text": "明令"},
+        {"pinyin": "shi", "separator": ""},
+    ]
+    return request
+
+
+def test_engine_segment_suggestion_joins_with_separators():
+    engine = _engine(
+        ["命令", "明令"],
+        0.7,
+        segment="命令，时",
+        segment_confidence=0.9,
+    )
+
+    result = engine.infer(_segmented_request())
+
+    assert result["decision"] == "sentence_suggestion"
+    assert result["sentence_suggestion"] == "命令，时"
+    assert result["ranked_candidate"] == ""
+    assert result["confidence"] == 0.9
+    decoder = engine._sentence_decoder
+    assert decoder.calls == []
+    assert len(decoder.segment_calls) == 1
+    context, segments, active_candidates = decoder.segment_calls[0]
+    assert context == "请执行这条"
+    assert [segment.pinyin for segment in segments] == ["mingling", "shi"]
+    assert [segment.separator for segment in segments] == ["，", ""]
+    assert [segment.committed_text for segment in segments] == ["明令", ""]
+    assert active_candidates == ["明令", "命令"]
+
+
+def test_engine_segment_confidence_still_gates_the_joined_sentence():
+    engine = _engine(
+        ["命令", "明令"],
+        0.7,
+        segment="命令，时",
+        segment_confidence=0.59,
+    )
+
+    result = engine.infer(_segmented_request())
+
+    assert result["decision"] == "ranked_candidate"
+    assert result["ranked_candidate"] == "命令"
+    assert result["sentence_suggestion"] == ""
+
+
+def test_engine_without_segments_keeps_single_segment_behavior():
+    engine = _engine(
+        ["明令", "命令"],
+        0.7,
+        sentence="命令",
+        sentence_confidence=0.9,
+        segment="不应出现",
+        segment_confidence=0.9,
+    )
+
+    plain = _request(allow_sentence=True)
+    result = engine.infer(plain)
+
+    assert result["decision"] == "sentence_suggestion"
+    assert result["sentence_suggestion"] == "命令"
+    assert engine._sentence_decoder.segment_calls == []
+    assert len(engine._sentence_decoder.calls) == 1
+
+    single_segment = _request(allow_sentence=True)
+    single_segment["segments"] = [
+        {"pinyin": "mingling", "separator": ""},
+    ]
+    result = engine.infer(single_segment)
+
+    assert result["decision"] == "sentence_suggestion"
+    assert result["sentence_suggestion"] == "命令"
+    assert engine._sentence_decoder.segment_calls == []
+    assert len(engine._sentence_decoder.calls) == 2
+
+
+def _user_trained_engine(ranking, confidence, texts, domain=None):
+    from rimeai_daemon.user_lm import UserLanguageModel
+
+    engine = _engine(ranking, confidence)
+    model = UserLanguageModel()
+    model.update(domain, texts)
+    engine._user_lm = model
+    return engine
+
+
+def test_user_lm_reranks_toward_learned_phrasing():
+    request = {
+        "context": "请执行这条",
+        "pinyin": "mingling",
+        "candidates": ["命令", "明令"],
+        "allow_sentence": False,
+    }
+    result = _user_trained_engine(
+        ["命令", "明令"], 0.91, ["明令禁止"] * 200
+    ).infer(request)
+    assert result["decision"] == "ranked_candidate"
+    assert result["ranked_candidate"] == "明令"
+
+
+def test_user_lm_without_evidence_keeps_ranker_order():
+    request = {
+        "context": "请执行这条",
+        "pinyin": "mingling",
+        "candidates": ["明令", "命令"],
+        "allow_sentence": False,
+    }
+    result = _engine(["命令", "明令"], 0.91).infer(request)
+    assert result["ranked_candidate"] == "命令"
+
+
+def test_user_lm_domain_field_is_honored():
+    request = {
+        "context": "我们看过那部",
+        "pinyin": "liaotianjilu",
+        "candidates": ["聊天记录", "聊天纪录"],
+        "allow_sentence": False,
+        "domain": "chat",
+    }
+    result = _user_trained_engine(
+        ["聊天记录", "聊天纪录"],
+        0.91,
+        ["聊天纪录片"] * 300,
+        domain="chat",
+    ).infer(request)
+    assert result["ranked_candidate"] == "聊天纪录"
+
+
+def _real_engine(user_lm_path):
+    from pathlib import Path
+
+    project_root = Path(__file__).resolve().parent.parent
+    return LocalInferenceEngine(
+        language_model_path=project_root
+        / ".rimeai/models/p0-char-ngram-v1.json.gz",
+        beam_config_path=project_root
+        / ".rimeai/models/p0-beam-sentence-v1.json",
+        rime_dictionary_path=project_root
+        / ".rimeai/rime/shared/luna_pinyin.dict.yaml",
+        user_lm_path=user_lm_path,
+    )
+
+
+def test_real_constructor_loads_user_lm_and_applies_evidence(tmp_path):
+    # C1 回归：真实构造路径（构造器 + 加载器，而非直接注入私有属性）
+    # 必须让 L2 证据参与排序——缺失 artifact 时保持基线行为。
+    from rimeai_daemon.user_lm import UserLanguageModel
+
+    artifact = tmp_path / "user-lm.json.gz"
+    trained = UserLanguageModel()
+    trained.update(None, ["明令禁止"] * 200)
+    trained.save(artifact)
+
+    request = {
+        "context": "请执行这条",
+        "pinyin": "mingling",
+        "candidates": ["命令", "明令"],
+        "allow_sentence": False,
+        "sensitive": False,
+    }
+    cold = _real_engine(tmp_path / "absent.json.gz")
+    warm = _real_engine(artifact)
+
+    assert cold.infer(dict(request))["decision"] == "same_top_candidate"
+    warm_result = warm.infer(dict(request))
+    assert warm_result["decision"] == "ranked_candidate"
+    assert warm_result["ranked_candidate"] == "明令"
+
+
+def test_running_engine_reloads_user_lm_on_rewrite(tmp_path):
+    # I1 回归：固化循环在另一进程重写 user-lm.json.gz 后，运行中的
+    # daemon 无需重启即可拿到新证据（mtime 触发重载）。
+    import os
+
+    from rimeai_daemon.user_lm import UserLanguageModel
+
+    artifact = tmp_path / "user-lm.json.gz"
+    first = UserLanguageModel()
+    first.update(None, ["明令禁止"] * 200)
+    first.save(artifact)
+    engine = _real_engine(artifact)
+
+    request = {
+        "context": "请执行这条",
+        "pinyin": "mingling",
+        "candidates": ["命令", "明令"],
+        "allow_sentence": False,
+        "sensitive": False,
+    }
+    assert engine.infer(dict(request))["ranked_candidate"] == "明令"
+
+    replacement = UserLanguageModel()
+    replacement.update(None, ["命令行参数说明"] * 200)
+    replacement.save(artifact)
+    # gzip 原子替换可能落在同一 mtime 里；显式前移 mtime 触发重载。
+    stamped = artifact.stat().st_mtime + 10
+    os.utime(artifact, (stamped, stamped))
+
+    assert engine.infer(dict(request))["decision"] == "same_top_candidate"

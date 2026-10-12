@@ -38,6 +38,12 @@ class NGramRankerModel:
     max_context_characters: int = 40
     top_k: int = TOP_K
 
+    def language_score(self, context: str, candidate: str) -> float:
+        """Mean log-probability per character of `candidate` after
+        `context` under this model's n-gram counts. Public read-only
+        view of the scoring used by `rank`, for evaluation tooling."""
+        return self._language_score(context, candidate)
+
     def _language_score(self, context: str, candidate: str) -> float:
         text = "^" + context[-self.max_context_characters :] + candidate
         candidate_start = len(text) - len(candidate)

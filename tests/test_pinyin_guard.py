@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from rimeai_eval.pinyin_guard import PinyinGuard
+from rimeai_runtime.pinyin_guard import PinyinGuard
 
 
 def _dictionary(tmp_path: Path) -> Path:

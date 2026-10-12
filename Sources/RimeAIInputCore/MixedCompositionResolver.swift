@@ -95,9 +95,13 @@ public struct MixedCompositionResolver: Sendable {
         let hardOccurrences = Self.uppercaseOccurrences(in: characters)
         // An all-lowercase stream that is itself a complete pinyin sequence
         // belongs to the ordinary Rime/semantic path. Without this guard, a
-        // learned word such as `men` could turn `women` into `我men`.
+        // learned word such as `men` could turn `women` into `我men`. A
+        // stream whose first letter cannot begin any pinyin syllable
+        // (i/u/v) can never be resolved as pure pinyin, so it still enters
+        // mixed resolution as a raw English prefix.
         if hardOccurrences.isEmpty,
-           Self.isLikelyPinyinSequence(normalizedInput)
+           Self.isLikelyPinyinSequence(normalizedInput),
+           Self.canBeginPinyinSyllable(normalizedInput.first)
         {
             return nil
         }
@@ -116,6 +120,12 @@ public struct MixedCompositionResolver: Sendable {
             personalizedTokens: personalized,
             builtinTokens: builtinEnglishTokens
         )
+        if let rawLead = Self.rawLeadOccurrence(
+            in: lowercaseCharacters,
+            hardOccurrences: hardOccurrences
+        ) {
+            optionalOccurrences.append(rawLead)
+        }
         optionalOccurrences = Array(
             Set(optionalOccurrences)
         ).sorted(by: Self.sortOccurrences)
@@ -329,6 +339,7 @@ public struct MixedCompositionResolver: Sendable {
 
 private extension MixedCompositionResolver {
     enum OccurrenceSource: Int, Hashable {
+        case rawLead
         case builtin
         case personalized
         case uppercase
@@ -341,6 +352,7 @@ private extension MixedCompositionResolver {
 
         var score: Int {
             let sourceScore = switch source {
+            case .rawLead: 50
             case .builtin: 200
             case .personalized: 400
             case .uppercase: 1_000
@@ -350,6 +362,7 @@ private extension MixedCompositionResolver {
 
         var confidence: Double {
             switch source {
+            case .rawLead: 0.60
             case .builtin: 0.82
             case .personalized: 0.90
             case .uppercase: 0.98
@@ -413,6 +426,78 @@ private extension MixedCompositionResolver {
         a ai an ang ao ba bai ban bang bao bei ben beng bi bian biang biao bie bin bing bo bu ca cai can cang cao ce cei cen ceng cha chai chan chang chao che chen cheng chi chong chou chu chua chuai chuan chuang chui chun chuo ci cong cou cu cuan cui cun cuo da dai dan dang dao de dei den deng di dia dian diao die din ding diu dong dou du duan dui dun duo e eh ei en eng er fa fan fang fei fen feng fiao fo fong fou fu ga gai gan gang gao ge gei gen geng gong gou gu gua guai guan guang gui gun guo ha hai han hang hao he hei hen heng hong hou hu hua huai huan huang hui hun huo ji jia jian jiang jiao jie jin jing jiong jiu ju juan jue jun ka kai kan kang kao ke kei ken keng kong kou ku kua kuai kuan kuang kui kun kuo la lai lan lang lao le lei leng li lia lian liang liao lie lin ling liu lo long lou lu luan lun luo lv lvan lve ma mai man mang mao me mei men meng mi mian miao mie min ming miu mo mou mu na nai nan nang nao ne nei nen neng ni nia nian niang niao nie nin ning niu nong nou nu nuan nun nuo nv nve o ou pa pai pan pang pao pei pen peng pi pia pian piao pie pin ping po pou pu qi qia qian qiang qiao qie qin qing qiong qiu qu quan que qun ran rang rao re ren reng ri rong rou ru rua ruan rui run ruo sa sai san sang sao se sei sen seng sha shai shan shang shao she shei shen sheng shi shou shu shua shuai shuan shuang shui shun shuo si song sou su suan sui sun suo ta tai tan tang tao te tei teng ti tian tiao tie ting tong tou tu tuan tui tun tuo wa wai wan wang wei wen weng wo wong wu xi xia xian xiang xiao xie xin xing xiong xiu xu xuan xue xun ya yai yan yang yao ye yi yin ying yo yong you yu yuan yue yun za zai zan zang zao ze zei zen zeng zha zhai zhan zhang zhao zhe zhei zhen zheng zhi zhong zhou zhu zhua zhuai zhuan zhuang zhui zhun zhuo zi zong zou zu zuan zui zun zuo
         """.split(whereSeparator: \Character.isWhitespace).map(String.init)
     )
+}
+
+extension MixedCompositionResolver {
+
+    /// Splits off the maximal leading run of letters that cannot begin any
+    /// pinyin syllable (i/u/v), returning the raw lead plus the remainder
+    /// when the remainder is a complete pinyin sequence. Rime can never
+    /// resolve such a stream directly; callers may look the remainder up
+    /// instead and reattach the lead to every candidate, matching what
+    /// Rime shows for the same stream with the lead at the end.
+    public static func rawLeadSplit(
+        of rawInput: String
+    ) -> (lead: String, remainder: String)? {
+        let characters = Array(rawInput.lowercased())
+        guard let first = characters.first,
+              !canBeginPinyinSyllable(first)
+        else {
+            return nil
+        }
+        var end = 1
+        while end < characters.count,
+              !canBeginPinyinSyllable(characters[end])
+        {
+            end += 1
+        }
+        guard end < characters.count else {
+            return nil
+        }
+        let remainder = String(characters[end...])
+        guard isLikelyPinyinSequence(remainder) else {
+            return nil
+        }
+        return (String(characters[0 ..< end]), remainder)
+    }
+}
+
+private extension MixedCompositionResolver {
+
+    /// The maximal leading run of letters that cannot begin any pinyin
+    /// syllable (i/u/v), offered as a raw English prefix only when the
+    /// remainder is a complete pinyin sequence. Streams like `iphone`
+    /// (remainder not pinyin) stay unresolved and commit verbatim.
+    static func rawLeadOccurrence(
+        in lowercaseCharacters: [Character],
+        hardOccurrences: [EnglishOccurrence]
+    ) -> EnglishOccurrence? {
+        guard let split = rawLeadSplit(of: String(lowercaseCharacters))
+        else {
+            return nil
+        }
+        let end = split.lead.count
+        guard !overlapsAny(
+            start: 0,
+            end: end,
+            occurrences: hardOccurrences
+        )
+        else {
+            return nil
+        }
+        return EnglishOccurrence(start: 0, end: end, source: .rawLead)
+    }
+
+    static let pinyinInitialLetters = Set(
+        pinyinSyllables.compactMap(\.first)
+    )
+
+    static func canBeginPinyinSyllable(_ character: Character?) -> Bool {
+        guard let character else {
+            return false
+        }
+        return pinyinInitialLetters.contains(character)
+    }
 
     static func uppercaseOccurrences(
         in characters: [Character]

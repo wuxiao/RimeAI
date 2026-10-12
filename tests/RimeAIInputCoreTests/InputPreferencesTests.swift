@@ -167,6 +167,65 @@ struct InputPreferencesTests {
             ) == nil
         )
     }
+
+    @Test("leading punctuation commits directly instead of entering composition")
+    func leadingPunctuationCommit() {
+        let chinese = RimeAIInputPreferences(punctuationStyle: .chinese)
+        let western = RimeAIInputPreferences(punctuationStyle: .western)
+
+        // 空缓冲（第一个字符）：标点直接上屏，按风格转换
+        #expect(
+            RimeAIInputTextTransformer.leadingLiteralCommitText(
+                ",".unicodeScalars.first!,
+                hasComposition: false,
+                preferences: chinese
+            ) == "，"
+        )
+        #expect(
+            RimeAIInputTextTransformer.leadingLiteralCommitText(
+                ".".unicodeScalars.first!,
+                hasComposition: false,
+                preferences: chinese
+            ) == "。"
+        )
+        #expect(
+            RimeAIInputTextTransformer.leadingLiteralCommitText(
+                ",".unicodeScalars.first!,
+                hasComposition: false,
+                preferences: western
+            ) == ","
+        )
+
+        // 已有 composition：标点仍进入 composition，不直接上屏
+        #expect(
+            RimeAIInputTextTransformer.leadingLiteralCommitText(
+                ",".unicodeScalars.first!,
+                hasComposition: true,
+                preferences: chinese
+            ) == nil
+        )
+
+        // 非标点符号即使空缓冲也不直接上屏（全角模式下仍进入
+        // composition，走字面量路径）
+        let fullWidth = RimeAIInputPreferences(
+            characterWidth: .full,
+            punctuationStyle: .western
+        )
+        #expect(
+            RimeAIInputTextTransformer.leadingLiteralCommitText(
+                "=".unicodeScalars.first!,
+                hasComposition: false,
+                preferences: fullWidth
+            ) == nil
+        )
+        #expect(
+            RimeAIInputTextTransformer.leadingLiteralCommitText(
+                "a".unicodeScalars.first!,
+                hasComposition: false,
+                preferences: chinese
+            ) == nil
+        )
+    }
 }
 
 @Test("script sanitization converts instead of rejecting")

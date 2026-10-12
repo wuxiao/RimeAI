@@ -21,6 +21,9 @@ public struct LocalSemanticEvaluation: Equatable, Sendable {
                 decision: decision,
                 confidence: confidence
             )
+        case .phraseBook:
+            // Client-side-only decision: the local ranker never emits it.
+            return .failure
         case .sameTopCandidate:
             return .sameTopCandidate
         case .insufficientCandidates:

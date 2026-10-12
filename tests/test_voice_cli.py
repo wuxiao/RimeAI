@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from rimeai_eval import cli
+from deep_json import deep_nesting_payloads
 from rimeai_eval.voice_performance import voice_run_sha256
 from test_voice_evaluation import _gates as _voice_gates
 from test_voice_evaluation import _performance_evidence
@@ -866,7 +867,7 @@ def test_evaluate_voice_rejects_hostile_performance_json_without_output_or_echo(
         json.dumps(huge_numeric).encode("utf-8"),
         json.dumps(huge_counter).encode("utf-8"),
         b"\xff",
-        b"[" * 1_100 + b"0" + b"]" * 1_100,
+        *deep_nesting_payloads(16 * 1_024 * 1_024),
         b'{"schema_version":' + b"9" * 5_000 + b"}",
     ]
     for index, payload in enumerate(payloads):

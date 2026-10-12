@@ -31,12 +31,12 @@ case .inputMethod:
     inset = 1
     corner = 5
 case .menu:
-    // Text Input Sources reserves space from the menu icon's intrinsic size.
-    // Match the system 16 x 16 pt square contract and let the rounded outline
-    // reach each edge, as current Apple input-mode template icons do.
-    canvasSize = CGSize(width: 16, height: 16)
+    // Text Input Sources renders the menu icon at the PDF's natural size.
+    // System input-mode badges (Pinyin, ABC) measure 22 x 16 pt in the menu,
+    // so the badge fills the entire 22 x 16 canvas edge to edge.
+    canvasSize = CGSize(width: 22, height: 16)
     inset = 0
-    corner = 4
+    corner = 3
 }
 
 let outputURL = URL(fileURLWithPath: CommandLine.arguments[1]) as CFURL

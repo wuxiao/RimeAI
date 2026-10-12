@@ -20,7 +20,7 @@ from time import perf_counter
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from .candidate_policy import partition_full_length_candidates
-from .evaluation import Ranking, RankerError
+from .ranking import Ranking, RankerError
 from .pinyin_guard import PinyinGuard
 
 

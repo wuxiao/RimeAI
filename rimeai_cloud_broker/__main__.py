@@ -1,13 +1,59 @@
+from __future__ import annotations
+
 import argparse
 import asyncio
-from pathlib import Path
+import logging
 import signal
-import sys
-from typing import Optional, Sequence
+import sqlite3
+from collections.abc import Callable, Sequence
+from pathlib import Path
 
+from rimeai_daemon.consolidation import (
+    ConsolidationPaths,
+    ConsolidationPipeline,
+    IdleConsolidationScheduler,
+)
+
+from .history_index import HistoryEmbeddingIndexer
+from .profile import (
+    CloudProfileSummarizer,
+    ProfileStore,
+    make_semantic_consolidator,
+)
 from .qwen import QwenCandidateRanker
 from .server import CloudBrokerServer
-from .history_index import HistoryEmbeddingIndexer
+
+CREDENTIAL_KEY = "RIMEAI_CLOUD_API_KEY"
+
+
+def _cloud_env_loader() -> str:
+    """Reads the API key from ~/.config/rimeai/cloud.env with the same
+    semantics as Swift CloudCredentialStore.parse: whole-line `#` comments
+    and blank lines are skipped, values are KEY=VALUE with surrounding
+    whitespace and one pair of quotes stripped, and a non-comment line
+    without `=` raises — a typo must not silently disable the cloud."""
+    path = Path.home() / ".config" / "rimeai" / "cloud.env"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return ""
+    for raw_line in text.split("\n"):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, separator, value = line.partition("=")
+        key = key.strip()
+        if not separator or not key:
+            raise ValueError("cloud credential file is malformed")
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {
+            '"',
+            "'",
+        }:
+            value = value[1:-1]
+        if key == CREDENTIAL_KEY:
+            return value
+    return ""
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -23,33 +69,112 @@ def _parser() -> argparse.ArgumentParser:
         / "rimeai-cloud.sock",
     )
     parser.add_argument(
-        "--rime-dictionary",
-        type=Path,
-        default=None,
-        help="Rime dictionary for pinyin alignment of generated sentences",
+        "--no-consolidation",
+        action="store_true",
+        help="disable the idle language-profile consolidation loop",
     )
     return parser
 
 
-def _load_pinyin_guard(path: Optional[Path]):
-    if path is None:
-        return None
-    try:
-        from rimeai_eval.pinyin_guard import PinyinGuard
+def _phrasebook_domain_resolver(
+    phrasebook_db: Path,
+) -> Callable[[str], str]:
+    """Bundle-to-domain resolver with a per-batch cache."""
+    cache: dict[str, str] = {}
 
-        return PinyinGuard.from_rime_dictionary(path)
-    except Exception as exc:  # noqa: BLE001 - degrade, never fail startup
-        print(
-            f"rimeai-cloud-broker: pinyin guard unavailable ({exc}); "
-            "text generation stays disabled",
-            file=sys.stderr,
+    def resolve(bundle_id: str) -> str:
+        if bundle_id in cache:
+            return cache[bundle_id]
+        domain = "global"
+        try:
+            with sqlite3.connect(phrasebook_db, timeout=1) as db:
+                row = db.execute(
+                    "SELECT domain FROM domain_map WHERE bundle_id = ?",
+                    (bundle_id,),
+                ).fetchone()
+            if row:
+                domain = str(row[0])
+        except sqlite3.Error:
+            domain = "global"
+        cache[bundle_id] = domain
+        return domain
+
+    return resolve
+
+
+def _usable_cloud_api_key() -> str:
+    """Scheduler-side credential decision: a malformed file or a missing
+    key means "no usable credentials" for the L3 pass (logged once at
+    startup), not a broken scheduler — the statistics phase and raw-text
+    eviction keep running with the semantic pass explicitly skipped."""
+    try:
+        return _cloud_env_loader()
+    except ValueError:
+        logging.getLogger(__name__).exception(
+            "cloud credential file is malformed; consolidation starts "
+            "without the semantic pass"
         )
+        return ""
+
+
+def _semantic_consolidator(
+    ranker: QwenCandidateRanker,
+    *,
+    enabled: bool,
+    profile_directory: Path,
+    phrasebook_db: Path,
+):
+    """Builds the L3 cloud-compression consolidator, or None when the
+    semantic pass must be skipped (disabled, no credential file, or an
+    unusable one) so eviction still proceeds."""
+    credential = Path.home() / ".config" / "rimeai" / "cloud.env"
+    has_credentials = credential.exists() and credential.stat().st_size > 0
+    if not (enabled and has_credentials):
         return None
+    if not _usable_cloud_api_key():
+        return None
+    summarizer = CloudProfileSummarizer(ranker.post_json)
+    return make_semantic_consolidator(
+        ProfileStore(profile_directory),
+        summarizer,
+        domain_resolver=_phrasebook_domain_resolver(phrasebook_db),
+    )
+
+
+def _maybe_start_consolidation(
+    ranker: QwenCandidateRanker,
+    *,
+    enabled: bool,
+) -> IdleConsolidationScheduler | None:
+    """Starts the L3 cloud-compression loop when credentials exist.
+
+    Without usable credentials the scheduler still runs the statistics
+    phase (semantic pass explicitly skipped) so raw-text eviction
+    continues even while the cloud is unusable."""
+    support = Path.home() / "Library" / "Application Support" / "RimeAI"
+    profile_directory = support / "language_profile"
+    paths = ConsolidationPaths(
+        history_db=support / "History" / "history.sqlite3",
+        phrasebook_db=profile_directory / "phrasebook.sqlite3",
+        user_lm=profile_directory / "user-lm.json.gz",
+    )
+    scheduler = IdleConsolidationScheduler(
+        ConsolidationPipeline(paths),
+        semantic_consolidator=_semantic_consolidator(
+            ranker,
+            enabled=enabled,
+            profile_directory=profile_directory,
+            phrasebook_db=paths.phrasebook_db,
+        ),
+    )
+    scheduler.start()
+    return scheduler
 
 
 async def _run(
     socket_path: Path,
-    rime_dictionary: Optional[Path],
+    *,
+    consolidation_enabled: bool = True,
 ) -> None:
     history_root = (
         Path.home()
@@ -58,8 +183,14 @@ async def _run(
         / "RimeAI"
         / "History"
     )
-    pinyin_guard = _load_pinyin_guard(rime_dictionary)
-    ranker = QwenCandidateRanker(pinyin_guard=pinyin_guard)
+    ranker = QwenCandidateRanker(api_key_loader=_cloud_env_loader)
+    # The scheduler owns the idle gate for consolidation; creating it
+    # before the server lets every accepted inference/continuation
+    # request refresh the idle deadline, so rounds never fire mid-typing.
+    scheduler = _maybe_start_consolidation(
+        ranker,
+        enabled=consolidation_enabled,
+    )
     server = CloudBrokerServer(
         socket_path,
         ranker,
@@ -67,7 +198,9 @@ async def _run(
             history_root / "history.sqlite3",
             history_root / "history-hnsw-v1.bin",
         ),
-        text_generation_enabled=ranker.generation_enabled,
+        activity_notifier=(
+            scheduler.note_activity if scheduler is not None else None
+        ),
     )
     await server.start()
     stop = asyncio.Event()
@@ -77,12 +210,19 @@ async def _run(
     try:
         await stop.wait()
     finally:
+        if scheduler is not None:
+            scheduler.stop()
         await server.close()
 
 
-def main(argv: Optional[Sequence[str]] = None) -> int:
+def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    asyncio.run(_run(args.socket, args.rime_dictionary))
+    asyncio.run(
+        _run(
+            args.socket,
+            consolidation_enabled=not args.no_consolidation,
+        )
+    )
     return 0
 
 

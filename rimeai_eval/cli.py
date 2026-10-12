@@ -13,7 +13,7 @@ from .cloud_evaluation import (
     evaluate_cloud_observations,
     load_cloud_observations,
 )
-from .beam_decoder import (
+from rimeai_runtime.beam_decoder import (
     BeamDecoderError,
     train_beam_decoder_config,
     write_beam_config_atomic,
@@ -34,20 +34,21 @@ from .keyboard_evaluation import (
     evaluate_keyboard_observations,
     load_keyboard_observations,
 )
-from .ngram_ranker import (
+from .language_profile_eval import main as _language_profile_main
+from rimeai_runtime.ngram_ranker import (
     NGramModelError,
     load_ngram_model,
     train_ngram_model,
     write_ngram_model_atomic,
 )
-from .neural_ranker import (
+from rimeai_runtime.neural_ranker import (
     HybridSemanticRanker,
     NeuralRankerError,
     load_neural_ranker,
     train_fusion_config,
     train_neural_ranker,
 )
-from .pinyin_guard import PinyinGuard
+from rimeai_runtime.pinyin_guard import PinyinGuard
 from .reporting import (
     ReportError,
     load_reports,
@@ -315,6 +316,27 @@ def _build_parser() -> argparse.ArgumentParser:
         "--rime-dictionary", required=True, type=Path
     )
     train_beam_parser.add_argument("--output", required=True, type=Path)
+
+    language_profile_parser = subparsers.add_parser(
+        "language-profile",
+        help="time-split evaluation of the language-profile learning layers",
+    )
+    language_profile_parser.add_argument(
+        "--history-db", required=True, type=Path
+    )
+    language_profile_parser.add_argument(
+        "--frozen-samples",
+        required=True,
+        type=Path,
+        help="P0-format JSONL dataset with candidates and gold_text",
+    )
+    language_profile_parser.add_argument(
+        "--baseline-model", required=True, type=Path
+    )
+    language_profile_parser.add_argument(
+        "--train-ratio", type=float, default=0.8
+    )
+    language_profile_parser.add_argument("--report", type=Path, default=None)
     return parser
 
 
@@ -1168,5 +1190,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             args.language_model,
             args.rime_dictionary,
             args.output,
+        )
+    if args.command == "language-profile":
+        return _language_profile_main(
+            [
+                "--history-db", str(args.history_db),
+                "--frozen-samples", str(args.frozen_samples),
+                "--baseline-model", str(args.baseline_model),
+                "--train-ratio", str(args.train_ratio),
+                *(["--report", str(args.report)] if args.report else []),
+            ]
         )
     raise AssertionError("unreachable")

@@ -13,13 +13,13 @@ from typing import Any, List, Tuple
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from rimeai_eval.beam_decoder import (
+from rimeai_runtime.beam_decoder import (
     BeamDecoderError,
     BeamSentenceDecoder,
     load_beam_config,
 )
-from rimeai_eval.ngram_ranker import NGramModelError, load_ngram_model
-from rimeai_eval.pinyin_guard import PinyinGuard
+from rimeai_runtime.ngram_ranker import NGramModelError, load_ngram_model
+from rimeai_runtime.pinyin_guard import PinyinGuard
 
 
 def fail(message: str) -> None:

@@ -33,9 +33,21 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["rimeai_eval", "rimeai_daemon", "rimeai_cloud_broker"]
+packages = ["rimeai_eval", "rimeai_runtime", "rimeai_daemon", "rimeai_cloud_broker"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_default_fixture_loop_scope = "function"
 filterwarnings = ["error"]
+
+[tool.pyright]
+include = [
+    "rimeai_runtime",
+    "rimeai_daemon",
+    "rimeai_cloud_broker",
+    "rimeai_eval",
+    "tests",
+]
+extraPaths = ["."]
+venvPath = "."
+venv = ".venv"

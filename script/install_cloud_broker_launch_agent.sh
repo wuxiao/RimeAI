@@ -31,13 +31,8 @@ if [[ ! -f "${template}" ]]; then
   print -u2 "error: cloud broker LaunchAgent template is missing"
   exit 2
 fi
-source_rime_dictionary="${project_root}/.rimeai/rime/shared/luna_pinyin.dict.yaml"
-if [[ ! -f "${source_rime_dictionary}" ]]; then
-  print -u2 "error: Rime dictionary is missing for cloud broker install"
-  exit 2
-fi
 if ! PYTHONPATH="${project_root}" "${python_path}" -c \
-  'from rimeai_cloud_broker import CloudBrokerServer, QwenCandidateRanker' \
+  'from rimeai_cloud_broker import CloudBrokerServer, QwenCandidateRanker; from rimeai_daemon.consolidation import ConsolidationPipeline' \
   >/dev/null 2>&1; then
   print -u2 "error: cloud broker source is incompatible with ${python_path}"
   exit 2
@@ -54,24 +49,38 @@ chmod 600 "${log_path}"
 rsync -a --delete --exclude='._*' --exclude='__pycache__' \
   "${project_root}/rimeai_cloud_broker/" \
   "${broker_root}/rimeai_cloud_broker/"
-# The broker validates generated sentences against the Rime dictionary;
-# ship the guard module and the dictionary beside the broker so the
-# LaunchAgent runtime never depends on the repository checkout.
-mkdir -p "${broker_root}/rimeai_eval"
+# The broker serves clients over the local IPC socket; ship the IPC module
+# beside the broker so the LaunchAgent runtime never depends on the
+# repository checkout.
+mkdir -p "${broker_root}/rimeai_runtime"
 rsync -a --delete --exclude='._*' --exclude='__pycache__' \
-  "${project_root}/rimeai_eval/__init__.py" \
-  "${project_root}/rimeai_eval/pinyin_guard.py" \
-  "${broker_root}/rimeai_eval/"
-rime_dictionary="${broker_root}/luna_pinyin.dict.yaml"
-install -m 600 "${source_rime_dictionary}" "${rime_dictionary}"
+  "${project_root}/rimeai_runtime/__init__.py" \
+  "${project_root}/rimeai_runtime/localipc.py" \
+  "${broker_root}/rimeai_runtime/"
+# __main__.py imports rimeai_daemon.consolidation for idle history
+# consolidation, and both servers share rimeai_daemon.segment_policy for
+# pinyin-segment validation; ship the modules they need the same way.
+mkdir -p "${broker_root}/rimeai_daemon"
+rsync -a --delete --exclude='._*' --exclude='__pycache__' \
+  "${project_root}/rimeai_daemon/__init__.py" \
+  "${project_root}/rimeai_daemon/consolidation.py" \
+  "${project_root}/rimeai_daemon/segment_policy.py" \
+  "${project_root}/rimeai_daemon/user_lm.py" \
+  "${broker_root}/rimeai_daemon/"
+# Fail fast if the staged snapshot cannot import the full module chain the
+# LaunchAgent will run (this exact gap once crash-looped the broker).
+if ! PYTHONPATH="${broker_root}" "${python_path}" -c \
+  'from rimeai_cloud_broker import CloudBrokerServer; from rimeai_daemon.consolidation import ConsolidationPipeline' \
+  >/dev/null 2>&1; then
+  print -u2 "error: staged cloud broker snapshot failed its import smoke test"
+  exit 2
+fi
 
 cp "${template}" "${staged_plist}"
 /usr/libexec/PlistBuddy -c \
   "Set :ProgramArguments:0 ${python_path}" "${staged_plist}"
 /usr/libexec/PlistBuddy -c \
   "Set :ProgramArguments:4 ${socket_path}" "${staged_plist}"
-/usr/libexec/PlistBuddy -c \
-  "Set :ProgramArguments:6 ${rime_dictionary}" "${staged_plist}"
 /usr/libexec/PlistBuddy -c \
   "Set :WorkingDirectory ${broker_root}" "${staged_plist}"
 /usr/libexec/PlistBuddy -c \

@@ -7,9 +7,8 @@ import heapq
 import json
 import math
 import os
+from collections.abc import Iterable, Sequence
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
-
 
 Vector = Sequence[float]
 
@@ -35,21 +34,21 @@ class HNSWGraphIndex:
         self,
         dimension: int,
         maximum_neighbors: int = 16,
-        generation: Optional[int] = None,
+        generation: int | None = None,
     ):
         self.dimension = dimension
         self.maximum_neighbors = maximum_neighbors
         self.generation = generation
-        self.entry_label: Optional[int] = None
-        self.nodes: Dict[int, Dict[str, object]] = {}
+        self.entry_label: int | None = None
+        self.nodes: dict[int, dict[str, object]] = {}
 
     @classmethod
     def load(
         cls,
         path: Path,
         dimension: int,
-        expected_generation: Optional[int] = None,
-    ) -> "HNSWGraphIndex":
+        expected_generation: int | None = None,
+    ) -> HNSWGraphIndex:
         index = cls(dimension, generation=expected_generation)
         if not path.exists():
             return index
@@ -100,7 +99,7 @@ class HNSWGraphIndex:
         os.chmod(temporary, 0o600)
         os.replace(temporary, path)
 
-    def synchronize(self, vectors: Dict[int, Vector]) -> None:
+    def synchronize(self, vectors: dict[int, Vector]) -> None:
         live = set(vectors)
         if set(self.nodes) - live:
             # Product history supports clear-all, not individual deletion. A
@@ -113,15 +112,15 @@ class HNSWGraphIndex:
     def query(
         self,
         vector: Vector,
-        vectors: Dict[int, Vector],
+        vectors: dict[int, Vector],
         maximum_count: int = 8,
         ef_search: int = 64,
-    ) -> List[Tuple[int, float]]:
+    ) -> list[tuple[int, float]]:
         if self.entry_label is None or self.entry_label not in vectors:
             return []
         current = self.entry_label
         current_distance = cosine_distance(vector, vectors[current])
-        maximum_level = int(self.nodes[current]["level"])
+        maximum_level = self._node_level(current)
         for level in range(maximum_level, 0, -1):
             changed = True
             while changed:
@@ -162,7 +161,7 @@ class HNSWGraphIndex:
         self,
         label: int,
         vector: Vector,
-        vectors: Dict[int, Vector],
+        vectors: dict[int, Vector],
     ) -> None:
         level = self._deterministic_level(label)
         self.nodes[label] = {
@@ -174,7 +173,7 @@ class HNSWGraphIndex:
             eligible = [
                 value
                 for value in existing
-                if int(self.nodes[value]["level"]) >= layer
+                if self._node_level(value) >= layer
                 and value in vectors
             ]
             nearest = sorted(
@@ -184,9 +183,17 @@ class HNSWGraphIndex:
                     value,
                 ),
             )[: self.maximum_neighbors]
-            self.nodes[label]["neighbors"][layer] = nearest
+            label_layers = self._node_layers(label)
+            while len(label_layers) <= layer:
+                label_layers.append([])
+            label_layers[layer] = nearest
             for neighbor in nearest:
-                layer_neighbors = self.nodes[neighbor]["neighbors"][layer]
+                neighbor_layers = self._node_layers(neighbor)
+                if layer >= len(neighbor_layers):
+                    continue
+                layer_neighbors = neighbor_layers[layer]
+                if not isinstance(layer_neighbors, list):
+                    continue
                 if label not in layer_neighbors:
                     layer_neighbors.append(label)
                 if len(layer_neighbors) > self.maximum_neighbors:
@@ -200,16 +207,34 @@ class HNSWGraphIndex:
                         )
                     )
                     del layer_neighbors[self.maximum_neighbors :]
-        if self.entry_label is None or level > int(
-            self.nodes[self.entry_label]["level"]
+        if self.entry_label is None or level > self._node_level(
+            self.entry_label
         ):
             self.entry_label = label
 
+    def _node_layers(self, label: int) -> list[object]:
+        """Neighbor lists for one node, initializing if absent."""
+        layers = self.nodes[label].get("neighbors")
+        if not isinstance(layers, list):
+            layers = []
+            self.nodes[label]["neighbors"] = layers
+        return layers
+
+    def _node_level(self, label: int) -> int:
+        value = self.nodes[label].get("level")
+        if not isinstance(value, int):
+            return 0
+        return value
+
     def _neighbors(self, label: int, level: int) -> Iterable[int]:
-        layers = self.nodes[label]["neighbors"]
-        if level >= len(layers):
+        # Neighbor lists are coerced to ints once at load (HNSWGraphIndex
+        # .load) and only int labels are ever stored by _insert, so no
+        # per-hop re-filtering is needed here.
+        layers = self.nodes[label].get("neighbors")
+        if not isinstance(layers, list) or level >= len(layers):
             return ()
-        return layers[level]
+        layer = layers[level]
+        return layer if isinstance(layer, list) else ()
 
     @staticmethod
     def _deterministic_level(label: int) -> int:

@@ -27,10 +27,13 @@ public enum RimeAIDiagnosticEvent: String, CaseIterable, Codable, Sendable {
     case belowConfidence = "below_confidence"
     case noCandidate = "no_candidate"
     case rankedCandidateShown = "ranked_candidate_shown"
+    case phraseBookSuggestionShown = "phrase_book_suggestion_shown"
+    case phraseBookSuggestionAccepted = "phrase_book_suggestion_accepted"
     case sentenceSuggestionShown = "sentence_suggestion_shown"
     case mixedCompositionShown = "mixed_composition_shown"
     case sentenceTooLong = "sentence_too_long"
     case sentenceIncomplete = "sentence_incomplete"
+    case inputTooLong = "input_too_long"
     case sentenceScriptMismatch = "sentence_script_mismatch"
     case semanticAccepted = "semantic_accepted"
     case semanticRankedAccepted = "semantic_ranked_accepted"
@@ -51,8 +54,10 @@ public enum RimeAIDiagnosticEvent: String, CaseIterable, Codable, Sendable {
     case cloudGeneratedShown = "cloud_generated_shown"
     case cloudGeneratedAccepted = "cloud_generated_accepted"
     case cloudGenerateReceived = "cloud_generate_received"
+    case modelDowngraded = "model_downgraded"
     case cloudTimeout = "cloud_timeout"
     case cloudInvalidResult = "cloud_invalid_result"
+    case cloudInvalidRequest = "cloud_invalid_request"
     case cloudTransportFailure = "cloud_transport_failure"
     case voiceStarted = "voice_started"
     case voiceStopped = "voice_stopped"
@@ -63,6 +68,24 @@ public enum RimeAIDiagnosticEvent: String, CaseIterable, Codable, Sendable {
     case voiceMicrophoneDenied = "voice_microphone_denied"
     case voiceFailure = "voice_failure"
     case voiceDisabled = "voice_disabled"
+    case continuationRequested = "continuation_requested"
+    case continuationShown = "continuation_shown"
+    case continuationAccepted = "continuation_accepted"
+    case continuationDismissed = "continuation_dismissed"
+    case continuationDismissedUserTyped =
+        "continuation_dismissed_user_typed"
+    case continuationDismissedCompositionBegan =
+        "continuation_dismissed_composition_began"
+    case continuationDismissedSessionSwitched =
+        "continuation_dismissed_session_switched"
+    case continuationDismissedSecureInput =
+        "continuation_dismissed_secure_input"
+    case continuationDismissedDeactivated =
+        "continuation_dismissed_deactivated"
+    case continuationDismissedTimedOut =
+        "continuation_dismissed_timed_out"
+    case continuationAbstained = "continuation_abstained"
+    case continuationCooldown = "continuation_cooldown"
 }
 
 public struct RimeAISettingsExport: Codable, Equatable, Sendable {
@@ -78,6 +101,7 @@ public struct RimeAISettingsExport: Codable, Equatable, Sendable {
         case voiceEnabled
         case voiceShortcut
         case voiceRimeHotwordsEnabled
+        case continuationSuggestionEnabled
         case contextPolicy
         case disabledAIApplications
         case disabledContextApplications
@@ -95,13 +119,14 @@ public struct RimeAISettingsExport: Codable, Equatable, Sendable {
     public let voiceEnabled: Bool
     public let voiceShortcut: VoiceDictationShortcut
     public let voiceRimeHotwordsEnabled: Bool
+    public let continuationSuggestionEnabled: Bool
     public let contextPolicy: ContextPolicy
     public let disabledAIApplications: [String]
     public let disabledContextApplications: [String]
     public let diagnostics: [String: Int]
 
     public init(
-        schemaVersion: Int = 6,
+        schemaVersion: Int = 8,
         inputPreferences: RimeAIInputPreferences = RimeAIInputPreferences(),
         aiEnabled: Bool,
         offlineLockEnabled: Bool,
@@ -112,6 +137,7 @@ public struct RimeAISettingsExport: Codable, Equatable, Sendable {
         voiceEnabled: Bool = false,
         voiceShortcut: VoiceDictationShortcut = .default,
         voiceRimeHotwordsEnabled: Bool = false,
+        continuationSuggestionEnabled: Bool = false,
         contextPolicy: ContextPolicy,
         disabledAIApplications: [String],
         disabledContextApplications: [String],
@@ -128,6 +154,7 @@ public struct RimeAISettingsExport: Codable, Equatable, Sendable {
         self.voiceEnabled = voiceEnabled
         self.voiceShortcut = voiceShortcut
         self.voiceRimeHotwordsEnabled = voiceRimeHotwordsEnabled
+        self.continuationSuggestionEnabled = continuationSuggestionEnabled
         self.contextPolicy = contextPolicy
         self.disabledAIApplications = disabledAIApplications
         self.disabledContextApplications = disabledContextApplications
@@ -182,10 +209,25 @@ public struct RimeAISettingsExport: Codable, Equatable, Sendable {
             Bool.self,
             forKey: .voiceRimeHotwordsEnabled
         )
+        if schemaVersion >= 7 {
+            continuationSuggestionEnabled = try container.decode(
+                Bool.self,
+                forKey: .continuationSuggestionEnabled
+            )
+        } else {
+            // Schema 5/6 documents predate the continuation opt-in.
+            continuationSuggestionEnabled = try container.decodeIfPresent(
+                Bool.self,
+                forKey: .continuationSuggestionEnabled
+            ) ?? false
+        }
         contextPolicy = try container.decode(
             ContextPolicy.self,
             forKey: .contextPolicy
         )
+        // `pinyinAlignment` (removed with the tier design) is ignored
+        // when present: unknown keys do not fail Codable decoding, so
+        // schema-8 exports written by older builds still import.
         disabledAIApplications = try container.decode(
             [String].self,
             forKey: .disabledAIApplications
@@ -211,6 +253,7 @@ public enum RimeAISettingsImportError: Error, Equatable, Sendable {
     case unsupportedCloudModelID
     case cloudCredentialRequired
     case voiceRequiresAI
+    case continuationRequiresAI
     case applicationPolicyLimitExceeded
 }
 
@@ -222,7 +265,7 @@ extension RimeAISettingsImportError: LocalizedError {
         case .documentTooLarge:
             "设置文件超过 \(RimeAISettingsStore.maxImportDocumentBytes / 1_024) KiB 限制。"
         case let .unsupportedSchemaVersion(version):
-            "不支持设置文件版本 \(version)，仅接受版本 5 或 6。"
+            "不支持设置文件版本 \(version)，仅接受版本 5、6、7 或 8。"
         case .offlineLockRequired:
             "离线网络隔离是强制策略，不能通过导入关闭。"
         case .unsupportedCloudProvider:
@@ -235,6 +278,8 @@ extension RimeAISettingsImportError: LocalizedError {
             "启用云服务前必须重新验证本机已有凭据。"
         case .voiceRequiresAI:
             "启用语音听写时必须同时启用 AI 功能。"
+        case .continuationRequiresAI:
+            "启用上屏后续写联想时必须同时启用 AI 功能。"
         case .applicationPolicyLimitExceeded:
             "应用策略列表过大或包含无效的应用标识。"
         }
@@ -263,6 +308,10 @@ public final class RimeAISettingsStore: @unchecked Sendable {
             "RimeAIDisabledContextApplications"
         public static let diagnostics = "RimeAIDiagnostics"
         public static let personalEnglishTokens = "RimeAIPersonalEnglishTokens"
+        public static let cloudConsolidationEnabled =
+            "RimeAICloudConsolidationEnabled"
+        public static let continuationSuggestionEnabled =
+            "RimeAIContinuationSuggestionEnabled"
     }
 
     public static let shared = RimeAISettingsStore()
@@ -329,21 +378,6 @@ public final class RimeAISettingsStore: @unchecked Sendable {
         )
     }
 
-    public func learnPersonalEnglishTokens(_ tokens: Set<String>) {
-        var learned = (defaults.stringArray(forKey: Keys.personalEnglishTokens)
-            ?? []).compactMap(Self.normalizedPersonalEnglishToken)
-        for token in tokens.compactMap(Self.normalizedPersonalEnglishToken)
-            .sorted()
-        {
-            learned.removeAll { $0 == token }
-            learned.append(token)
-        }
-        defaults.set(
-            Array(learned.suffix(256)),
-            forKey: Keys.personalEnglishTokens
-        )
-    }
-
     public var aiEnabled: Bool {
         get {
             guard defaults.object(forKey: Keys.aiEnabled) != nil else {
@@ -385,6 +419,23 @@ public final class RimeAISettingsStore: @unchecked Sendable {
             return
         }
         cloudConfigured = false
+    }
+
+    /// 云压缩（L3 LLM 画像固化）默认开启；关闭后 broker 以
+    /// `--no-consolidation` 运行，仅保留本地统计固化。
+    public var cloudConsolidationEnabled: Bool {
+        get {
+            guard defaults.object(
+                forKey: Keys.cloudConsolidationEnabled
+            ) != nil else {
+                return true
+            }
+            return defaults.bool(forKey: Keys.cloudConsolidationEnabled)
+        }
+        set {
+            defaults.set(newValue, forKey: Keys.cloudConsolidationEnabled)
+            notifySettingsChanged()
+        }
     }
 
     public var cloudModelID: String {
@@ -446,6 +497,16 @@ public final class RimeAISettingsStore: @unchecked Sendable {
         get { defaults.bool(forKey: Keys.voiceRimeHotwordsEnabled) }
         set {
             defaults.set(newValue, forKey: Keys.voiceRimeHotwordsEnabled)
+            notifySettingsChanged()
+        }
+    }
+
+    /// 上屏后续写联想是独立 opt-in 的实验能力，默认关闭；只有用户显式
+    /// 启用、AI 总开关允许且云已配置时，输入法才在 commit 后请求续写建议。
+    public var continuationSuggestionEnabled: Bool {
+        get { defaults.bool(forKey: Keys.continuationSuggestionEnabled) }
+        set {
+            defaults.set(newValue, forKey: Keys.continuationSuggestionEnabled)
             notifySettingsChanged()
         }
     }
@@ -521,6 +582,85 @@ public final class RimeAISettingsStore: @unchecked Sendable {
         return contextPolicy
     }
 
+    private func loadDiagnostics() -> [String: Int] {
+        let raw = defaults.dictionary(forKey: Keys.diagnostics) ?? [:]
+        return raw.reduce(into: [:]) { result, entry in
+            if let value = entry.value as? NSNumber {
+                result[entry.key] = value.intValue
+            }
+        }
+    }
+
+    private func normalizedApplications(
+        _ applications: [String]
+    ) -> [String] {
+        Array(
+            Set(
+                applications
+                    .map(normalizedApplication)
+                    .filter { !$0.isEmpty }
+            )
+        ).sorted()
+    }
+
+    private static func isValidImportedApplicationPolicy(
+        _ applications: [String]
+    ) -> Bool {
+        guard applications.count <= 256 else {
+            return false
+        }
+        return applications.allSatisfy { application in
+            let trimmed = application.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            )
+            return application == trimmed
+                && (1 ... 255).contains(application.utf8.count)
+                && application.unicodeScalars.allSatisfy {
+                    !CharacterSet.controlCharacters.contains($0)
+                }
+        }
+    }
+
+    private func normalizedApplication(
+        _ application: String
+    ) -> String {
+        application.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func normalizedPersonalEnglishToken(
+        _ token: String
+    ) -> String? {
+        let normalized = token.lowercased()
+        guard (3 ... 32).contains(normalized.count),
+              normalized.unicodeScalars.allSatisfy({ scalar in
+                  (65 ... 90).contains(scalar.value)
+                      || (97 ... 122).contains(scalar.value)
+              })
+        else {
+            return nil
+        }
+        return normalized
+    }
+
+    private func notifySettingsChanged() {
+        NotificationCenter.default.post(
+            name: .rimeAISettingsDidChange,
+            object: self
+        )
+    }
+
+    private func notifyDiagnosticsChanged() {
+        NotificationCenter.default.post(
+            name: .rimeAIDiagnosticsDidChange,
+            object: self
+        )
+    }
+}
+
+// MARK: - Diagnostics, reset and transfer
+// 同文件 extension：诊断计数、数据重置与导入导出，保持对
+// private 成员（defaults/diagnosticsLock/Keys）的访问。
+extension RimeAISettingsStore {
     public func record(_ event: RimeAIDiagnosticEvent) {
         incrementDiagnostic(key: event.rawValue)
     }
@@ -599,6 +739,8 @@ public final class RimeAISettingsStore: @unchecked Sendable {
             Keys.disabledContextApplications,
             Keys.diagnostics,
             Keys.personalEnglishTokens,
+            Keys.cloudConsolidationEnabled,
+            Keys.continuationSuggestionEnabled,
         ] {
             defaults.removeObject(forKey: key)
         }
@@ -621,6 +763,7 @@ public final class RimeAISettingsStore: @unchecked Sendable {
             Keys.contextPolicy,
             Keys.disabledAIApplications,
             Keys.disabledContextApplications,
+            Keys.continuationSuggestionEnabled,
         ] {
             defaults.removeObject(forKey: key)
         }
@@ -637,6 +780,7 @@ public final class RimeAISettingsStore: @unchecked Sendable {
             voiceEnabled: voiceEnabled,
             voiceShortcut: voiceShortcut,
             voiceRimeHotwordsEnabled: voiceRimeHotwordsEnabled,
+            continuationSuggestionEnabled: continuationSuggestionEnabled,
             contextPolicy: contextPolicy,
             disabledAIApplications: disabledAIApplications,
             disabledContextApplications: disabledContextApplications,
@@ -670,7 +814,9 @@ public final class RimeAISettingsStore: @unchecked Sendable {
         _ snapshot: RimeAISettingsExport,
         hasCloudCredential: Bool
     ) throws {
-        guard snapshot.schemaVersion == 5 || snapshot.schemaVersion == 6 else {
+        guard snapshot.schemaVersion == 5 || snapshot.schemaVersion == 6
+            || snapshot.schemaVersion == 7 || snapshot.schemaVersion == 8
+        else {
             throw RimeAISettingsImportError.unsupportedSchemaVersion(
                 snapshot.schemaVersion
             )
@@ -696,6 +842,10 @@ public final class RimeAISettingsStore: @unchecked Sendable {
         }
         guard snapshot.aiEnabled || !snapshot.voiceEnabled else {
             throw RimeAISettingsImportError.voiceRequiresAI
+        }
+        guard snapshot.aiEnabled || !snapshot.continuationSuggestionEnabled
+        else {
+            throw RimeAISettingsImportError.continuationRequiresAI
         }
         guard Self.isValidImportedApplicationPolicy(
             snapshot.disabledAIApplications
@@ -731,6 +881,10 @@ public final class RimeAISettingsStore: @unchecked Sendable {
             snapshot.voiceRimeHotwordsEnabled,
             forKey: Keys.voiceRimeHotwordsEnabled
         )
+        defaults.set(
+            snapshot.continuationSuggestionEnabled,
+            forKey: Keys.continuationSuggestionEnabled
+        )
         defaults.set(snapshot.contextPolicy.rawValue, forKey: Keys.contextPolicy)
         defaults.set(
             normalizedApplications(snapshot.disabledAIApplications),
@@ -741,79 +895,5 @@ public final class RimeAISettingsStore: @unchecked Sendable {
             forKey: Keys.disabledContextApplications
         )
         notifySettingsChanged()
-    }
-
-    private func loadDiagnostics() -> [String: Int] {
-        let raw = defaults.dictionary(forKey: Keys.diagnostics) ?? [:]
-        return raw.reduce(into: [:]) { result, entry in
-            if let value = entry.value as? NSNumber {
-                result[entry.key] = value.intValue
-            }
-        }
-    }
-
-    private func normalizedApplications(
-        _ applications: [String]
-    ) -> [String] {
-        Array(
-            Set(
-                applications
-                    .map(normalizedApplication)
-                    .filter { !$0.isEmpty }
-            )
-        ).sorted()
-    }
-
-    private static func isValidImportedApplicationPolicy(
-        _ applications: [String]
-    ) -> Bool {
-        guard applications.count <= 256 else {
-            return false
-        }
-        return applications.allSatisfy { application in
-            let trimmed = application.trimmingCharacters(
-                in: .whitespacesAndNewlines
-            )
-            return application == trimmed
-                && (1 ... 255).contains(application.utf8.count)
-                && application.unicodeScalars.allSatisfy {
-                    !CharacterSet.controlCharacters.contains($0)
-                }
-        }
-    }
-
-    private func normalizedApplication(
-        _ application: String
-    ) -> String {
-        application.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private static func normalizedPersonalEnglishToken(
-        _ token: String
-    ) -> String? {
-        let normalized = token.lowercased()
-        guard (3 ... 32).contains(normalized.count),
-              normalized.unicodeScalars.allSatisfy({ scalar in
-                  (65 ... 90).contains(scalar.value)
-                      || (97 ... 122).contains(scalar.value)
-              })
-        else {
-            return nil
-        }
-        return normalized
-    }
-
-    private func notifySettingsChanged() {
-        NotificationCenter.default.post(
-            name: .rimeAISettingsDidChange,
-            object: self
-        )
-    }
-
-    private func notifyDiagnosticsChanged() {
-        NotificationCenter.default.post(
-            name: .rimeAIDiagnosticsDidChange,
-            object: self
-        )
     }
 }

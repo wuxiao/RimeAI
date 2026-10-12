@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from deep_json import deep_nesting_payloads
 from rimeai_eval.voice_dataset import VoiceAudio
 from rimeai_eval.voice_dataset import VoiceConditions
 from rimeai_eval.voice_dataset import VoiceCorpus
@@ -573,7 +574,7 @@ def test_performance_json_rejects_duplicate_keys_and_nonfinite_numbers(
     "payload",
     [
         b"\xff",
-        b"[" * 1_100 + b"0" + b"]" * 1_100,
+        *deep_nesting_payloads(16 * 1_024 * 1_024),
         b'{"schema_version":' + b"9" * 5_000 + b"}",
     ],
 )

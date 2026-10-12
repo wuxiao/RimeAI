@@ -38,13 +38,13 @@ final class InputSourceIconContractTests: XCTestCase {
             Bundle.main.url(forResource: "RimeAIMenu", withExtension: "pdf")
         )
         let menuIcon = try XCTUnwrap(NSImage(contentsOf: menuIconURL))
-        XCTAssertEqual(menuIcon.size.width, 16, accuracy: 0.001)
+        XCTAssertEqual(menuIcon.size.width, 22, accuracy: 0.001)
         XCTAssertEqual(menuIcon.size.height, 16, accuracy: 0.001)
 
         let visibleBounds = try visibleBounds(of: menuIconURL, scale: 4)
         XCTAssertEqual(visibleBounds.minX, 0)
         XCTAssertEqual(visibleBounds.minY, 0)
-        XCTAssertEqual(visibleBounds.width, 64)
+        XCTAssertEqual(visibleBounds.width, 88)
         XCTAssertEqual(visibleBounds.height, 64)
     }
 

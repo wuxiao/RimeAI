@@ -1,12 +1,15 @@
 from pathlib import Path
 
-from rimeai_eval.beam_decoder import (
+import pytest
+
+from rimeai_runtime.beam_decoder import (
     BeamDecoderConfig,
     BeamSentenceDecoder,
+    SegmentDecodeInput,
     train_beam_decoder_config,
 )
-from rimeai_eval.ngram_ranker import train_ngram_model
-from rimeai_eval.pinyin_guard import PinyinGuard
+from rimeai_runtime.ngram_ranker import train_ngram_model
+from rimeai_runtime.pinyin_guard import PinyinGuard
 
 
 def _sample(
@@ -167,6 +170,130 @@ def test_beam_decoder_reports_inputs_beyond_the_validated_sentence_limit(
         context="长句测试",
         pinyin="shi" * 31,
         candidates=["是" * 31, "时" * 31],
+    )
+
+    assert result.text == ""
+    assert result.reason == "too_long"
+
+
+def _decoder(tmp_path: Path, threshold: float = 0.0) -> BeamSentenceDecoder:
+    return BeamSentenceDecoder(
+        _language_model(),
+        _guard(tmp_path),
+        BeamDecoderConfig(
+            threshold=threshold,
+            beam_width=16,
+            characters_per_syllable=20,
+            language_model_sha256="a" * 64,
+            dictionary_sha256="b" * 64,
+            dataset_sha256="c" * 64,
+        ),
+    )
+
+
+class _RecordingDecoder(BeamSentenceDecoder):
+    def __init__(self, language_model, guard, config):
+        super().__init__(language_model, guard, config)
+        self.calls: list[tuple[str, str, list[str]]] = []
+
+    def suggest(self, *, context, pinyin, candidates):
+        self.calls.append((context, pinyin, list(candidates)))
+        return super().suggest(
+            context=context, pinyin=pinyin, candidates=candidates
+        )
+
+
+def test_suggest_segments_decodes_each_segment_with_accumulated_context(
+    tmp_path: Path,
+):
+    decoder = _RecordingDecoder(
+        _language_model(),
+        _guard(tmp_path),
+        BeamDecoderConfig(
+            threshold=0.0,
+            beam_width=16,
+            characters_per_syllable=20,
+            language_model_sha256="a" * 64,
+            dictionary_sha256="b" * 64,
+            dataset_sha256="c" * 64,
+        ),
+    )
+
+    result = decoder.suggest_segments(
+        context="请执行这条",
+        segments=[
+            SegmentDecodeInput(
+                pinyin="mingling", separator="，", committed_text="明令"
+            ),
+            SegmentDecodeInput(pinyin="shi", separator="", committed_text=""),
+        ],
+        active_candidates=["是", "时"],
+    )
+
+    assert decoder.calls[0] == ("请执行这条", "mingling", ["明令"])
+    assert decoder.calls[1] == ("请执行这条命令，", "shi", ["是", "时"])
+    assert result.text == "命令，时"
+    assert result.reason == "suggestion"
+    assert result.confidence == pytest.approx(0.5)
+    assert _guard(tmp_path).matches(
+        result.text.replace("，", ""), "minglingshi"
+    )
+
+
+def test_suggest_segments_falls_back_to_committed_text(tmp_path: Path):
+    decoder = _decoder(tmp_path)
+
+    result = decoder.suggest_segments(
+        context="请执行这条",
+        segments=[
+            SegmentDecodeInput(
+                pinyin="mingling", separator="，", committed_text="执行"
+            ),
+            SegmentDecodeInput(pinyin="shi", separator="", committed_text=""),
+        ],
+        active_candidates=["是", "时"],
+    )
+
+    assert result.text == "执行，时"
+    assert result.reason == "suggestion"
+    assert 0 <= result.confidence <= 1
+
+
+def test_suggest_segments_min_confidence_gates_joined_sentence(
+    tmp_path: Path,
+):
+    decoder = _decoder(tmp_path, threshold=100.0)
+
+    result = decoder.suggest_segments(
+        context="请执行这条",
+        segments=[
+            SegmentDecodeInput(
+                pinyin="mingling", separator="，", committed_text="明令"
+            ),
+            SegmentDecodeInput(pinyin="shi", separator="", committed_text=""),
+        ],
+        active_candidates=["是", "时"],
+    )
+
+    assert result.text == ""
+    assert result.reason == "below_threshold"
+
+
+def test_suggest_segments_reports_overlength_joined_sentence(
+    tmp_path: Path,
+):
+    decoder = _decoder(tmp_path)
+    long_pinyin = "shi" * 20
+
+    result = decoder.suggest_segments(
+        context="长句测试",
+        segments=[
+            SegmentDecodeInput(
+                pinyin=long_pinyin, separator="，", committed_text="时" * 20
+            ),
+            SegmentDecodeInput(pinyin=long_pinyin, separator="", committed_text=""),
+        ],
+        active_candidates=["时" * 20, "是" * 20],
     )
 
     assert result.text == ""

@@ -16,6 +16,8 @@ public struct RimeAIProductDataLayout: Equatable, Sendable {
     public let historyDirectory: URL
     public let historyDatabase: URL
     public let historyVectorIndex: URL
+    public let languageProfileDirectory: URL
+    public let phraseBookDatabase: URL
     public let voiceDirectory: URL
     public let voiceHelperApplication: URL
     public let voiceSocket: URL
@@ -60,6 +62,16 @@ public struct RimeAIProductDataLayout: Equatable, Sendable {
             .appendingPathComponent("history.sqlite3", isDirectory: false)
         historyVectorIndex = historyDirectory
             .appendingPathComponent("history-hnsw-v1.bin", isDirectory: false)
+        languageProfileDirectory = supportDirectory
+            .appendingPathComponent(
+                "language_profile",
+                isDirectory: true
+            )
+        phraseBookDatabase = languageProfileDirectory
+            .appendingPathComponent(
+                "phrasebook.sqlite3",
+                isDirectory: false
+            )
         voiceDirectory = supportDirectory
             .appendingPathComponent("voice", isDirectory: true)
         voiceHelperApplication = voiceDirectory
@@ -115,6 +127,7 @@ public struct RimeAIProductDataLayout: Equatable, Sendable {
             modelDirectory,
             runtimeDirectory,
             historyDirectory,
+            languageProfileDirectory,
             voiceDirectory,
             controlDirectory,
             launchAgentPlist,

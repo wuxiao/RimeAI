@@ -8,7 +8,7 @@ from .command_sentence_decoder import (
     CommandSentenceDecoder,
     SentenceDecoderProtocolError,
 )
-from .pinyin_guard import PinyinGuard
+from rimeai_runtime.pinyin_guard import PinyinGuard
 
 
 def _ratio(numerator: int, denominator: int) -> float:

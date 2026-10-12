@@ -1,11 +1,14 @@
+from __future__ import annotations
+
 import argparse
 import asyncio
 import json
-from pathlib import Path
 import signal
 import socket
 import sys
-from typing import Any, Dict, Optional, Sequence
+from collections.abc import Sequence
+from pathlib import Path
+from typing import Any
 
 from .engine import LocalInferenceEngine
 from .offline import install_offline_network_guard
@@ -55,6 +58,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--expected-artifact-id")
     parser.add_argument("--probe-timeout-ms", type=int, default=2000)
+    parser.add_argument(
+        "--user-lm",
+        type=Path,
+        help="L2 user language model artifact the engine reranks with",
+    )
     return parser
 
 
@@ -63,7 +71,7 @@ def _probe_running_daemon(
     *,
     expected_artifact_id: str,
     timeout_ms: int,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     if not 1 <= timeout_ms <= 30_000:
         raise ValueError("probe timeout must be between 1 and 30000 ms")
     probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -108,6 +116,14 @@ def _probe_running_daemon(
 
 
 async def _run(args: argparse.Namespace) -> None:
+    # The cloud broker owns the idle consolidation loop (it holds the
+    # credentials); the daemon only consumes the artifacts it produces.
+    support_directory = (
+        Path.home()
+        / "Library"
+        / "Application Support"
+        / "RimeAI"
+    )
     engine = LocalInferenceEngine(
         language_model_path=args.language_model,
         beam_config_path=args.beam_config,
@@ -115,6 +131,10 @@ async def _run(args: argparse.Namespace) -> None:
         neural_model_path=args.neural_model,
         fusion_config_path=args.fusion_config,
         neural_device=args.neural_device,
+        user_lm_path=(
+            args.user_lm
+            or support_directory / "language_profile" / "user-lm.json.gz"
+        ),
     )
     server = RimeAIDaemonServer(args.socket, engine)
     await server.start()
@@ -128,7 +148,7 @@ async def _run(args: argparse.Namespace) -> None:
         await server.close()
 
 
-def main(argv: Optional[Sequence[str]] = None) -> int:
+def main(argv: Sequence[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
     if (args.probe_socket is None) != (args.expected_artifact_id is None):

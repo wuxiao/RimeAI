@@ -171,7 +171,7 @@ verify_icon_dimensions() {
 verify_icon_dimensions \
   "${app_bundle}/Contents/Resources/RimeAI.pdf" 24 18
 verify_icon_dimensions \
-  "${app_bundle}/Contents/Resources/RimeAIMenu.pdf" 16 16
+  "${app_bundle}/Contents/Resources/RimeAIMenu.pdf" 22 16
 
 if ! icon_is_template=$(/usr/libexec/PlistBuddy \
   -c 'Print :TISIconIsTemplate' "${input_method_info}" 2>/dev/null) \

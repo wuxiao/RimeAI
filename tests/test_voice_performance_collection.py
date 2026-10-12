@@ -11,6 +11,7 @@ import threading
 import pytest
 
 import rimeai_eval.voice_performance_collection as voice_performance_collection
+from deep_json import deep_nesting_payloads
 from rimeai_eval.voice_performance_collection import (
     VoicePerformanceCollectionError,
     assemble_voice_performance,
@@ -185,7 +186,7 @@ def test_collection_plan_rejects_duplicate_keys(tmp_path: Path):
     "payload",
     [
         b"\xff",
-        b"[" * 1_100 + b"0" + b"]" * 1_100,
+        *deep_nesting_payloads(131_072),
         b'{"schema_version":' + b"9" * 5_000 + b"}",
         b"{" + b" " * 131_072 + b"}",
     ],
@@ -378,11 +379,12 @@ def test_live_events_reject_duplicate_keys_and_oversized_lines():
         )
     with pytest.raises(VoicePerformanceCollectionError, match="too large"):
         decode_voice_collection_event(b"{" + b" " * 4096 + b"}\n", corpus)
-    with pytest.raises(VoicePerformanceCollectionError, match="invalid JSON"):
-        decode_voice_collection_event(
-            b"[" * 1_100 + b"0" + b"]" * 1_100 + b"\n",
-            corpus,
-        )
+    # Deep nesting must stay under the 4,096-byte event cap, so on
+    # interpreters whose parser budget exceeds that depth there is no
+    # event-sized input that can reach the RecursionError branch.
+    for payload in deep_nesting_payloads(4_096):
+        with pytest.raises(VoicePerformanceCollectionError, match="invalid JSON"):
+            decode_voice_collection_event(payload + b"\n", corpus)
 
 
 def test_event_validation_never_echoes_an_unknown_private_key():

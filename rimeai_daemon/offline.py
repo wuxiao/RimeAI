@@ -1,11 +1,10 @@
 """Process-wide network guard for the Offline Lock execution mode."""
 
-from contextlib import contextmanager
 import errno
 import socket
+from collections.abc import Iterator
+from contextlib import contextmanager
 from threading import Lock
-from typing import Iterator
-
 
 _ORIGINAL_SOCKET = socket.socket
 _guard_lock = Lock()

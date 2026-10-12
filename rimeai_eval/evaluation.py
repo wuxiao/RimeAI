@@ -13,11 +13,7 @@ from typing import (
     Tuple,
 )
 
-
-@dataclass(frozen=True)
-class Ranking:
-    candidates: Tuple[str, ...]
-    confidence: float
+from rimeai_runtime.ranking import Ranking, RankerError
 
 
 class Ranker(Protocol):
@@ -25,10 +21,6 @@ class Ranker(Protocol):
 
     def rank(self, sample: Dict[str, Any]) -> Ranking:
         ...
-
-
-class RankerError(RuntimeError):
-    """A recoverable ranker failure for one evaluation sample."""
 
 
 class BaselineRanker:

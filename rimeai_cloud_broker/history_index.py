@@ -2,20 +2,25 @@
 
 from __future__ import annotations
 
-from array import array
-from pathlib import Path
 import sqlite3
-from typing import Any, Dict, List, Optional, Protocol, Sequence
+from array import array
+from collections.abc import Sequence
+from pathlib import Path
+from typing import Any, Protocol
 
 from .hnsw_index import HNSWGraphIndex
 
-
 EMBEDDING_MODEL = "text-embedding-v4"
 EMBEDDING_DIMENSIONS = 512
+# The local Ollama endpoint has no embedding model installed: every index
+# round trip against /v1/embeddings is a 404, and with a large pending
+# backlog the 5s retry loop produces endless noise. Flip this back (and
+# install a matching embedding model) to resume background vectorization.
+EMBEDDING_INDEXING_ENABLED = False
 
 
 class Embedder(Protocol):
-    def embed_texts(self, texts: Sequence[str]) -> List[List[float]]: ...
+    def embed_texts(self, texts: Sequence[str]) -> list[list[float]]: ...
 
 
 class HistoryEmbeddingIndexer:
@@ -23,7 +28,7 @@ class HistoryEmbeddingIndexer:
         self.database_path = database_path
         self.index_path = index_path
 
-    def generation(self) -> Optional[int]:
+    def generation(self) -> int | None:
         if not self.database_path.exists():
             return None
         with sqlite3.connect(self.database_path) as database:
@@ -33,12 +38,14 @@ class HistoryEmbeddingIndexer:
         return int(row[0]) if row else None
 
     def run_once(self, embedder: Embedder, batch_size: int = 16) -> int:
+        if not EMBEDDING_INDEXING_ENABLED:
+            return self._drain_pending_jobs()
         if not self.database_path.exists():
             return 0
         with sqlite3.connect(self.database_path, timeout=1) as database:
             rows = database.execute(
                 """
-                SELECT j.id, c.id, c.pinyin, c.committed_text
+                SELECT j.id, c.id, c.committed_text
                 FROM embedding_jobs j
                 JOIN history_commits c ON c.id = j.commit_id
                 WHERE j.status IN ('pending', 'retry')
@@ -50,7 +57,9 @@ class HistoryEmbeddingIndexer:
             ).fetchall()
         if not rows:
             return 0
-        texts = [f"{row[2]}\n{row[3]}" for row in rows]
+        # History vectors represent what the user actually committed; the
+        # typed pinyin never enters the embedding text.
+        texts = [row[2] for row in rows]
         try:
             vectors = embedder.embed_texts(texts)
         except Exception:
@@ -92,27 +101,20 @@ class HistoryEmbeddingIndexer:
         self._rebuild_hnsw()
         return len(rows)
 
-    def augment_request(self, cloud_request: Dict[str, Any]) -> Dict[str, Any]:
-        """Retrieve older history using recent-topic and pinyin seed vectors."""
+    def augment_request(self, cloud_request: dict[str, Any]) -> dict[str, Any]:
+        """Augment the request with older history retrieved by the
+        recent-topic seed.
+
+        Only the user's committed text participates: the typed pinyin is
+        never matched against history, and the merged snippets are fed in
+        chronological (oldest → newest) order."""
         if not self.index_path.exists() or not self.database_path.exists():
             return cloud_request
-        pinyin = cloud_request["pinyin"]
         with sqlite3.connect(self.database_path, timeout=0.05) as database:
             generation_row = database.execute(
                 "SELECT generation FROM history_metadata WHERE id = 1"
             ).fetchone()
             generation = int(generation_row[0]) if generation_row else 0
-            pinyin_seeds = database.execute(
-                """
-                SELECT rowid, embedding
-                FROM history_commits
-                WHERE embedding_state = 'ready'
-                  AND pinyin LIKE ?
-                ORDER BY committed_at_ms DESC
-                LIMIT 4
-                """,
-                (f"%{pinyin}%",),
-            ).fetchall()
             recent_seeds = database.execute(
                 """
                 SELECT rowid, embedding
@@ -124,7 +126,7 @@ class HistoryEmbeddingIndexer:
             ).fetchall()
             seeds_by_rowid = {
                 int(row[0]): row[1]
-                for row in pinyin_seeds + recent_seeds
+                for row in recent_seeds
             }
             if not seeds_by_rowid:
                 return cloud_request
@@ -192,9 +194,28 @@ class HistoryEmbeddingIndexer:
             if snippet["id"] not in seen:
                 seen.add(snippet["id"])
                 merged.append(snippet)
+        # 按正序（提交时间从旧到新）代入；截断时保留最新的 8 条。
+        merged.sort(
+            key=lambda snippet: snippet["committed_at_ms"], reverse=True
+        )
+        merged = merged[:8]
+        merged.sort(key=lambda snippet: snippet["committed_at_ms"])
         augmented = dict(cloud_request)
-        augmented["history_snippets"] = merged[:8]
+        augmented["history_snippets"] = merged
         return augmented
+
+    def _drain_pending_jobs(self) -> int:
+        """Removes queued embedding jobs while indexing is disabled.
+
+        Nothing will ever process them, so leaving them behind only grows
+        the table; deletion is safe because the jobs are derived state
+        (history_commits.embedding_state stays 'pending', which simply
+        means 'not vectorized')."""
+        if not self.database_path.exists():
+            return 0
+        with sqlite3.connect(self.database_path, timeout=1) as database:
+            cursor = database.execute("DELETE FROM embedding_jobs")
+            return max(cursor.rowcount, 0)
 
     def _mark_retry(self, job_ids: Sequence[int]) -> None:
         if not job_ids or not self.database_path.exists():
@@ -252,7 +273,7 @@ class HistoryEmbeddingIndexer:
                 pass
 
     @staticmethod
-    def _decode_vector(blob: bytes) -> List[float]:
+    def _decode_vector(blob: bytes) -> list[float]:
         values = array("f")
         values.frombytes(blob)
         if len(values) != EMBEDDING_DIMENSIONS:

@@ -520,17 +520,24 @@ def test_native_diagnostics_are_bounded_while_the_driver_is_running(
     artifact_dir.mkdir()
     output_path = tmp_path / "observations.jsonl"
     monkeypatch.setattr(
-        observation_collection, "_NATIVE_STARTUP_ALLOWANCE_SECONDS", 1.0
+        observation_collection, "_NATIVE_STARTUP_ALLOWANCE_SECONDS", 5.0
     )
     monkeypatch.setattr(
         observation_collection, "_NATIVE_FINAL_DEADLINE_SECONDS", 0.0
     )
     monkeypatch.setattr(
-        observation_collection, "_MAXIMUM_NATIVE_TIMEOUT_SECONDS", 2.0
+        observation_collection, "_MAXIMUM_NATIVE_TIMEOUT_SECONDS", 10.0
     )
 
     started = time.monotonic()
-    with pytest.raises(VoiceObservationCollectionError):
+    # Detection happens in the 0.05-second monitor poll once the driver
+    # writes — well inside the ~5-second deadline — so the elapsed bound
+    # guards the abort without guessing at subprocess spawn time.
+    diagnostic = "output" if stream_name == "stdout" else "error"
+    with pytest.raises(
+        VoiceObservationCollectionError,
+        match=f"wrote unexpected standard {diagnostic}",
+    ):
         collect_voice_observations(
             corpus_root,
             run_path,
@@ -540,7 +547,7 @@ def test_native_diagnostics_are_bounded_while_the_driver_is_running(
         )
     elapsed = time.monotonic() - started
 
-    assert elapsed < 0.9
+    assert elapsed < 5.0
     assert not output_path.exists()
 
 
@@ -957,17 +964,23 @@ def test_oversize_observations_are_bounded_while_driver_is_running(
         observation_collection, "_MAXIMUM_OBSERVATIONS_BYTES", 128
     )
     monkeypatch.setattr(
-        observation_collection, "_NATIVE_STARTUP_ALLOWANCE_SECONDS", 1.0
+        observation_collection, "_NATIVE_STARTUP_ALLOWANCE_SECONDS", 5.0
     )
     monkeypatch.setattr(
         observation_collection, "_NATIVE_FINAL_DEADLINE_SECONDS", 0.0
     )
     monkeypatch.setattr(
-        observation_collection, "_MAXIMUM_NATIVE_TIMEOUT_SECONDS", 2.0
+        observation_collection, "_MAXIMUM_NATIVE_TIMEOUT_SECONDS", 10.0
     )
 
     started = time.monotonic()
-    with pytest.raises(VoiceObservationCollectionError):
+    # Detection happens in the 0.05-second monitor poll once the driver
+    # writes — well inside the ~5-second deadline — so the elapsed bound
+    # guards the abort without guessing at subprocess spawn time.
+    with pytest.raises(
+        VoiceObservationCollectionError,
+        match="exceeded their secure bound",
+    ):
         collect_voice_observations(
             corpus_root,
             run_path,
@@ -977,7 +990,7 @@ def test_oversize_observations_are_bounded_while_driver_is_running(
         )
     elapsed = time.monotonic() - started
 
-    assert elapsed < 0.9
+    assert elapsed < 5.0
     assert not output_path.exists()
 
 

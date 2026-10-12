@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from deep_json import deep_nesting_payloads
 from rimeai_eval.voice_dataset import VoiceAudio
 from rimeai_eval.voice_dataset import VoiceConditions
 from rimeai_eval.voice_dataset import VoiceCorpus
@@ -1058,7 +1059,7 @@ def test_run_and_observation_json_reject_duplicate_keys_and_nan(tmp_path):
     "payload",
     [
         b"\xff",
-        b"[" * 1_100 + b"0" + b"]" * 1_100,
+        *deep_nesting_payloads(1 * 1_024 * 1_024),
         b'{"schema_version":' + b"9" * 5_000 + b"}",
     ],
 )
@@ -1090,7 +1091,7 @@ def test_run_loader_normalizes_an_unrepresentable_os_major_version(
     "payload",
     [
         b"\xff\n",
-        b"[" * 1_100 + b"0" + b"]" * 1_100 + b"\n",
+        *(payload + b"\n" for payload in deep_nesting_payloads(1 * 1_024 * 1_024)),
         b'{"schema_version":' + b"9" * 5_000 + b"}\n",
     ],
 )

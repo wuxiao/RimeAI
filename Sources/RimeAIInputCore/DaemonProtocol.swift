@@ -21,6 +21,7 @@ public enum SemanticInferenceDecision: String, Codable, Sendable {
     case rankedCandidate = "ranked_candidate"
     case sentenceSuggestion = "sentence_suggestion"
     case mixedComposition = "mixed_composition"
+    case phraseBook = "phrase_book"
     case sameTopCandidate = "same_top_candidate"
     case insufficientCandidates = "insufficient_candidates"
     case belowConfidence = "below_confidence"
@@ -49,6 +50,7 @@ public enum SemanticCandidatePresentation: Equatable, Sendable {
     case cloudSameTopCandidate
     case cloudBelowConfidence
     case cloudFailure
+    case continuation(candidate: String)
     case unavailable
     case failure
 
@@ -65,6 +67,8 @@ public enum SemanticCandidatePresentation: Equatable, Sendable {
         case let .candidate(text, decision, _):
             if decision == .mixedComposition {
                 "✦ 中英混输：\(text)"
+            } else if decision == .phraseBook {
+                "✦ 个人短语：\(text)"
             } else {
                 "✦ \(text)"
             }
@@ -96,6 +100,8 @@ public enum SemanticCandidatePresentation: Equatable, Sendable {
             "☁︎ 云端：置信度不足，保留 Rime"
         case .cloudFailure:
             "☁︎ 云端暂不可用，已回退 Rime"
+        case let .continuation(candidate):
+            "✦ 续写：\(candidate)"
         case .unavailable:
             "✦ 本地模型已停用"
         case .failure:
@@ -104,7 +110,16 @@ public enum SemanticCandidatePresentation: Equatable, Sendable {
     }
 
     public var isSelectable: Bool {
-        if case .candidate = self {
+        switch self {
+        case .candidate, .continuation:
+            return true
+        default:
+            return false
+        }
+    }
+
+    public var isContinuation: Bool {
+        if case .continuation = self {
             return true
         }
         return false
@@ -328,6 +343,132 @@ public struct DaemonModelArtifact: Codable, Equatable, Sendable {
     }
 }
 
+/// One punctuation-delimited slice of the composition. The last segment is
+/// the active pinyin; earlier segments carry the committed text snapshot
+/// and the separator typed after them.
+public struct PinyinSegment: Codable, Equatable, Sendable {
+    /// `[a-z']+`, bounded by `PinyinSegmentPolicy`.
+    public let pinyin: String
+    /// Trailing punctuation committed after this segment; "" on the last
+    /// (active) segment.
+    public let separator: String
+    /// Committed snapshot of the segment text; nil on the active segment.
+    /// Serialized as "committed_text" and omitted when nil.
+    public let committedText: String?
+
+    public init(
+        pinyin: String,
+        separator: String,
+        committedText: String? = nil
+    ) {
+        self.pinyin = pinyin
+        self.separator = separator
+        self.committedText = committedText
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case pinyin
+        case separator
+        case committedText = "committed_text"
+    }
+}
+
+public enum PinyinSegmentPolicy {
+    public static let maximumSegments = 8
+    public static let maximumSegmentPinyinLetters = 64
+    public static let maximumTotalLetters = 256
+
+    private static let maximumCommittedTextLength = 64
+    private static let maximumSeparatorUTF8Bytes = 8
+
+    /// ASCII punctuation, General Punctuation, CJK punctuation and
+    /// fullwidth ASCII variants. U+2028/U+2029 are excluded so the
+    /// canonical JSON encoding stays byte-stable against the Python
+    /// mirror.
+    private static let punctuationScalarRanges: [ClosedRange<UInt32>] = [
+        0x21...0x2F,
+        0x3A...0x40,
+        0x5B...0x60,
+        0x7B...0x7E,
+        0x2000...0x2027,
+        0x202A...0x206F,
+        0x3001...0x303F,
+        0xFF01...0xFF5E,
+    ]
+
+    public static func isValid(
+        _ segments: [PinyinSegment],
+        activePinyin: String
+    ) -> Bool {
+        guard (1 ... maximumSegments).contains(segments.count),
+              let last = segments.last,
+              last.pinyin == activePinyin,
+              last.separator.isEmpty
+        else {
+            return false
+        }
+        var totalLetters = 0
+        for (index, segment) in segments.enumerated() {
+            let isLast = index == segments.count - 1
+            let letters = segment.pinyin.unicodeScalars.filter {
+                $0.value != 39
+            }
+            let pinyinIsLowercase = segment.pinyin.unicodeScalars.allSatisfy {
+                $0.value == 39 || (97 ... 122).contains($0.value)
+            }
+            let separatorIsPunctuation = segment.separator.unicodeScalars
+                .allSatisfy { scalar in
+                    punctuationScalarRanges.contains {
+                        $0.contains(scalar.value)
+                    }
+                }
+            guard !segment.pinyin.isEmpty,
+                  pinyinIsLowercase,
+                  letters.count <= maximumSegmentPinyinLetters,
+                  isLast || !segment.separator.isEmpty,
+                  segment.separator.utf8.count <= maximumSeparatorUTF8Bytes,
+                  separatorIsPunctuation
+            else {
+                return false
+            }
+            if let committedText = segment.committedText {
+                guard committedText.count <= maximumCommittedTextLength,
+                      !committedText.contains("\n"),
+                      !committedText.contains("\u{0}")
+                else {
+                    return false
+                }
+            }
+            totalLetters += letters.count
+        }
+        return totalLetters <= maximumTotalLetters
+    }
+
+    /// Canonical JSON form of the segments, byte-identical to the Python
+    /// mirror `json.dumps(..., sort_keys=True, ensure_ascii=False,
+    /// separators=(",", ":"))`. Returns nil for structurally invalid
+    /// segments.
+    public static func canonicalJSON(_ segments: [PinyinSegment]) -> String? {
+        guard let last = segments.last,
+              isValid(segments, activePinyin: last.pinyin)
+        else {
+            return nil
+        }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        guard let data = try? encoder.encode(segments),
+              let json = String(data: data, encoding: .utf8)
+        else {
+            return nil
+        }
+        // Swift's JSONEncoder escapes "/" as "\/" while Python leaves it
+        // unescaped. The sequence "\/" in the encoded output can only come
+        // from that escaping (a literal backslash encodes as "\\"), so the
+        // replacement cannot corrupt any other content.
+        return json.replacingOccurrences(of: "\\/", with: "/")
+    }
+}
+
 public struct SemanticInferenceRequest: Codable, Sendable {
     public let schemaVersion = 1
     public let type = "infer"
@@ -342,6 +483,10 @@ public struct SemanticInferenceRequest: Codable, Sendable {
     public let deadlineMilliseconds: Int
     public let allowSentence: Bool
     public let sensitive = false
+    /// Cross-punctuation segment layout; nil keeps the single-segment
+    /// protocol identical to before. When present the last segment is the
+    /// active pinyin echoed by `pinyin`.
+    public let segments: [PinyinSegment]?
 
     public init(
         requestID: String,
@@ -351,7 +496,8 @@ public struct SemanticInferenceRequest: Codable, Sendable {
         pinyin: String,
         candidates: [String],
         deadlineMilliseconds: Int,
-        allowSentence: Bool
+        allowSentence: Bool,
+        segments: [PinyinSegment]? = nil
     ) {
         self.requestID = requestID
         compositionID = token.compositionID.uuidString
@@ -366,6 +512,7 @@ public struct SemanticInferenceRequest: Codable, Sendable {
             5_000
         )
         self.allowSentence = allowSentence
+        self.segments = segments
     }
 
     enum CodingKeys: String, CodingKey {
@@ -382,6 +529,7 @@ public struct SemanticInferenceRequest: Codable, Sendable {
         case deadlineMilliseconds = "deadline_ms"
         case allowSentence = "allow_sentence"
         case sensitive
+        case segments
     }
 }
 
@@ -502,6 +650,10 @@ public struct SemanticInferenceResult: Codable, Sendable {
             // Mixed composition is constructed inside the trusted client from
             // typed segments. The daemon is not allowed to synthesize it.
             return .failure
+        case .phraseBook:
+            // Phrasebook fill is a client-side slot fallback (LP-006); the
+            // daemon is not allowed to claim it.
+            return .failure
         case .sameTopCandidate:
             return .sameTopCandidate
         case .insufficientCandidates:
@@ -519,7 +671,8 @@ public struct SemanticInferenceResult: Codable, Sendable {
 
     public func isValid(
         for token: CompositionToken,
-        candidates: [String]
+        candidates: [String],
+        segments: [PinyinSegment]? = nil
     ) -> Bool {
         guard matches(token),
               let confidence,
@@ -530,11 +683,29 @@ public struct SemanticInferenceResult: Codable, Sendable {
         }
         let rankedCandidate = rankedCandidate ?? ""
         let sentenceSuggestion = sentenceSuggestion ?? ""
+        // Sentence suggestions share the single cloud-generated policy:
+        // non-empty, ≤128 printable characters, confidence floor; a
+        // cross-punctuation sentence must additionally match the
+        // requested segment layout.
+        let sentenceWithinBounds: Bool
+        if let segments, !sentenceSuggestion.isEmpty {
+            sentenceWithinBounds = CloudGeneratedSentencePolicy.allows(
+                text: sentenceSuggestion,
+                pinyinSegments: segments,
+                confidence: confidence
+            )
+        } else {
+            sentenceWithinBounds = sentenceSuggestion.isEmpty
+                || CloudGeneratedSentencePolicy.allows(
+                    text: sentenceSuggestion,
+                    confidence: confidence
+                )
+        }
         guard rankedCandidate.isEmpty || candidates.contains(rankedCandidate),
               rankedCandidate.count <= 128,
               !rankedCandidate.contains("\n"),
               !rankedCandidate.contains("\r"),
-              sentenceSuggestion.count <= 30,
+              sentenceWithinBounds,
               !sentenceSuggestion.contains("\n"),
               !sentenceSuggestion.contains("\r")
         else {
@@ -546,6 +717,8 @@ public struct SemanticInferenceResult: Codable, Sendable {
         case .sentenceSuggestion:
             return rankedCandidate.isEmpty && !sentenceSuggestion.isEmpty
         case .mixedComposition:
+            return false
+        case .phraseBook:
             return false
         case .sameTopCandidate,
              .insufficientCandidates,

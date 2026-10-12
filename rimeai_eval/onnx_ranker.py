@@ -10,16 +10,16 @@ import tempfile
 from time import perf_counter
 from typing import Any, Dict, List, Mapping, Sequence, Tuple
 
-from .candidate_policy import partition_full_length_candidates
+from rimeai_runtime.candidate_policy import partition_full_length_candidates
 from .evaluation import RankerError
-from .neural_ranker import (
+from rimeai_runtime.neural_ranker import (
     MODEL_TYPE,
     NeuralRankerArtifact,
     NeuralRankerError,
     _load_encoder_scorer,
     format_ranker_input,
 )
-from .pinyin_guard import PinyinGuard
+from rimeai_runtime.pinyin_guard import PinyinGuard
 
 
 ONNX_MODEL_TYPE = "rimeai-pinyin-listwise-cross-encoder-onnx"

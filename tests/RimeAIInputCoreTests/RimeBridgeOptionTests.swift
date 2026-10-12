@@ -149,12 +149,45 @@ struct RimeBridgeOptionTests {
                 engine: activeEngine
             )) ?? []
         }
+        let rawLeadSuggestion = resolver.resolve(
+            rawInput: "inihao"
+        ) { pinyin, limit in
+            (try? candidates(
+                pinyin,
+                limit: limit,
+                engine: activeEngine
+            )) ?? []
+        }
+        // 韵母首字母开头的输入：Rime 无法解析整串，但切分出的余串
+        // nihao 必须与 nihaoi 等 Rime 可见形式给出一致的候选。
+        let inihaoCandidates = (try? candidates(
+            "inihao",
+            limit: 10,
+            engine: activeEngine
+        )) ?? []
+        let nihaoiCandidates = (try? candidates(
+            "nihaoi",
+            limit: 10,
+            engine: activeEngine
+        )) ?? []
+        let split = try #require(
+            MixedCompositionResolver.rawLeadSplit(of: "inihao")
+        )
+        let remainderCandidates = (try? candidates(
+            split.remainder,
+            limit: 10,
+            engine: activeEngine
+        )) ?? []
 
         #expect(suggestion?.text == "这个API需要增加timeout配置")
         #expect(
             lowercaseSuggestion?.text
                 == "这个api需要增加timeout配置"
         )
+        #expect(rawLeadSuggestion?.text == "i你好")
+        #expect(inihaoCandidates.isEmpty)
+        #expect(!nihaoiCandidates.isEmpty)
+        #expect(remainderCandidates == nihaoiCandidates)
     }
 
     private func set(

@@ -4,13 +4,16 @@ import Foundation
 /// and the macOS credential implementation. Credentials themselves remain in
 /// `CloudCredentialStore.swift` and are never part of settings import/export.
 public enum RimeAICloudConfiguration {
-    public static let provider = "wwcn New API Gateway"
+    /// Official Zhipu Coding Plan, direct connection. Must stay byte
+    /// identical to `ENDPOINT` in rimeai_cloud_broker/qwen.py: the broker
+    /// echoes its endpoint in the hello frame and the client compares
+    /// the two strings for handshake compatibility.
+    public static let provider = "Zhipu Coding Plan (direct)"
     public static let endpoint = URL(
-        string: "https://newapi.wwcn.fun/v1"
+        string: "https://open.bigmodel.cn/api/coding/paas/v4"
     )!
     public static let rankingModelIDs = [
         "glm-5.3-flash",
-        "glm-5.3",
     ]
     public static let defaultRankingModelID = rankingModelIDs[0]
     public static let embeddingModelID = "text-embedding-v4"

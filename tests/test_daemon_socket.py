@@ -52,6 +52,30 @@ class LongInputAbstentionEngine:
         }
 
 
+class SegmentAwareEngine:
+    artifact_id = "segment-engine-v1"
+
+    def __init__(self):
+        self.last_segments = None
+
+    def infer(self, request):
+        self.last_segments = request.get("segments")
+        segments = self.last_segments or []
+        text = (
+            "".join(
+                (segment.get("committed_text") or "") + segment["separator"]
+                for segment in segments
+            )
+            + request["candidates"][-1]
+        )
+        return {
+            "decision": "sentence_suggestion",
+            "ranked_candidate": "",
+            "sentence_suggestion": text,
+            "confidence": 0.9,
+        }
+
+
 class ConcurrencyTrackingEngine:
     artifact_id = "serial-engine-v1"
 
@@ -435,6 +459,111 @@ def test_request_validation_accepts_only_bounded_ascii_pinyin():
             raise AssertionError(f"accepted invalid pinyin: {invalid_pinyin}")
 
 
+def test_segmented_infer_request_passes_validation_and_returns_joined_sentence():
+    async def scenario(runtime_root: Path):
+        socket_path = runtime_root / "runtime" / "rimeai.sock"
+        engine = SegmentAwareEngine()
+        server = RimeAIDaemonServer(socket_path, engine)
+        await server.start()
+        try:
+            reader, writer = await asyncio.open_unix_connection(socket_path)
+            await _hello(reader, writer)
+            await _write_json(
+                writer,
+                {
+                    "schema_version": 1,
+                    "type": "infer",
+                    "request_id": "segment-1",
+                    "composition_id": "composition-1",
+                    "revision": 1,
+                    "app_session_id": "app-1",
+                    "context_policy": "standard",
+                    "context": "请执行这条",
+                    "pinyin": "shi",
+                    "candidates": ["是", "时"],
+                    "deadline_ms": 400,
+                    "allow_sentence": True,
+                    "sensitive": False,
+                    "segments": [
+                        {
+                            "pinyin": "mingling",
+                            "separator": "，",
+                            "committed_text": "明令",
+                        },
+                        {"pinyin": "shi", "separator": ""},
+                    ],
+                },
+            )
+            response = await _read_json(reader)
+            writer.close()
+            await writer.wait_closed()
+            assert response["status"] == "ok"
+            assert response["decision"] == "sentence_suggestion"
+            assert response["sentence_suggestion"] == "明令，时"
+            assert engine.last_segments is not None
+            assert engine.last_segments[0]["committed_text"] == "明令"
+            assert engine.last_segments[1].get("committed_text") is None
+        finally:
+            await server.close()
+
+    with tempfile.TemporaryDirectory(prefix="rai-", dir="/tmp") as directory:
+        asyncio.run(scenario(Path(directory)))
+
+
+def test_segmented_request_with_mismatched_active_pinyin_rejected():
+    base = {
+        "request_id": "request-1",
+        "composition_id": "composition-1",
+        "revision": 1,
+        "app_session_id": "app-1",
+        "context_policy": "strict",
+        "context": "",
+        "pinyin": "shi",
+        "candidates": ["是", "时"],
+        "deadline_ms": 400,
+        "allow_sentence": True,
+        "sensitive": False,
+    }
+    valid_segments = [
+        {"pinyin": "mingling", "separator": "，", "committed_text": "明令"},
+        {"pinyin": "shi", "separator": ""},
+    ]
+    validated = _validate_inference_request(
+        {**base, "segments": valid_segments}
+    )
+    assert validated["segments"] == valid_segments
+    assert _validate_inference_request(base).get("segments") is None
+
+    for invalid_segments in (
+        [
+            {"pinyin": "mingling", "separator": "，", "committed_text": "明令"},
+            {"pinyin": "shiw", "separator": ""},
+        ],
+        [
+            {"pinyin": "mingling", "separator": "", "committed_text": "明令"},
+            {"pinyin": "shi", "separator": ""},
+        ],
+        [
+            {"pinyin": "mingling", "separator": "了", "committed_text": "明令"},
+            {"pinyin": "shi", "separator": ""},
+        ],
+        [
+            {"pinyin": "mingling", "separator": "，"},
+        ]
+        * 9,
+    ):
+        try:
+            _validate_inference_request(
+                {**base, "segments": invalid_segments}
+            )
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(
+                f"accepted invalid segments: {invalid_segments}"
+            )
+
+
 def test_invalid_engine_output_opens_the_circuit():
     async def scenario(runtime_root: Path):
         socket_path = runtime_root / "runtime" / "rimeai.sock"
@@ -535,6 +664,59 @@ def test_explicit_cancel_acknowledges_and_never_emits_a_result():
                 pass
             else:
                 raise AssertionError("cancelled inference emitted a result")
+            writer.close()
+            await writer.wait_closed()
+        finally:
+            await server.close()
+
+    with tempfile.TemporaryDirectory(prefix="rai-", dir="/tmp") as directory:
+        asyncio.run(scenario(Path(directory)))
+
+
+def test_latest_revision_map_is_bounded():
+    # M5 回归：latest_revision 有 1024 上限——长连接下逐句 composition
+    # 不会无限增长；被逐出的 key 不再判 stale，仍在册的 key 照常拦截。
+    async def scenario(runtime_root: Path):
+        socket_path = runtime_root / "runtime" / "rimeai.sock"
+        server = RimeAIDaemonServer(socket_path, FakeEngine())
+        await server.start()
+        try:
+            reader, writer = await asyncio.open_unix_connection(socket_path)
+            await _hello(reader, writer)
+
+            def infer_message(index: int, revision: int = 1):
+                return {
+                    "schema_version": 1,
+                    "type": "infer",
+                    "request_id": f"request-{index}",
+                    "composition_id": f"composition-{index}",
+                    "revision": revision,
+                    "app_session_id": "app-1",
+                    "context_policy": "strict",
+                    "context": "",
+                    "pinyin": "m",
+                    "candidates": ["命令"],
+                    "deadline_ms": 500,
+                    "allow_sentence": False,
+                    "sensitive": False,
+                }
+
+            for index in range(1_100):
+                await _write_json(writer, infer_message(index))
+            for _ in range(1_100):
+                response = await _read_json(reader)
+                assert response["status"] == "ok"
+
+            # Key 0 fell out of the bounded map: its revision is unknown
+            # again, so the same revision is accepted rather than stale.
+            await _write_json(writer, infer_message(0))
+            assert (await _read_json(reader))["status"] == "ok"
+
+            # Keys still in the map keep rejecting stale revisions.
+            await _write_json(writer, infer_message(1_099))
+            response = await _read_json(reader)
+            assert response["status"] == "stale"
+
             writer.close()
             await writer.wait_closed()
         finally:

@@ -150,7 +150,6 @@ site_packages=$(
   --workpath "${build_root}/work" \
   --specpath "${build_root}/spec" \
   --collect-binaries onnxruntime \
-  --hidden-import rimeai_eval.onnx_ranker \
   --exclude-module onnx \
   --exclude-module safetensors \
   --exclude-module torch \

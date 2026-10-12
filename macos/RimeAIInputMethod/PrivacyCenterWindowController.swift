@@ -1,5 +1,4 @@
 import AppKit
-import Darwin
 import Foundation
 import UniformTypeIdentifiers
 
@@ -10,7 +9,7 @@ final class PrivacyCenterWindowController: NSObject {
     private let settings = RimeAISettingsStore.shared
     private let credentialStore = FileCloudCredentialStore.shared
     private let historyService = RimeAIHistoryService.shared
-    private let window: NSWindow
+    let window: NSWindow
     private let characterSetPopup = NSPopUpButton(
         frame: .zero,
         pullsDown: false
@@ -37,6 +36,9 @@ final class PrivacyCenterWindowController: NSObject {
     private let apiKeyField = NSSecureTextField()
     private let cloudStatusLabel = NSTextField(labelWithString: "")
     private let historyStatusLabel = NSTextField(labelWithString: "")
+    let phrasebookStatusLabel = NSTextField(labelWithString: "")
+    let profileSummaryLabel = NSTextField(labelWithString: "")
+    let phrasebookEditor = PhrasebookEditorControls()
     private let voiceToggle = NSButton(
         checkboxWithTitle: "",
         target: nil,
@@ -80,12 +82,21 @@ final class PrivacyCenterWindowController: NSObject {
     private var diagnosticsObserver: NSObjectProtocol?
     private var settingsActionStatusObserver: NSObjectProtocol?
     private var voiceShortcutStatusObserver: NSObjectProtocol?
-    private var runtimeSyncGeneration: UInt64 = 0
-    private var isRuntimeSyncInProgress = false
-    private var pendingRuntimeOperations: [SettingsRuntimeOperation] = []
-    private var activeRuntimeOperations: [SettingsRuntimeOperation] = []
-    private var failedRuntimeOperations: [(service: String, error: String)] = []
-    private var runtimeSyncDescription = ""
+    private lazy var lifecycleCoordinator: ServiceLifecycleCoordinator =
+        ServiceLifecycleCoordinator(
+            eventHandler: { [weak self] event in
+                self?.handleLifecycleEvent(event)
+            },
+            performOperation: { [weak self] operation, completion in
+                guard let self else {
+                    return
+                }
+                self.performLifecycleOperation(
+                    operation,
+                    completion: completion
+                )
+            }
+        )
 
     private override init() {
         window = NSWindow(
@@ -189,6 +200,10 @@ final class PrivacyCenterWindowController: NSObject {
         let cloudStack = addSettingsTab(
             to: tabView,
             title: "云端与历史"
+        )
+        let profileStack = addSettingsTab(
+            to: tabView,
+            title: "语言画像"
         )
         let statusStack = addSettingsTab(
             to: tabView,
@@ -464,6 +479,14 @@ final class PrivacyCenterWindowController: NSObject {
                 secondary: true
             )
         )
+        cloudStack.addArrangedSubview(
+            label(
+                "开启「上屏后续写联想」后，每次上屏还会把最近上下文"
+                    + "（含光标前的既有文本）发送到云端以生成续写建议；"
+                    + "该功能默认关闭。",
+                secondary: true
+            )
+        )
         configureWrapping(cloudStatusLabel)
         cloudStatusLabel.identifier = NSUserInterfaceItemIdentifier(
             "settings.cloud-status"
@@ -542,6 +565,8 @@ final class PrivacyCenterWindowController: NSObject {
             )
         )
         cloudStack.addArrangedSubview(historyButtons)
+
+        buildLanguageProfilePage(profileStack)
 
         statusStack.addArrangedSubview(
             sectionTitle("本地模型与运行状态")
@@ -707,11 +732,11 @@ final class PrivacyCenterWindowController: NSObject {
             at: settings.punctuationStyle == .chinese ? 0 : 1
         )
         aiToggle.state = settings.aiEnabled ? .on : .off
-        aiToggle.isEnabled = !isRuntimeSyncInProgress
+        aiToggle.isEnabled = !lifecycleCoordinator.isReconciling
         offlineToggle.state = settings.offlineLockEnabled ? .on : .off
         voiceToggle.state = settings.voiceEnabled ? .on : .off
         voiceToggle.isEnabled = settings.aiEnabled
-            && !isRuntimeSyncInProgress
+            && !lifecycleCoordinator.isReconciling
         let voiceShortcut = settings.voiceShortcut
         voiceInstructionLabel.stringValue =
             "按住 \(voiceShortcut.displayName) 录音，松开后等待最终文本；"
@@ -761,6 +786,7 @@ final class PrivacyCenterWindowController: NSObject {
         }
         refreshVoiceStatus()
         refreshSettingsActionStatus()
+        refreshLanguageProfileStatus()
         if let statistics = try? historyService.statistics() {
             historyStatusLabel.stringValue =
                 "明文历史：\(statistics.recordCount) 条 · 代次 "
@@ -776,7 +802,7 @@ final class PrivacyCenterWindowController: NSObject {
     }
 
     @objc private func toggleChanged(_ sender: NSButton) {
-        if isRuntimeSyncInProgress,
+        if lifecycleCoordinator.isReconciling,
            sender === aiToggle || sender === voiceToggle
         {
             refresh()
@@ -1104,7 +1130,7 @@ final class PrivacyCenterWindowController: NSObject {
     }
 
     @objc private func importSettings(_ sender: Any?) {
-        guard !isRuntimeSyncInProgress else {
+        guard !lifecycleCoordinator.isReconciling else {
             updateSettingsActionStatus(
                 .working,
                 "上一次设置变更仍在同步运行状态，请稍后再导入"
@@ -1195,7 +1221,7 @@ final class PrivacyCenterWindowController: NSObject {
     }
 
     @objc private func restoreDefaultSettings(_ sender: Any?) {
-        guard !isRuntimeSyncInProgress else {
+        guard !lifecycleCoordinator.isReconciling else {
             updateSettingsActionStatus(
                 .working,
                 "上一次设置变更仍在同步运行状态，请稍后再恢复默认"
@@ -1235,100 +1261,104 @@ final class PrivacyCenterWindowController: NSObject {
         }
     }
 
+    /// 提交一轮运行态收敛。状态机（generation、按序队列、失败收集）位于
+    /// `ServiceLifecycleCoordinator`；这里只保留 UI 事件翻译与偏好回写。
     private func reconcileRuntime(
         _ transition: SettingsRuntimeTransition,
         operation: String,
         initialFailure: (service: String, error: String)? = nil
     ) {
-        guard !isRuntimeSyncInProgress else {
+        lifecycleCoordinator.reconcile(
+            transition.orderedOperations.map(Self.lifecycleOperation),
+            description: operation,
+            initialFailures: initialFailure.map {
+                [ServiceLifecycleFailure(
+                    service: $0.service,
+                    error: $0.error
+                )]
+            } ?? []
+        )
+    }
+
+    private static func lifecycleOperation(
+        _ operation: SettingsRuntimeOperation
+    ) -> ServiceLifecycleOperation {
+        switch operation {
+        case let .daemon(enabled):
+            return .daemon(enabled)
+        case let .cloudBroker(enabled):
+            return .cloudBroker(enabled)
+        case let .voiceHelper(enabled):
+            return .voiceHelper(enabled)
+        }
+    }
+
+    private static func settingsRuntimeOperation(
+        _ operation: ServiceLifecycleOperation
+    ) -> SettingsRuntimeOperation {
+        switch operation {
+        case let .daemon(enabled):
+            return .daemon(enabled)
+        case let .cloudBroker(enabled):
+            return .cloudBroker(enabled)
+        case let .voiceHelper(enabled):
+            return .voiceHelper(enabled)
+        }
+    }
+
+    private func handleLifecycleEvent(_ event: ServiceLifecycleEvent) {
+        switch event {
+        case .busy:
             updateSettingsActionStatus(
                 .working,
                 "另一个生命周期操作仍在进行，请稍后重试"
             )
-            return
-        }
-        runtimeSyncGeneration &+= 1
-        if runtimeSyncGeneration == 0 {
-            runtimeSyncGeneration = 1
-        }
-        pendingRuntimeOperations = transition.orderedOperations
-        activeRuntimeOperations = pendingRuntimeOperations
-        failedRuntimeOperations = initialFailure.map { [$0] } ?? []
-        runtimeSyncDescription = operation
-        guard !pendingRuntimeOperations.isEmpty else {
-            activeRuntimeOperations = []
+        case let .alreadyConsistent(description):
             setRuntimeSyncInProgress(false)
             updateSettingsActionStatus(
                 .success,
-                "\(operation)；认证运行态与期望状态一致"
+                "\(description)；认证运行态与期望状态一致"
             )
-            return
-        }
-        setRuntimeSyncInProgress(true)
-        let services = pendingRuntimeOperations.map(\.displayName)
-        updateSettingsActionStatus(
-            .working,
-            "\(operation)；正在同步\(services.joined(separator: "、"))"
-        )
-        runNextRuntimeOperation(generation: runtimeSyncGeneration)
-    }
-
-    private func runNextRuntimeOperation(generation: UInt64) {
-        guard generation == runtimeSyncGeneration else {
-            return
-        }
-        guard !pendingRuntimeOperations.isEmpty else {
+        case let .started(description, services):
+            setRuntimeSyncInProgress(true)
+            updateSettingsActionStatus(
+                .working,
+                "\(description)；正在同步\(services.joined(separator: "、"))"
+            )
+        case let .succeeded(description, appliedOperations):
             setRuntimeSyncInProgress(false)
-            if failedRuntimeOperations.isEmpty {
-                let completionDescription: String
-                if activeRuntimeOperations.count == 1,
-                   let onlyOperation = activeRuntimeOperations.first
-                {
-                    completionDescription = SettingsRuntimeStatusCopy.applied(
-                        onlyOperation
-                    )
-                } else {
-                    completionDescription =
-                        "生命周期操作已完成；服务状态继续刷新"
-                        + "（以各服务状态为准）"
-                }
-                updateSettingsActionStatus(
-                    .success,
-                    "\(runtimeSyncDescription)；\(completionDescription)"
+            let completionDescription: String
+            if appliedOperations.count == 1,
+               let onlyOperation = appliedOperations.first
+            {
+                completionDescription = SettingsRuntimeStatusCopy.applied(
+                    Self.settingsRuntimeOperation(onlyOperation)
                 )
             } else {
-                let services = failedRuntimeOperations.map { $0.service }
-                updateSettingsActionStatus(
-                    .failure,
-                    "\(runtimeSyncDescription)；"
-                        + "\(services.joined(separator: "、"))"
-                        + " 未能收敛，失败项目已保持或回退为关闭偏好"
-                )
-                presentRuntimeSyncFailure()
+                completionDescription =
+                    "生命周期操作已完成；服务状态继续刷新"
+                    + "（以各服务状态为准）"
             }
-            activeRuntimeOperations = []
-            return
-        }
-        let next = pendingRuntimeOperations.removeFirst()
-        performRuntimeOperation(next) { [weak self] result in
-            guard let self,
-                  generation == self.runtimeSyncGeneration
-            else {
-                return
-            }
-            if case let .failure(error) = result {
-                self.failedRuntimeOperations.append((
-                    service: next.displayName,
-                    error: error.localizedDescription
-                ))
-            }
-            self.runNextRuntimeOperation(generation: generation)
+            updateSettingsActionStatus(
+                .success,
+                "\(description)；\(completionDescription)"
+            )
+        case let .failed(description, failures):
+            setRuntimeSyncInProgress(false)
+            let services = failures.map(\.service)
+            updateSettingsActionStatus(
+                .failure,
+                "\(description)；"
+                    + "\(services.joined(separator: "、"))"
+                    + " 未能收敛，失败项目已保持或回退为关闭偏好"
+            )
+            presentRuntimeSyncFailure(failures)
         }
     }
 
-    private func performRuntimeOperation(
-        _ operation: SettingsRuntimeOperation,
-        completion: @escaping SettingsRuntimeCompletion
+    private func performLifecycleOperation(
+        _ operation: ServiceLifecycleOperation,
+        completion: @escaping ServiceLifecycleCompletion
     ) {
         switch operation {
         case let .daemon(enabled):
@@ -1356,7 +1386,7 @@ final class PrivacyCenterWindowController: NSObject {
     }
 
     private func setRuntimeSyncInProgress(_ inProgress: Bool) {
-        isRuntimeSyncInProgress = inProgress
+        lifecycleCoordinator.setReconciling(inProgress)
         importSettingsButton.isEnabled = !inProgress
         restoreDefaultSettingsButton.isEnabled = !inProgress
         aiToggle.isEnabled = !inProgress
@@ -1366,7 +1396,7 @@ final class PrivacyCenterWindowController: NSObject {
     private func rejectLifecycleActionDuringRuntimeSync(
         _ action: String
     ) -> Bool {
-        guard isRuntimeSyncInProgress else {
+        guard lifecycleCoordinator.isReconciling else {
             return false
         }
         updateSettingsActionStatus(
@@ -1376,8 +1406,10 @@ final class PrivacyCenterWindowController: NSObject {
         return true
     }
 
-    private func presentRuntimeSyncFailure() {
-        let details = failedRuntimeOperations.map {
+    private func presentRuntimeSyncFailure(
+        _ failures: [ServiceLifecycleFailure]
+    ) {
+        let details = failures.map {
             "\($0.service)：\($0.error)"
         }.joined(separator: "\n")
         let alert = NSAlert()
@@ -1440,8 +1472,10 @@ final class PrivacyCenterWindowController: NSObject {
                 self.historyService.discardOpenStore()
                 try VoiceHelperLifecycleCoordinator.shared
                     .suspendSynchronously(layout: layout)
-                try Self.stopManagedCloudBroker(layout: layout)
-                try Self.stopManagedDaemon(layout: layout)
+                try ServiceLifecycleCoordinator
+                    .stopManagedCloudBroker(layout: layout)
+                try ServiceLifecycleCoordinator
+                    .stopManagedDaemon(layout: layout)
                 try Self.trashManagedData(layout: layout)
             }
             DispatchQueue.main.async { [weak self] in
@@ -1504,7 +1538,8 @@ final class PrivacyCenterWindowController: NSObject {
         DaemonClient.shared.disconnect()
         DispatchQueue.global(qos: .userInitiated).async {
             let result = Result {
-                try Self.suspendManagedDaemon(layout: layout)
+                try ServiceLifecycleCoordinator
+                    .suspendManagedDaemon(layout: layout)
             }
             DispatchQueue.main.async { [weak self] in
                 guard let self else {
@@ -1536,7 +1571,8 @@ final class PrivacyCenterWindowController: NSObject {
     ) {
         DispatchQueue.global(qos: .userInitiated).async {
             let result = Result {
-                try Self.startManagedDaemon(layout: layout)
+                try ServiceLifecycleCoordinator
+                    .startManagedDaemon(layout: layout)
             }
             DispatchQueue.main.async { [weak self] in
                 guard let self else {
@@ -1569,7 +1605,7 @@ final class PrivacyCenterWindowController: NSObject {
                     )
                     DaemonClient.shared.disconnect()
                     self.daemonStatusLabel.stringValue =
-                        error is SettingsDaemonDeactivationError
+                        error is ServiceDaemonDeactivationError
                             ? "Daemon：启动回滚未完整完成 · 运行态不确定"
                             : "Daemon：生命周期操作失败"
                     completion(.failure(error))
@@ -1591,7 +1627,8 @@ final class PrivacyCenterWindowController: NSObject {
                 SettingsDaemonActivationFailurePolicy.rollbackError(
                     readinessError: readinessError,
                     performRollback: {
-                        try Self.suspendManagedDaemon(layout: layout)
+                        try ServiceLifecycleCoordinator
+                            .suspendManagedDaemon(layout: layout)
                     }
                 )
             DispatchQueue.main.async { [weak self] in
@@ -1622,9 +1659,11 @@ final class PrivacyCenterWindowController: NSObject {
         DispatchQueue.global(qos: .userInitiated).async {
             let result = Result {
                 if enabled {
-                    try Self.startManagedCloudBroker(layout: layout)
+                    try ServiceLifecycleCoordinator
+                        .startManagedCloudBroker(layout: layout)
                 } else {
-                    try Self.suspendManagedCloudBroker(layout: layout)
+                    try ServiceLifecycleCoordinator
+                        .suspendManagedCloudBroker(layout: layout)
                 }
             }
             DispatchQueue.main.async { [weak self] in
@@ -1782,6 +1821,12 @@ final class PrivacyCenterWindowController: NSObject {
             "cloud_timeout": "云请求超时",
             "cloud_invalid_result": "云端无效结果已拦截",
             "cloud_transport_failure": "Qwen 连接失败",
+            "continuation_requested": "续写建议已请求",
+            "continuation_shown": "续写建议已显示",
+            "continuation_accepted": "续写建议已采纳",
+            "continuation_dismissed": "续写建议已撤销",
+            "continuation_abstained": "续写建议已弃权",
+            "continuation_cooldown": "续写建议进入冷却",
             "voice_started": "语音录音已开始",
             "voice_stopped": "语音录音已结束",
             "voice_preview_shown": "语音临时文本已显示",
@@ -1849,356 +1894,6 @@ final class PrivacyCenterWindowController: NSObject {
         return ByteCountFormatter.string(
             fromByteCount: bytes,
             countStyle: .file
-        )
-    }
-
-    nonisolated private static func stopManagedDaemon(
-        layout: RimeAIProductDataLayout
-    ) throws {
-        _ = try runProcess(
-            executable: "/bin/launchctl",
-            arguments: [
-            "bootout",
-            "gui/\(getuid())/fun.wwcn.rimeai.daemon",
-            ]
-        )
-        try stopAdHocDaemon(layout: layout)
-    }
-
-    nonisolated private static func stopManagedCloudBroker(
-        layout: RimeAIProductDataLayout
-    ) throws {
-        _ = try runProcess(
-            executable: "/bin/launchctl",
-            arguments: [
-                "bootout",
-                "gui/\(getuid())/fun.wwcn.rimeai.cloud-broker",
-            ]
-        )
-        if FileManager.default.fileExists(
-            atPath: layout.cloudBrokerEnabledMarker.path
-        ) {
-            try FileManager.default.removeItem(
-                at: layout.cloudBrokerEnabledMarker
-            )
-        }
-    }
-
-    nonisolated private static func suspendManagedCloudBroker(
-        layout: RimeAIProductDataLayout
-    ) throws {
-        if FileManager.default.fileExists(
-            atPath: layout.cloudBrokerEnabledMarker.path
-        ) {
-            try FileManager.default.removeItem(
-                at: layout.cloudBrokerEnabledMarker
-            )
-        }
-        _ = try runProcess(
-            executable: "/bin/launchctl",
-            arguments: [
-                "kill",
-                "SIGTERM",
-                "gui/\(getuid())/fun.wwcn.rimeai.cloud-broker",
-            ]
-        )
-    }
-
-    nonisolated private static func startManagedCloudBroker(
-        layout: RimeAIProductDataLayout
-    ) throws {
-        let fileManager = FileManager.default
-        guard fileManager.fileExists(
-            atPath: layout.cloudBrokerLaunchAgentPlist.path
-        ) else {
-            throw lifecycleError(
-                "cloud broker LaunchAgent is missing; reinstall RimeAI",
-                code: 20
-            )
-        }
-        try fileManager.createDirectory(
-            at: layout.controlDirectory,
-            withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700]
-        )
-        guard fileManager.createFile(
-            atPath: layout.cloudBrokerEnabledMarker.path,
-            contents: Data(),
-            attributes: [.posixPermissions: 0o600]
-        ) else {
-            throw lifecycleError(
-                "could not create the cloud broker enable marker",
-                code: 21
-            )
-        }
-        do {
-            let domain = "gui/\(getuid())"
-            let label = "fun.wwcn.rimeai.cloud-broker"
-            let printStatus = try runProcess(
-                executable: "/bin/launchctl",
-                arguments: ["print", "\(domain)/\(label)"]
-            )
-            if printStatus != 0 {
-                let bootstrapStatus = try runProcess(
-                    executable: "/bin/launchctl",
-                    arguments: [
-                        "bootstrap",
-                        domain,
-                        layout.cloudBrokerLaunchAgentPlist.path,
-                    ]
-                )
-                guard bootstrapStatus == 0 else {
-                    throw lifecycleError(
-                        "launchctl could not bootstrap the cloud broker",
-                        code: Int(bootstrapStatus)
-                    )
-                }
-            }
-            let kickstartStatus = try runProcess(
-                executable: "/bin/launchctl",
-                arguments: ["kickstart", "\(domain)/\(label)"]
-            )
-            guard kickstartStatus == 0 else {
-                throw lifecycleError(
-                    "launchctl could not start the cloud broker",
-                    code: Int(kickstartStatus)
-                )
-            }
-            let socket = layout.runtimeDirectory
-                .appendingPathComponent("rimeai-cloud.sock")
-            for _ in 0..<40 {
-                if SettingsRuntimeSocketNode.exists(
-                    at: socket,
-                    fileManager: fileManager
-                ) {
-                    // A socket node is only a launch milestone. Authenticated
-                    // protocol readiness continues asynchronously in the client.
-                    return
-                }
-                Thread.sleep(forTimeInterval: 0.05)
-            }
-            throw lifecycleError(
-                "cloud broker did not create its private socket",
-                code: 22
-            )
-        } catch {
-            _ = try? runProcess(
-                executable: "/bin/launchctl",
-                arguments: [
-                    "kill",
-                    "SIGTERM",
-                    "gui/\(getuid())/fun.wwcn.rimeai.cloud-broker",
-                ]
-            )
-            if fileManager.fileExists(
-                atPath: layout.cloudBrokerEnabledMarker.path
-            ) {
-                try? fileManager.removeItem(
-                    at: layout.cloudBrokerEnabledMarker
-                )
-            }
-            throw error
-        }
-    }
-
-    nonisolated private static func suspendManagedDaemon(
-        layout: RimeAIProductDataLayout
-    ) throws {
-        try SettingsDaemonDeactivationPolicy.run([
-            (.removeMarker, {
-                if FileManager.default.fileExists(
-                    atPath: layout.daemonEnabledMarker.path
-                ) {
-                    try FileManager.default.removeItem(
-                        at: layout.daemonEnabledMarker
-                    )
-                }
-            }),
-            (.stopLaunchAgent, {
-                let status = try runProcess(
-                    executable: "/bin/launchctl",
-                    arguments: [
-                        "kill",
-                        "SIGTERM",
-                        "gui/\(getuid())/fun.wwcn.rimeai.daemon",
-                    ]
-                )
-                try SettingsDaemonDeactivationPolicy
-                    .requireSuccessfulLaunchctlKill(status)
-            }),
-            (.stopAdHocProcess, {
-                try stopAdHocDaemon(layout: layout)
-            }),
-        ])
-    }
-
-    nonisolated private static func startManagedDaemon(
-        layout: RimeAIProductDataLayout
-    ) throws {
-        let fileManager = FileManager.default
-        guard fileManager.fileExists(
-            atPath: layout.launchAgentPlist.path
-        ) else {
-            throw NSError(
-                domain: "fun.wwcn.inputmethod.RimeAI.daemon-lifecycle",
-                code: 2,
-                userInfo: [
-                    NSLocalizedDescriptionKey:
-                        "LaunchAgent is missing; reinstall RimeAI",
-                ]
-            )
-        }
-        try fileManager.createDirectory(
-            at: layout.controlDirectory,
-            withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700]
-        )
-        try SettingsLifecycleMarkerTransaction.run(
-            createMarker: {
-                guard fileManager.createFile(
-                    atPath: layout.daemonEnabledMarker.path,
-                    contents: Data(),
-                    attributes: [.posixPermissions: 0o600]
-                ) else {
-                    throw lifecycleError(
-                        "could not create the local AI enable marker",
-                        code: 4
-                    )
-                }
-            },
-            rollbackMarker: {
-                try suspendManagedDaemon(layout: layout)
-            },
-            operation: {
-                let domain = "gui/\(getuid())"
-                let printStatus = try runProcess(
-                    executable: "/bin/launchctl",
-                    arguments: [
-                        "print",
-                        "\(domain)/fun.wwcn.rimeai.daemon",
-                    ]
-                )
-                if printStatus != 0 {
-                    let bootstrapStatus = try runProcess(
-                        executable: "/bin/launchctl",
-                        arguments: [
-                            "bootstrap",
-                            domain,
-                            layout.launchAgentPlist.path,
-                        ]
-                    )
-                    guard bootstrapStatus == 0 else {
-                        throw lifecycleError(
-                            "launchctl could not bootstrap the daemon",
-                            code: Int(bootstrapStatus)
-                        )
-                    }
-                }
-                let kickstartStatus = try runProcess(
-                    executable: "/bin/launchctl",
-                    arguments: [
-                        "kickstart",
-                        "\(domain)/fun.wwcn.rimeai.daemon",
-                    ]
-                )
-                guard kickstartStatus == 0 else {
-                    throw lifecycleError(
-                        "launchctl could not start the daemon",
-                        code: Int(kickstartStatus)
-                    )
-                }
-                let socket = layout.runtimeDirectory
-                    .appendingPathComponent("rimeai.sock")
-                for _ in 0..<80 {
-                    if SettingsRuntimeSocketNode.exists(
-                        at: socket,
-                        fileManager: fileManager
-                    ) {
-                        // This deliberately does not claim daemon hello/ready;
-                        // a typed generation-bound probe remains future work.
-                        return
-                    }
-                    Thread.sleep(forTimeInterval: 0.1)
-                }
-                throw lifecycleError(
-                    "daemon did not create its private socket",
-                    code: 3
-                )
-            }
-        )
-    }
-
-    nonisolated private static func stopAdHocDaemon(
-        layout: RimeAIProductDataLayout
-    ) throws {
-
-        let pidPath = layout.runtimeDirectory
-            .appendingPathComponent("rimeai-daemon.pid")
-        guard
-            let rawPID = try? String(contentsOf: pidPath, encoding: .utf8),
-            let pid = Int32(rawPID.trimmingCharacters(in: .whitespacesAndNewlines)),
-            pid > 1,
-            kill(pid, 0) == 0
-        else {
-            return
-        }
-        let ps = Process()
-        let output = Pipe()
-        ps.executableURL = URL(fileURLWithPath: "/bin/ps")
-        ps.arguments = ["-p", "\(pid)", "-o", "command="]
-        ps.standardOutput = output
-        ps.standardError = Pipe()
-        try ps.run()
-        ps.waitUntilExit()
-        let command = String(
-            decoding: output.fileHandleForReading.readDataToEndOfFile(),
-            as: UTF8.self
-        )
-        let socketPath = layout.runtimeDirectory
-            .appendingPathComponent("rimeai.sock")
-            .path
-        guard command.contains("rimeai_daemon"),
-              command.contains(socketPath)
-        else {
-            throw NSError(
-                domain: "fun.wwcn.inputmethod.RimeAI.data-lifecycle",
-                code: 1,
-                userInfo: [
-                    NSLocalizedDescriptionKey:
-                        "refused to stop an unrelated process",
-                ]
-            )
-        }
-        if kill(pid, SIGTERM) != 0 {
-            throw NSError(
-                domain: NSPOSIXErrorDomain,
-                code: Int(errno)
-            )
-        }
-    }
-
-    nonisolated private static func runProcess(
-        executable: String,
-        arguments: [String]
-    ) throws -> Int32 {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = arguments
-        process.standardOutput = Pipe()
-        process.standardError = Pipe()
-        try process.run()
-        process.waitUntilExit()
-        return process.terminationStatus
-    }
-
-    nonisolated private static func lifecycleError(
-        _ description: String,
-        code: Int
-    ) -> NSError {
-        NSError(
-            domain: "fun.wwcn.inputmethod.RimeAI.daemon-lifecycle",
-            code: code,
-            userInfo: [NSLocalizedDescriptionKey: description]
         )
     }
 
@@ -2329,7 +2024,7 @@ final class PrivacyCenterWindowController: NSObject {
         ))
     }
 
-    private func presentError(
+    func presentError(
         _ error: Error,
         message: String,
         information: String
@@ -2344,11 +2039,11 @@ final class PrivacyCenterWindowController: NSObject {
         alert.beginSheetModal(for: window)
     }
 
-    private func sectionTitle(_ value: String) -> NSTextField {
+    func sectionTitle(_ value: String) -> NSTextField {
         label(value, font: .systemFont(ofSize: 15, weight: .semibold))
     }
 
-    private func label(
+    func label(
         _ value: String,
         font: NSFont = .systemFont(ofSize: 13),
         secondary: Bool = false
@@ -2360,7 +2055,7 @@ final class PrivacyCenterWindowController: NSObject {
         return field
     }
 
-    private func configureWrapping(_ field: NSTextField) {
+    func configureWrapping(_ field: NSTextField) {
         field.maximumNumberOfLines = 0
         field.lineBreakMode = .byWordWrapping
         field.setContentCompressionResistancePriority(
@@ -2419,7 +2114,7 @@ final class PrivacyCenterWindowController: NSObject {
         return stack
     }
 
-    private func addSeparator(to stack: NSStackView) {
+    func addSeparator(to stack: NSStackView) {
         let separator = NSBox()
         separator.boxType = .separator
         separator.translatesAutoresizingMaskIntoConstraints = false

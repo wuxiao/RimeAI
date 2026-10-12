@@ -702,10 +702,7 @@ def _validate_audio(
             message="audio channels is invalid", **context
         )
     duration = value.get("duration_ms")
-    if (
-        not _is_finite_number(duration)
-        or duration <= 0
-    ):
+    if not _is_finite_number(duration) or duration <= 0:
         raise VoiceDatasetError(
             message="audio duration_ms is invalid", **context
         )

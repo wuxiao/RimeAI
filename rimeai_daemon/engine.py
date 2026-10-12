@@ -1,22 +1,26 @@
 """In-process P1 engine using only P0-approved local artifacts."""
 
+from __future__ import annotations
+
 import hashlib
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
-from rimeai_eval.beam_decoder import (
+from rimeai_runtime.beam_decoder import (
     BeamSentenceDecoder,
+    SegmentDecodeInput,
     load_beam_config,
 )
-from rimeai_eval.ngram_ranker import load_ngram_model
-from rimeai_eval.neural_ranker import (
+from rimeai_runtime.candidate_policy import partition_full_length_candidates
+from rimeai_runtime.neural_ranker import (
     HybridSemanticRanker,
     load_neural_ranker,
 )
-from rimeai_eval.pinyin_guard import PinyinGuard
-from rimeai_eval.evaluation import RankerError
-from rimeai_eval.candidate_policy import partition_full_length_candidates
+from rimeai_runtime.ngram_ranker import load_ngram_model
+from rimeai_runtime.pinyin_guard import PinyinGuard
+from rimeai_runtime.ranking import RankerError
 
+from .user_lm import UserLanguageModel
 
 SENTENCE_MIN_CONFIDENCE = 0.60
 
@@ -39,10 +43,11 @@ class LocalInferenceEngine:
         language_model_path: Path,
         beam_config_path: Path,
         rime_dictionary_path: Path,
-        neural_model_path: Optional[Path] = None,
-        fusion_config_path: Optional[Path] = None,
+        neural_model_path: Path | None = None,
+        fusion_config_path: Path | None = None,
         neural_device: str = "cpu",
         ranker_min_confidence: float = 0.55,
+        user_lm_path: Path | None = None,
     ):
         if not 0 <= ranker_min_confidence <= 1:
             raise ValueError("ranker_min_confidence must be from 0 to 1")
@@ -61,17 +66,19 @@ class LocalInferenceEngine:
                 "neural model and fusion config must be configured together"
             )
         self._fallback_ranker = language_model
+        hybrid_ranker: HybridSemanticRanker | None = None
         if neural_model_path is not None and fusion_config_path is not None:
             neural_ranker = load_neural_ranker(
                 neural_model_path,
                 guard,
                 device=neural_device,
             )
-            self._ranker = HybridSemanticRanker(
+            hybrid_ranker = HybridSemanticRanker(
                 neural_ranker,
                 language_model,
                 fusion_config_path,
             )
+            self._ranker = hybrid_ranker
         else:
             self._ranker = language_model
         self._sentence_decoder = BeamSentenceDecoder(
@@ -80,6 +87,10 @@ class LocalInferenceEngine:
             beam_config,
         )
         self._ranker_min_confidence = ranker_min_confidence
+        self._user_lm_path = user_lm_path
+        self._user_lm: UserLanguageModel | None = None
+        self._user_lm_mtime: float | None = None
+        self._refresh_user_lm(force=True)
         self.artifacts = [
             {
                 "role": "language_model",
@@ -114,7 +125,7 @@ class LocalInferenceEngine:
                 ]
             )
             self.artifact_id = (
-                f"{self._ranker.model_artifact_id}:"
+                f"{hybrid_ranker.model_artifact_id if hybrid_ranker else ''}:"
                 f"beam-{beam_config_sha256[:12]}"
             )
         else:
@@ -124,7 +135,57 @@ class LocalInferenceEngine:
                 f"dict-{dictionary_sha256[:12]}"
             )
 
-    def infer(self, request: Dict[str, Any]) -> Dict[str, Any]:
+    def _refresh_user_lm(self, *, force: bool = False) -> None:
+        """Reloads the consolidated user LM when its artifact changes.
+
+        A missing artifact leaves the engine without user evidence, which
+        keeps the baseline behavior bit-for-bit."""
+        path = self._user_lm_path
+        if path is None:
+            return
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            if force:
+                self._user_lm = None
+                self._user_lm_mtime = None
+            return
+        if not force and mtime == self._user_lm_mtime:
+            return
+        try:
+            self._user_lm = UserLanguageModel.load(path)
+            self._user_lm_mtime = mtime
+        except ValueError:
+            self._user_lm = None
+            self._user_lm_mtime = None
+
+    def _apply_user_evidence(
+        self, ranking: list[str], request: dict[str, Any]
+    ) -> list[str]:
+        """Reranks the ranker's top window with the L2 user LM.
+
+        Cold-start safe: without user evidence the ranking is returned
+        unchanged."""
+        user_lm = self._user_lm
+        if user_lm is None or len(ranking) < 2:
+            return ranking
+        domain = request.get("domain")
+        if not isinstance(domain, str):
+            domain = None
+        try:
+            reranked, confidence = user_lm.rerank(
+                request["context"], ranking, domain=domain
+            )
+        except (TypeError, ValueError, ArithmeticError):
+            return ranking
+        if confidence <= 0 or not reranked:
+            return ranking
+        return reranked
+
+    def infer(self, request: dict[str, Any]) -> dict[str, Any]:
+        # Cheap stat per request: consolidation rewrites the artifact in
+        # another process; pick it up without a daemon restart.
+        self._refresh_user_lm()
         candidates = request["candidates"]
         semantic_window = [
             {"id": str(index), "text": candidate}
@@ -150,6 +211,7 @@ class LocalInferenceEngine:
                 context=request["context"],
                 candidates=candidates,
             )
+        ranking = self._apply_user_evidence(list(ranking), request)
         ranked_candidate = ""
         if not ranking:
             decision = "no_candidate"
@@ -170,11 +232,27 @@ class LocalInferenceEngine:
         sentence_suggestion = ""
         sentence_confidence = 0.0
         if request["allow_sentence"]:
-            suggestion = self._sentence_decoder.suggest(
-                context=request["context"],
-                pinyin=request["pinyin"],
-                candidates=candidates,
-            )
+            segments = request.get("segments")
+            if segments and len(segments) > 1:
+                suggestion = self._sentence_decoder.suggest_segments(
+                    context=request["context"],
+                    segments=[
+                        SegmentDecodeInput(
+                            pinyin=segment["pinyin"],
+                            separator=segment["separator"],
+                            committed_text=segment.get("committed_text")
+                            or "",
+                        )
+                        for segment in segments
+                    ],
+                    active_candidates=candidates,
+                )
+            else:
+                suggestion = self._sentence_decoder.suggest(
+                    context=request["context"],
+                    pinyin=request["pinyin"],
+                    candidates=candidates,
+                )
             suggestion_text = suggestion.text
             sentence_confidence = suggestion.confidence
             if (

@@ -6,7 +6,7 @@ import subprocess
 import sys
 
 from rimeai_eval.cli import main
-from rimeai_eval.ngram_ranker import (
+from rimeai_runtime.ngram_ranker import (
     load_ngram_model,
     train_ngram_model,
     write_ngram_model_atomic,
@@ -117,6 +117,33 @@ def test_model_artifact_round_trips_and_ranks_a_contextual_candidate(
         serialized = json.load(file)
     assert serialized["schema_version"] == 1
     assert serialized["model_type"] == "char-ngram-ranker"
+
+
+def test_language_score_is_the_public_view_of_rank_scoring(tmp_path: Path):
+    samples = [
+        _sample(
+            "train-1",
+            "train",
+            "请执行下面这条",
+            "命令",
+            ["明令", "命令"],
+        ),
+        _sample(
+            "validation-1",
+            "validation",
+            "终端运行这条",
+            "命令",
+            ["明令", "命令"],
+        ),
+    ]
+    model, _ = train_ngram_model(samples, dataset_sha256="b" * 64)
+    artifact = tmp_path / "ranker.json.gz"
+    write_ngram_model_atomic(artifact, model)
+    loaded = load_ngram_model(artifact)
+
+    score = loaded.language_score("请在终端执行这条", "命令")
+    assert score == loaded._language_score("请在终端执行这条", "命令")
+    assert score > loaded.language_score("请在终端执行这条", "明令")
 
 
 def test_train_ngram_cli_writes_an_artifact_and_provenance_report(

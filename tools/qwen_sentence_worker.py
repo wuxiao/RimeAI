@@ -17,7 +17,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from rimeai_eval.pinyin_guard import PinyinGuard
+from rimeai_runtime.pinyin_guard import PinyinGuard
 
 
 MODEL_REVISION = "7ae557604adf67be50417f59c2c2f167def9a775"

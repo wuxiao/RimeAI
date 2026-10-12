@@ -146,6 +146,40 @@ struct HistoryStoreTests {
         #expect(snapshot.relevantSnippets == snippets)
     }
 
+    @Test("raw pinyin commits are kept for audit but excluded from context")
+    func rawPinyinExcludedFromContext() throws {
+        let (store, directory) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let confirmed = HistoryCommit(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,
+            committedAt: Date(timeIntervalSince1970: 1),
+            bundleIdentifier: "com.example.Editor",
+            pinyin: "mingtian",
+            committedText: "明天见",
+            source: .rimeMain
+        )
+        let raw = HistoryCommit(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000002")!,
+            committedAt: Date(timeIntervalSince1970: 2),
+            bundleIdentifier: "com.example.Editor",
+            pinyin: "mingtianj",
+            committedText: "mingtianj",
+            source: .rawPinyin
+        )
+
+        try store.append(confirmed)
+        try store.append(raw)
+
+        // 记录保留（审计/导出），但不进入 recentText 与 snippet 检索。
+        #expect(try store.records() == [confirmed, raw])
+        #expect(try store.recentText() == "明天见")
+        let snippets = try store.relevantSnippets(query: "mingtianj")
+        #expect(snippets.isEmpty)
+        let snapshot = try store.contextSnapshot(query: "mingtian")
+        #expect(snapshot.recentText == "明天见")
+        #expect(snapshot.relevantSnippets.map(\.text) == ["明天见"])
+    }
+
     @Test("invalid or empty commits are rejected")
     func invalidRecord() throws {
         let (store, directory) = try makeStore()

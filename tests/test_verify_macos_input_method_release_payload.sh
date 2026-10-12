@@ -217,7 +217,7 @@ expect_archive_rejected \
 
 /usr/bin/install -m 0644 "${host_resources}/RimeAI.pdf" "${menu_icon}"
 expect_archive_rejected \
-  "archive verifier must reject the legacy 24x18 menu icon"
+  "archive verifier must reject a menu icon with the 24x18 settings canvas"
 /usr/bin/install -m 0644 \
   "${project_root}/macos/Resources/RimeAIMenu.pdf" "${menu_icon}"
 

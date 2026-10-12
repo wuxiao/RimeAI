@@ -2,6 +2,17 @@ import AppKit
 
 @MainActor
 final class CandidatePanelController: NSObject {
+    /// 一次面板刷新所需的完整内容模型。
+    struct Content {
+        let visibleCandidates: [String]
+        let primaryCandidate: String?
+        let pageLabel: String?
+        let semanticPresentation: SemanticCandidatePresentation
+        let suggestionSource: HistoryCommitSource
+        let contextCharacterCount: Int
+        let cloudInFlight: Bool
+    }
+
     private let panel: NSPanel
     private let backgroundView: NSVisualEffectView
     private let mainCandidatesStack: NSStackView
@@ -11,16 +22,19 @@ final class CandidatePanelController: NSObject {
     private var semanticSelectionHandler: (() -> Void)?
     private var pageIndicatorVisible = false
     private var hasVisibleContent = false
+    /// 续写形态不经过 `refreshCandidatePanelIfActive` 的 hasComposition
+    /// 守卫；控制器据此避免把正常候选面板的隐藏误伤续写 chip（反之亦然）。
+    private(set) var isShowingContinuation = false
 
     override init() {
         panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 420, height: 72),
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 66),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: true
         )
         backgroundView = NSVisualEffectView(
-            frame: NSRect(x: 0, y: 0, width: 420, height: 72)
+            frame: NSRect(x: 0, y: 0, width: 420, height: 66)
         )
         mainCandidatesStack = NSStackView()
         semanticButton = NSButton()
@@ -78,18 +92,20 @@ final class CandidatePanelController: NSObject {
     }
 
     func update(
-        visibleCandidates: [String],
-        primaryCandidate: String?,
-        pageLabel: String?,
-        semanticPresentation: SemanticCandidatePresentation,
-        suggestionSource: HistoryCommitSource,
-        contextCharacterCount: Int,
-        cloudInFlight: Bool,
+        content: Content,
         onMainSelection: @escaping (Int) -> Void,
         onSemanticSelection: @escaping () -> Void
     ) {
+        let visibleCandidates = content.visibleCandidates
+        let primaryCandidate = content.primaryCandidate
+        let pageLabel = content.pageLabel
+        let semanticPresentation = content.semanticPresentation
+        let suggestionSource = content.suggestionSource
+        let contextCharacterCount = content.contextCharacterCount
+        let cloudInFlight = content.cloudInFlight
         mainSelectionHandler = onMainSelection
         semanticSelectionHandler = onSemanticSelection
+        isShowingContinuation = semanticPresentation.isContinuation
 
         for view in mainCandidatesStack.arrangedSubviews {
             mainCandidatesStack.removeArrangedSubview(view)
@@ -121,6 +137,10 @@ final class CandidatePanelController: NSObject {
                 semanticTitle = "☁︎ Qwen 纠错：\(text)"
             case .cloudGenerated:
                 semanticTitle = "☁︎ LLM 生成：\(text)"
+            case .continuation:
+                semanticTitle = "✦ 续写：\(text)"
+            case .phraseBook:
+                semanticTitle = "✦ 个人短语：\(text)"
             case .rimeMain, .localSemantic, .rawPinyin:
                 semanticTitle = semanticPresentation.title
             }
@@ -156,7 +176,9 @@ final class CandidatePanelController: NSObject {
                     ? "Tab 接受 LLM 生成整句"
                     : suggestionSource == .cloudExact
                         ? "Tab 接受 Qwen 语义候选"
-                        : "Tab 接受本地语义候选")
+                        : suggestionSource == .phraseBook
+                            ? "Tab 接受个人短语候选"
+                            : "Tab 接受本地语义候选")
             : semanticTitle
 
         let showsMainCandidates = !visibleCandidates.isEmpty
@@ -171,9 +193,9 @@ final class CandidatePanelController: NSObject {
                 semanticButton.fittingSize.width + 24
             )
         )
-        // 候选按钮与语义按钮分层不重叠；面板高度按"候选 + 语义"两段
-        // 容纳，长 LLM 文本会被自然换行而非被压住。
-        let contentHeight: CGFloat = showsMainCandidates ? 96 : 56
+        // 面板高度只容纳实际内容：上 6 + 候选行 28 + 间距 4 +
+        // 语义行 22 + 下 6，消除两行之间与底部的大面积留白。
+        let contentHeight: CGFloat = showsMainCandidates ? 66 : 34
         hasVisibleContent = showsMainCandidates
             || semanticPresentation.isSelectable
         panel.setContentSize(
@@ -199,18 +221,47 @@ final class CandidatePanelController: NSObject {
         } ?? NSScreen.main
         let visibleFrame = screen?.visibleFrame
             ?? NSRect(x: 0, y: 0, width: 1_920, height: 1_080)
-        var x = anchorRect.minX
-        var y = anchorRect.minY - size.height - 4
-        if y < visibleFrame.minY {
-            y = anchorRect.maxY + 4
+        var panelOriginX = anchorRect.minX
+        var panelOriginY = anchorRect.minY - size.height - 4
+        if panelOriginY < visibleFrame.minY {
+            panelOriginY = anchorRect.maxY + 4
         }
-        x = min(max(x, visibleFrame.minX), visibleFrame.maxX - size.width)
-        panel.setFrameOrigin(NSPoint(x: x, y: y))
+        panelOriginX = min(
+            max(panelOriginX, visibleFrame.minX),
+            visibleFrame.maxX - size.width
+        )
+        panel.setFrameOrigin(
+            NSPoint(x: panelOriginX, y: panelOriginY)
+        )
         panel.orderFrontRegardless()
     }
 
     func hide() {
+        isShowingContinuation = false
         panel.orderOut(nil)
+    }
+
+    /// 上屏后续写 chip：主候选为空、无分页、无云端在途标记，走既有
+    /// update + show 渲染路径；不经过 refreshCandidatePanelIfActive。
+    func showContinuation(
+        _ text: String,
+        anchor: NSRect,
+        onSelection: @escaping () -> Void
+    ) {
+        update(
+            content: Content(
+                visibleCandidates: [],
+                primaryCandidate: nil,
+                pageLabel: nil,
+                semanticPresentation: .continuation(candidate: text),
+                suggestionSource: .continuation,
+                contextCharacterCount: 0,
+                cloudInFlight: false
+            ),
+            onMainSelection: { _ in },
+            onSemanticSelection: onSelection
+        )
+        show(anchorRect: anchor)
     }
 
     private func layoutSubviews(
@@ -222,24 +273,29 @@ final class CandidatePanelController: NSObject {
             origin: .zero,
             size: NSSize(width: width, height: height)
         )
+        let semanticHeight: CGFloat = 22
+        let candidatesHeight: CGFloat = showsMainCandidates ? 28 : 0
+        let candidatesY = height - 6 - candidatesHeight
+        mainCandidatesStack.frame = NSRect(
+            x: 8,
+            y: showsMainCandidates ? candidatesY : 0,
+            width: width - 16 - (pageIndicatorVisible ? 64 : 0),
+            height: candidatesHeight
+        )
         pageIndicator.frame = NSRect(
             x: width - 8 - 56,
-            y: showsMainCandidates ? 44 : 0,
+            y: showsMainCandidates
+                ? candidatesY + (candidatesHeight - 16) / 2
+                : (height - 16) / 2,
             width: 56,
             height: 16
         )
         pageIndicator.isHidden = !pageIndicatorVisible
-        mainCandidatesStack.frame = NSRect(
-            x: 8,
-            y: showsMainCandidates ? 64 : 0,
-            width: width - 16 - (pageIndicatorVisible ? 64 : 0),
-            height: showsMainCandidates ? 28 : 0
-        )
         semanticButton.frame = NSRect(
             x: 8,
-            y: 5,
+            y: 6,
             width: width - 16,
-            height: showsMainCandidates ? 56 : 46
+            height: semanticHeight
         )
     }
 
@@ -254,5 +310,18 @@ final class CandidatePanelController: NSObject {
             return
         }
         semanticSelectionHandler?()
+    }
+
+    /// Tab 接受续写 chip：与点击 chip 同一回调路径；未在续写形态
+    /// 时返回 false，调用方继续原有 Tab 分派。
+    @discardableResult
+    func acceptContinuationIfShowing() -> Bool {
+        guard isShowingContinuation,
+              let handler = semanticSelectionHandler
+        else {
+            return false
+        }
+        handler()
+        return true
     }
 }

@@ -16,6 +16,7 @@ struct ProductDataLayoutTests {
                 "models",
                 "runtime",
                 "History",
+                "language_profile",
                 "voice",
                 "RimeAI",
                 "fun.wwcn.rimeai.daemon.plist",

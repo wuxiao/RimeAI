@@ -1,5 +1,6 @@
-/* The visible mode supplies the user-facing name in Keyboard Settings. */
-CFBundleDisplayName = "";
-CFBundleName = "";
+/* CFBundleName feeds the macOS 26 input-menu section header; the visible
+   mode supplies the user-facing name in Keyboard Settings. */
+CFBundleDisplayName = "RimeAI";
+CFBundleName = "RimeAI";
 "fun.wwcn.inputmethod.RimeAI" = "RimeAI";
 "fun.wwcn.inputmethod.RimeAI.Primary" = "RimeAI";

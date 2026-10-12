@@ -1,5 +1,4 @@
 import Foundation
-import Network
 
 extension Notification.Name {
     static let rimeAICloudBrokerStatusDidChange = Notification.Name(
@@ -7,8 +6,42 @@ extension Notification.Name {
     )
 }
 
+/// 续写请求的退役登记：本地已取消/超时的 continuation，broker 仍可能
+/// 送达结果帧。退役 ID 用于把这类迟到帧静默丢弃，而不是落入推断
+/// 解码器触发整连接 tearDown。有界 FIFO，命中即消耗（一请求一帧）。
+struct ContinuationRetirementLog {
+    static let capacity = 32
+
+    private(set) var ids: [String] = []
+
+    mutating func retire(_ requestID: String) {
+        ids.append(requestID)
+        while ids.count > Self.capacity {
+            ids.removeFirst()
+        }
+    }
+
+    /// 命中退役 ID 时返回 true 并消耗该条目；未命中返回 false。
+    mutating func consume(_ requestID: String) -> Bool {
+        guard let index = ids.firstIndex(of: requestID) else {
+            return false
+        }
+        ids.remove(at: index)
+        return true
+    }
+
+    mutating func reset() {
+        ids.removeAll(keepingCapacity: false)
+    }
+}
+
+/// 云端代理客户端：请求/响应配对与协议握手校验。
+/// 连接管线（分帧、重连、串行发送、超时、代际计数）由
+/// `NDJSONUDSTransport` 提供。
 final class CloudBrokerClient: @unchecked Sendable {
     typealias Completion = @Sendable (CloudInferenceResponse?) -> Void
+    typealias ContinuationCompletion =
+        @Sendable (CloudContinuationResponse?) -> Void
 
     static let shared = CloudBrokerClient()
 
@@ -16,9 +49,8 @@ final class CloudBrokerClient: @unchecked Sendable {
         let completion: Completion
     }
 
-    private struct OutboundFrame {
-        let requestID: String?
-        let data: Data
+    private struct PendingContinuation {
+        let completion: ContinuationCompletion
     }
 
     private struct HelloRequest: Encodable {
@@ -28,7 +60,9 @@ final class CloudBrokerClient: @unchecked Sendable {
         /// Advertises that this client can decode `generate` decisions.
         /// Brokers that do not know the capability simply ignore it, and
         /// this client keeps working with brokers that never send it.
-        let capabilities = ["text-generation"]
+        /// `continuation-generation` advertises the post-commit
+        /// continuation round-trip (request type `continuation`).
+        let capabilities = ["text-generation", "continuation-generation"]
 
         enum CodingKeys: String, CodingKey {
             case schemaVersion = "schema_version"
@@ -47,13 +81,15 @@ final class CloudBrokerClient: @unchecked Sendable {
         let capabilities: [String]
 
         var isCompatible: Bool {
+            // 模型集不再要求包含客户端已知的全部模型：旧 broker 只
+            // 报 glm-5.3 时握手仍应通过，模型选择交给
+            // `resolvedModelID(for:)` 协商回落。
             schemaVersion == 1
                 && type == "hello"
                 && status == "ok"
                 && endpoint
                     == RimeAICloudConfiguration.endpoint.absoluteString
-                && Set(RimeAICloudConfiguration.rankingModelIDs)
-                    .isSubset(of: Set(models))
+                && !models.isEmpty
                 && Set([
                     "candidate-id-only",
                     "cancel",
@@ -84,27 +120,49 @@ final class CloudBrokerClient: @unchecked Sendable {
         }
     }
 
-    private let queue = DispatchQueue(
-        label: "fun.wwcn.rimeai.cloud-broker-client"
-    )
+    /// 响应信封：仅取 request_id 用于推断/续写两条 pending 表的分流。
+    private struct ResponseEnvelope: Decodable {
+        let requestID: String
+
+        enum CodingKeys: String, CodingKey {
+            case requestID = "request_id"
+        }
+    }
+
+    private var queue: DispatchQueue { transport.queue }
+    private let transport: NDJSONUDSTransport
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
-    private let socketPath: String
-    private var connection: NWConnection?
-    private var isTransportReady = false
     private var isReady = false
-    private var receiveBuffer = Data()
-    private var outbound: [OutboundFrame] = []
+    /// Models the broker advertised in its last successful hello. Empty
+    /// before the first handshake; model negotiation then stays a no-op.
+    private var availableModels: Set<String> = []
     private var pending: [String: PendingRequest] = [:]
+    private var pendingContinuations: [String: PendingContinuation] = [:]
+    /// Tombstones for continuation requests we cancelled or expired
+    /// locally: the broker may still deliver their result frame, and such
+    /// a late frame must be dropped quietly instead of falling into the
+    /// inference decoder and tearing down the whole connection. Cleared
+    /// on tearDown.
+    private var retiredContinuations = ContinuationRetirementLog()
 
     private init() {
-        socketPath = FileManager.default.homeDirectoryForCurrentUser
+        let socketPath = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library", isDirectory: true)
             .appendingPathComponent("Application Support", isDirectory: true)
             .appendingPathComponent("RimeAI", isDirectory: true)
             .appendingPathComponent("runtime", isDirectory: true)
             .appendingPathComponent("rimeai-cloud.sock")
             .path
+        transport = NDJSONUDSTransport(
+            configuration: NDJSONUDSTransport.Configuration(
+                socketPath: socketPath,
+                queueLabel: "fun.wwcn.rimeai.cloud-broker-client"
+            )
+        )
+        transport.setEventHandler { [weak self] event in
+            self?.handle(event)
+        }
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
     }
 
@@ -117,10 +175,7 @@ final class CloudBrokerClient: @unchecked Sendable {
             guard request.isValid,
                   !apiKey.isEmpty,
                   apiKey.utf8.count <= 512,
-                  let payload = encodeInferenceLine(
-                      request,
-                      apiKey: apiKey
-                  )
+                  let payload = encodeLine(request, apiKey: apiKey)
             else {
                 DispatchQueue.main.async { completion(nil) }
                 return
@@ -128,15 +183,14 @@ final class CloudBrokerClient: @unchecked Sendable {
             pending[request.requestID] = PendingRequest(
                 completion: completion
             )
-            outbound.append(
-                OutboundFrame(requestID: request.requestID, data: payload)
+            transport.enqueueOutbound(
+                data: payload,
+                requestID: request.requestID
             )
             ensureConnection()
-            flushOutbound()
-            queue.asyncAfter(
-                deadline: .now() + .milliseconds(
-                    request.deadlineMilliseconds + 25
-                )
+            transport.flushOutbound()
+            transport.scheduleTimeout(
+                afterMilliseconds: request.deadlineMilliseconds + 25
             ) {
                 [weak self] in
                 self?.expire(requestID: request.requestID)
@@ -148,18 +202,76 @@ final class CloudBrokerClient: @unchecked Sendable {
         queue.async { [self] in ensureConnection() }
     }
 
+    /// 上屏后续写请求：与 infer 同一条连接，按 request_id 解多路复用。
+    /// 超时口径与协调器守卫一致：deadline + 50ms 后以 nil 回调。
+    func continuation(
+        _ request: CloudContinuationRequest,
+        apiKey: String,
+        completion: @escaping ContinuationCompletion
+    ) {
+        queue.async { [self] in
+            guard ContinuationTextPolicy.isValid(request: request),
+                  !apiKey.isEmpty,
+                  apiKey.utf8.count <= 512,
+                  let payload = encodeLine(request, apiKey: apiKey)
+            else {
+                DispatchQueue.main.async { completion(nil) }
+                return
+            }
+            pendingContinuations[request.requestID] = PendingContinuation(
+                completion: completion
+            )
+            transport.enqueueOutbound(
+                data: payload,
+                requestID: request.requestID
+            )
+            ensureConnection()
+            transport.flushOutbound()
+            transport.scheduleTimeout(
+                afterMilliseconds: request.deadlineMilliseconds + 50
+            ) {
+                [weak self] in
+                self?.expireContinuation(requestID: request.requestID)
+            }
+        }
+    }
+
+    func cancelContinuation(requestID: String) {
+        queue.async { [self] in
+            guard pendingContinuations.removeValue(forKey: requestID) != nil
+            else {
+                return
+            }
+            retireContinuationID(requestID)
+            sendWireCancel(requestID: requestID)
+        }
+    }
+
+    /// Model negotiation for mixed-version deployments: when the broker
+    /// (e.g. an un-upgraded one) does not offer the preferred model, fall
+    /// back to the first client-known model it does offer, so the cloud
+    /// path keeps working instead of failing every request with
+    /// "model is not allowed". Unconnected or already-compatible
+    /// selections return the preference unchanged.
+    func resolvedModelID(for preferredModelID: String) -> String {
+        queue.sync {
+            guard !availableModels.isEmpty,
+                  !availableModels.contains(preferredModelID)
+            else {
+                return preferredModelID
+            }
+            let fallback = RimeAICloudConfiguration.rankingModelIDs
+                .first { availableModels.contains($0) }
+            return fallback ?? preferredModelID
+        }
+    }
+
     func cancel(requestID: String) {
         queue.async { [self] in
             guard pending.removeValue(forKey: requestID) != nil else {
                 return
             }
-            outbound.removeAll { $0.requestID == requestID }
-            if isReady,
-               let payload = encodeLine(CancelRequest(requestID: requestID))
-            {
-                outbound.append(OutboundFrame(requestID: nil, data: payload))
-                flushOutbound()
-            }
+            sendWireCancel(requestID: requestID)
         }
     }
 
@@ -168,154 +280,57 @@ final class CloudBrokerClient: @unchecked Sendable {
             tearDown(failPending: true, status: "已断开")
         }
     }
+}
 
-    private func ensureConnection() {
-        guard connection == nil else {
-            return
-        }
-        let next = NWConnection(to: .unix(path: socketPath), using: .tcp)
-        connection = next
-        publishStatus("正在连接")
-        next.stateUpdateHandler = { [weak self, weak next] state in
-            guard let self, let next else {
-                return
-            }
-            self.queue.async {
-                self.handle(state: state, connection: next)
-            }
-        }
-        next.start(queue: queue)
-    }
+// MARK: - 传输层事件与请求收尾
 
-    private func handle(
-        state: NWConnection.State,
-        connection: NWConnection
-    ) {
-        guard self.connection === connection else {
-            return
-        }
-        switch state {
-        case .ready:
-            isTransportReady = true
+private extension CloudBrokerClient {
+    func handle(_ event: NDJSONUDSTransport.Event) {
+        switch event {
+        case .connectionReady:
             if let hello = encodeLine(
                 HelloRequest(
                     clientID: Bundle.main.bundleIdentifier
                         ?? "fun.wwcn.inputmethod.RimeAI"
                 )
             ) {
-                sendHandshake(hello, on: connection)
+                transport.sendImmediate(hello)
             } else {
                 tearDown(failPending: true, status: "握手编码失败")
-                return
             }
-            receiveNext(on: connection)
-        case .failed, .cancelled:
-            tearDown(failPending: true, status: "连接失败")
-        default:
-            break
-        }
-    }
-
-    private func flushOutbound() {
-        guard isTransportReady, isReady, let connection else {
-            return
-        }
-        let frames = outbound
-        outbound.removeAll(keepingCapacity: true)
-        for frame in frames {
-            connection.send(
-                content: frame.data,
-                completion: .contentProcessed {
-                    [weak self, weak connection] error in
-                    guard error != nil,
-                          let self,
-                          let connection
-                    else {
-                        return
-                    }
-                    self.queue.async {
-                        guard self.connection === connection else {
-                            return
-                        }
-                        self.tearDown(
-                            failPending: true,
-                            status: "发送失败"
-                        )
-                    }
-                }
+        case let .lineReceived(_, line):
+            process(line: line)
+        case let .connectionClosed(_, reason):
+            tearDown(
+                failPending: true,
+                status: reason.localizedStatusDescription
             )
         }
     }
 
-    private func sendHandshake(
-        _ data: Data,
-        on connection: NWConnection
-    ) {
-        connection.send(
-            content: data,
-            completion: .contentProcessed {
-                [weak self, weak connection] error in
-                guard error != nil,
-                      let self,
-                      let connection
-                else {
-                    return
-                }
-                self.queue.async {
-                    guard self.connection === connection else {
-                        return
-                    }
-                    self.tearDown(
-                        failPending: true,
-                        status: "握手发送失败"
-                    )
-                }
-            }
-        )
+    /// 撤回本地队列中该请求的帧，并按原语义补发线上 cancel：只有
+    /// 已真正发出的请求才需要服务端取消（推断与续写两条收尾路径
+    /// 共用）。
+    func sendWireCancel(requestID: String) {
+        transport.removeOutboundFrames(requestID: requestID)
+        guard transport.canSendApplicationFrames,
+              let payload = encodeLine(CancelRequest(requestID: requestID))
+        else {
+            return
+        }
+        transport.enqueueOutbound(data: payload, requestID: nil)
+        transport.flushOutbound()
     }
 
-    private func receiveNext(on connection: NWConnection) {
-        connection.receive(
-            minimumIncompleteLength: 1,
-            maximumLength: 65_536
-        ) { [weak self, weak connection] data, _, complete, error in
-            guard let self, let connection else {
-                return
-            }
-            self.queue.async {
-                guard self.connection === connection else {
-                    return
-                }
-                if let data, !data.isEmpty {
-                    self.receiveBuffer.append(data)
-                    self.processCompleteLines()
-                }
-                if complete || error != nil {
-                    self.tearDown(
-                        failPending: true,
-                        status: "连接中断"
-                    )
-                    return
-                }
-                self.receiveNext(on: connection)
-            }
+    func ensureConnection() {
+        guard !transport.hasActiveConnection else {
+            return
         }
+        transport.open()
+        publishStatus("正在连接")
     }
 
-    private func processCompleteLines() {
-        while let index = receiveBuffer.firstIndex(of: UInt8(ascii: "\n")) {
-            let line = Data(receiveBuffer[..<index])
-            receiveBuffer.removeSubrange(...index)
-            if !line.isEmpty {
-                process(line: line)
-            }
-        }
-        if receiveBuffer.count > 1_048_576 {
-            tearDown(failPending: true, status: "协议帧过大")
-        }
-    }
-
-    private func process(line: Data) {
+    func process(line: Data) {
         if !isReady {
             guard let hello = try? decoder.decode(
                 HelloResponse.self,
@@ -325,9 +340,38 @@ final class CloudBrokerClient: @unchecked Sendable {
                 return
             }
             isReady = true
-            flushOutbound()
+            availableModels = Set(hello.models)
+            transport.markProtocolReady()
             publishStatus("就绪")
             return
+        }
+        // 续写响应无法按 CloudInferenceResponse 解码（缺决策字段），
+        // 先解信封取 request_id 分流，避免续写帧误触推断路径的
+        // tearDown。
+        if let envelope = try? decoder.decode(
+            ResponseEnvelope.self,
+            from: line
+        ) {
+            if pendingContinuations[envelope.requestID] != nil {
+                guard let result = try? decoder.decode(
+                    CloudContinuationResponse.self,
+                    from: line
+                ) else {
+                    tearDown(failPending: true, status: "响应格式错误")
+                    return
+                }
+                publishStatus("就绪")
+                finishContinuation(
+                    requestID: envelope.requestID,
+                    result: result
+                )
+                return
+            }
+            if retiredContinuations.consume(envelope.requestID) {
+                // Late result for a continuation we already cancelled or
+                // expired: drop it quietly.
+                return
+            }
         }
         guard let result = try? decoder.decode(
             CloudInferenceResponse.self,
@@ -340,22 +384,31 @@ final class CloudBrokerClient: @unchecked Sendable {
         finish(requestID: result.requestID, result: result)
     }
 
-    private func expire(requestID: String) {
+    func expire(requestID: String) {
         guard let request = pending.removeValue(forKey: requestID) else {
             return
         }
-        outbound.removeAll { $0.requestID == requestID }
-        if isReady,
-           let payload = encodeLine(CancelRequest(requestID: requestID))
-        {
-            outbound.append(OutboundFrame(requestID: nil, data: payload))
-            flushOutbound()
-        }
+        sendWireCancel(requestID: requestID)
         publishStatus("请求超时")
         DispatchQueue.main.async { request.completion(nil) }
     }
 
-    private func finish(
+    func expireContinuation(requestID: String) {
+        guard let request = pendingContinuations.removeValue(
+            forKey: requestID
+        ) else {
+            return
+        }
+        retireContinuationID(requestID)
+        sendWireCancel(requestID: requestID)
+        DispatchQueue.main.async { request.completion(nil) }
+    }
+
+    private func retireContinuationID(_ requestID: String) {
+        retiredContinuations.retire(requestID)
+    }
+
+    func finish(
         requestID: String,
         result: CloudInferenceResponse?
     ) {
@@ -365,15 +418,23 @@ final class CloudBrokerClient: @unchecked Sendable {
         DispatchQueue.main.async { request.completion(result) }
     }
 
-    private func tearDown(failPending: Bool, status: String) {
-        let old = connection
-        connection = nil
-        isTransportReady = false
+    func finishContinuation(
+        requestID: String,
+        result: CloudContinuationResponse?
+    ) {
+        guard let request = pendingContinuations.removeValue(
+            forKey: requestID
+        ) else {
+            return
+        }
+        DispatchQueue.main.async { request.completion(result) }
+    }
+
+    func tearDown(failPending: Bool, status: String) {
+        transport.close()
         isReady = false
-        receiveBuffer.removeAll(keepingCapacity: false)
-        outbound.removeAll(keepingCapacity: false)
-        old?.stateUpdateHandler = nil
-        old?.cancel()
+        availableModels = []
+        retiredContinuations.reset()
         publishStatus(status)
         if failPending {
             let values = pending.values
@@ -381,10 +442,15 @@ final class CloudBrokerClient: @unchecked Sendable {
             for value in values {
                 DispatchQueue.main.async { value.completion(nil) }
             }
+            let continuations = pendingContinuations.values
+            pendingContinuations.removeAll(keepingCapacity: false)
+            for value in continuations {
+                DispatchQueue.main.async { value.completion(nil) }
+            }
         }
     }
 
-    private func publishStatus(_ status: String) {
+    func publishStatus(_ status: String) {
         DispatchQueue.main.async {
             NotificationCenter.default.post(
                 name: .rimeAICloudBrokerStatusDidChange,
@@ -394,19 +460,24 @@ final class CloudBrokerClient: @unchecked Sendable {
         }
     }
 
-    private func encodeLine<T: Encodable>(_ value: T) -> Data? {
+    func encodeLine<T: Encodable>(_ value: T) -> Data? {
         guard var data = try? encoder.encode(value) else {
             return nil
         }
         data.append(UInt8(ascii: "\n"))
         return data
     }
+}
 
-    private func encodeInferenceLine(
-        _ request: CloudInferenceRequest,
+// MARK: - 请求编码（internal，供单测直接验证线格式）
+
+extension CloudBrokerClient {
+    /// 请求体 + api_key 的 NDJSON 行：推断与续写请求共用。
+    func encodeLine<T: Encodable>(
+        _ value: T,
         apiKey: String
     ) -> Data? {
-        guard let encoded = try? encoder.encode(request),
+        guard let encoded = try? encoder.encode(value),
               var object = try? JSONSerialization.jsonObject(
                   with: encoded
               ) as? [String: Any]

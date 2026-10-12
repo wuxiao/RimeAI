@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from rimeai_eval.neural_ranker import (
+from rimeai_runtime.neural_ranker import (
     FusionConfig,
     HybridSemanticRanker,
     NeuralRankerArtifact,
@@ -13,7 +13,7 @@ from rimeai_eval.neural_ranker import (
     format_ranker_input,
     standardize_scores,
 )
-from rimeai_eval.pinyin_guard import PinyinGuard
+from rimeai_runtime.pinyin_guard import PinyinGuard
 
 
 def _guard():
