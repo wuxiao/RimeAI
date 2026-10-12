@@ -162,13 +162,22 @@ extension RimeAIInputController {
     }
 
     private func handleTabKey(client: any IMKTextInput) -> Bool {
-        guard let semanticCandidate = composition.semanticCandidate else {
-            // 有 composition（含仅前缀）时 Tab 不能直通，否则宿主
-            // 对 marked range 的原生处理会吞掉编码区。
-            return composition.hasComposition
+        if let semanticCandidate = composition.semanticCandidate {
+            selectSemanticCandidate(semanticCandidate, client: client)
+            return true
         }
-        selectSemanticCandidate(semanticCandidate, client: client)
-        return true
+        // 云端表态"与首选一致"：无独立语义候选可采纳，Tab 直接上屏
+        // 该一致首选（全局第一候选，与表态的比较基准相同）；走主候选
+        // 选择路径以保留 Rime 学习与历史记录。
+        if pipeline.presentation.tabCommitsFirstMainCandidate,
+           !composition.mainCandidates.isEmpty
+        {
+            selectMainCandidate(index: 0, client: client)
+            return true
+        }
+        // 有 composition（含仅前缀）时 Tab 不能直通，否则宿主
+        // 对 marked range 的原生处理会吞掉编码区。
+        return composition.hasComposition
     }
 
     private func handleSpaceKey(client: any IMKTextInput) -> Bool {

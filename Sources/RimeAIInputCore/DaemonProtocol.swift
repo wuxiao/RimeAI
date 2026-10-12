@@ -131,6 +131,12 @@ public enum SemanticCandidatePresentation: Equatable, Sendable {
         }
         return false
     }
+
+    /// 云端"与首选一致"表态：建议位本身不可选（无独立候选文本），
+    /// 但 Tab 允许直接上屏该一致的全局首选候选。
+    public var tabCommitsFirstMainCandidate: Bool {
+        self == .cloudSameTopCandidate
+    }
 }
 
 public struct DaemonHelloRequest: Codable, Sendable {

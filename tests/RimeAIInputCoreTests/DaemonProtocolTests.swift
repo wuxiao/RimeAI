@@ -627,6 +627,28 @@ func longInputAbstentionsAreVisibleAndNonSelectable() {
     #expect(!pinyinTooLong.isSelectable)
 }
 
+@Test
+func tabCommitsFirstMainCandidateOnlyForCloudAgreement() {
+    #expect(
+        SemanticCandidatePresentation.cloudSameTopCandidate
+            .tabCommitsFirstMainCandidate
+    )
+    for presentation in [
+        SemanticCandidatePresentation.idle,
+        .analyzing,
+        .sameTopCandidate,
+        .cloudAnalyzing,
+        .cloudBelowConfidence,
+        .cloudFailure,
+        .failure,
+        .unavailable,
+        .candidate(text: "你好", decision: .sentenceSuggestion, confidence: 1),
+        .continuation(candidate: "世界"),
+    ] {
+        #expect(!presentation.tabCommitsFirstMainCandidate)
+    }
+}
+
 // MARK: - Cross-punctuation segments (PinyinSegment protocol layer)
 
 private func fixtureSegments(
