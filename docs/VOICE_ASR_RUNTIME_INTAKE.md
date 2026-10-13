@@ -230,6 +230,40 @@ archive 与不可变源 revision 的一一对应。因此：
 7 个 inventory 文件的 exact 字节数/SHA-256，生成 schema-v2 manifest 与本文结论中的
 seal receipt。这些值只适用于该 evaluation cohort，不表示来源/权利审核已完成。
 
+### 中英流式 Paraformer（只允许评测）
+
+- archive：
+  `sherpa-onnx-streaming-paraformer-bilingual-zh-en.tar.bz2`
+- archive bytes：`1,047,319,737`
+- 上游 SHA-256：
+  `5462a1fce42693deae572af1e8c4687124b12aa85fe61ff4d3168bb5280e205f`
+- 官方 checksum：
+  <https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/checksum.txt>
+- 官方使用文档：
+  <https://k2-fsa.github.io/sherpa/onnx/pretrained_models/online-paraformer/paraformer-models.html>
+- 上游来源 model（ModelScope）：
+  <https://www.modelscope.cn/models/damo/speech_paraformer_asr_nat-zh-cn-16k-common-vocab8404-online/summary>
+- staged 组合遵循上游 real-time 示例：int8 encoder + int8 decoder + tokens，
+  合计 `237,202,501` bytes；archive 内 fp32 encoder/decoder（607MB/218MB）
+  只被审计、永不入 cohort：
+  - `model/encoder.onnx` ← `encoder.int8.onnx`
+    （`165,462,184` bytes，SHA-256
+    `81a70226a8934e6ed92aa1d4fc486b428b5398e2f2619ed4897b7294cab90e9a`）
+  - `model/decoder.onnx` ← `decoder.int8.onnx`
+    （`71,664,561` bytes，SHA-256
+    `f3cca9f77bb9d93c8fcbfb63ae617b6b1ee96818df3aa3b151c40658fe38594f`）
+  - `model/tokens.txt` ← `tokens.txt`
+    （`75,756` bytes，SHA-256
+    `59aba8873a2ed1e122c25fee421e25f283b63290efbde85c1f01a853d83cb6e6`）
+- 与 Zipformer cohort 的差异：runtime kind 为
+  `sherpa-onnx-online-paraformer`（modeling unit `cjkchar`、greedy 解码、
+  无 joiner/BPE），流式 Paraformer 不支持热词，manifest 必须声明
+  `hotword_mode: "unsupported"` 与 `maximum_hotwords: 0`。
+- 该模型由 ModelScope `speech_paraformer...vocab8404-online` 转换而来；
+  训练数据权利、权重再分发权与不可变源 revision 映射未完成审核。因此与
+  Zipformer cohort 相同：只允许进入受控 V0 评测（A/B 对比与冷加载 tracer），
+  不得进入生产受信 catalog、Release 包或自动下载路径。
+
 ### 中文 2025 int8（拒绝作为替代发布候选）
 
 `sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30` archive 的已知大小为

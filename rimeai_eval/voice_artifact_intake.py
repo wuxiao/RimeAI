@@ -33,13 +33,14 @@ FROZEN_ARCHIVE_ROOT = (
     "sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20"
 )
 
-# The official archive has 17 members, 556,522,064 declared regular-file
-# bytes, and a largest member of 330,083,505 bytes.  These ceilings leave a
-# small explicit envelope while bounding decompression work before allowlist
-# selection.
+# The zipformer archive has 17 members, 556,522,064 declared regular-file
+# bytes, and a largest member of 330,083,505 bytes.  The paraformer archive
+# has 13 members, about 1,103,215,837 declared bytes, and a largest member of
+# 636,348,877 bytes (fp32 encoder, audited but never staged).  These ceilings
+# bound decompression work before allowlist selection for both cohorts.
 MAX_ARCHIVE_MEMBERS = 64
-MAX_REGULAR_MEMBER_BYTES = 384 * 1024 * 1024
-MAX_TOTAL_DECLARED_BYTES = 640 * 1024 * 1024
+MAX_REGULAR_MEMBER_BYTES = 768 * 1024 * 1024
+MAX_TOTAL_DECLARED_BYTES = 1280 * 1024 * 1024
 
 # Source names and target paths are a single frozen cohort.  In particular,
 # the archive's alternate-precision ONNX files are never selected.
@@ -82,15 +83,38 @@ class FrozenCohort:
     member_targets: Tuple[Tuple[str, str, int], ...]
 
 
-# Placeholder: Task 4 of the paraformer intake plan fills the identity and
-# member list from the audited upstream bytes. An empty cohort can never
-# pass intake, so the placeholder stays fail-closed until then.
+# Frozen from the official asr-models release (archive SHA-256 above) on
+# 2026-10-13.  The staged combination follows the upstream real-time example:
+# int8 encoder + int8 decoder + tokens; the fp32 files stay audited-only.
+# Upstream model card:
+# https://k2-fsa.github.io/sherpa/onnx/pretrained_models/online-paraformer/paraformer-models.html
 FROZEN_PARAFORMER_COHORT = FrozenCohort(
-    archive_url="",
-    archive_bytes=0,
-    archive_sha256="",
-    archive_root="",
-    member_targets=(),
+    archive_url=(
+        "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/"
+        "sherpa-onnx-streaming-paraformer-bilingual-zh-en.tar.bz2"
+    ),
+    archive_bytes=1_047_319_737,
+    archive_sha256=(
+        "5462a1fce42693deae572af1e8c4687124b12aa85fe61ff4d3168bb5280e205f"
+    ),
+    archive_root="sherpa-onnx-streaming-paraformer-bilingual-zh-en",
+    member_targets=(
+        (
+            "sherpa-onnx-streaming-paraformer-bilingual-zh-en/encoder.int8.onnx",
+            "model/encoder.onnx",
+            192 * 1024 * 1024,
+        ),
+        (
+            "sherpa-onnx-streaming-paraformer-bilingual-zh-en/decoder.int8.onnx",
+            "model/decoder.onnx",
+            96 * 1024 * 1024,
+        ),
+        (
+            "sherpa-onnx-streaming-paraformer-bilingual-zh-en/tokens.txt",
+            "model/tokens.txt",
+            128 * 1024,
+        ),
+    ),
 )
 
 
