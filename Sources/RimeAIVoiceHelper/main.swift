@@ -145,9 +145,13 @@ let signalSource = DispatchSource.makeSignalSource(
     queue: DispatchQueue.main
 )
 signal(SIGTERM, SIG_IGN)
-signalSource.setEventHandler {
-    server.stop()
-    exit(0)
+signalSource.setEventHandler { [server] in
+    // stop() 的 network.framework 拆除路径带主线程隔离假设；显式跳转到
+    // 主 Actor，保证 SIGTERM 清理与运行时隔离检查在同一线程完成。
+    Task { @MainActor in
+        server.stop()
+        exit(0)
+    }
 }
 signalSource.resume()
 
