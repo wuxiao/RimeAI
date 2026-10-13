@@ -4,15 +4,19 @@ import math
 
 import pytest
 
-from rimeai_runtime.constrained_decoder import PinyinTokenIndex
+from rimeai_runtime.constrained_decoder import (
+    ConstrainedGreedyDecoder,
+    DecodeResult,
+    PinyinTokenIndex,
+)
 from rimeai_runtime.pinyin_guard import PinyinGuard
 
 
 class _StubTokenizer:
     """Duck-typed stand-in for a transformers tokenizer."""
 
-    vocab_size = 8
-    _tokens = ["你", "好", "世界", "的", "是", "<pad>", "\n", "长"]
+    vocab_size = 12
+    _tokens = ["你", "好", "世界", "的", "是", "<pad>", "\n", "长", "时", "四季", "界", "试"]
 
     def decode(self, ids):
         return self._tokens[ids[0]]
@@ -29,6 +33,8 @@ def _guard() -> PinyinGuard:
             "四": frozenset({"si"}),
             "季": frozenset({"ji"}),
             "长": frozenset({"chang", "zhang"}),
+            "时": frozenset({"shi"}),
+            "试": frozenset({"shi"}),
         }
     )
 
@@ -72,3 +78,81 @@ def test_tokens_without_pronunciation_never_match():
 
 def test_empty_prefix_yields_no_candidates():
     assert _index().candidates(()) == {}
+
+
+class _FixedScorer:
+    """step_token_ids -> fixed probability mapping for that step."""
+
+    def __init__(self, table):
+        self._table = {tuple(k): v for k, v in table.items()}
+
+    def __call__(self, step_token_ids):
+        return self._table.get(tuple(step_token_ids), {})
+
+
+def test_decode_chains_greedy_tokens_with_geometric_mean_confidence():
+    scorer = _FixedScorer({(): {0: 0.6}, (0,): {1: 0.9}})
+    result = ConstrainedGreedyDecoder.decode(scorer, ("ni", "hao"), _index())
+    assert result.text == "你好"
+    assert result.consumed_syllables == 2
+    assert result.confidence == pytest.approx(math.sqrt(0.6 * 0.9))
+
+
+def test_long_word_priority_promotes_longer_token_below_threshold():
+    # argmax 时 0.89 < 0.9 → among prob >= 0.445 the longest coverage wins
+    scorer = _FixedScorer({(): {8: 0.89, 2: 0.49}})
+    result = ConstrainedGreedyDecoder.decode(scorer, ("shi", "jie"), _index())
+    assert result.text == "世界"
+    assert result.consumed_syllables == 2
+
+
+def test_no_priority_when_argmax_at_or_above_threshold():
+    # argmax 时 0.95 >= 0.9 → plain argmax wins even though 世界 is eligible
+    scorer = _FixedScorer(
+        {(): {8: 0.95, 2: 0.49}, (8,): {10: 0.9}}
+    )
+    result = ConstrainedGreedyDecoder.decode(scorer, ("shi", "jie"), _index())
+    assert result.text == "时界"
+    assert result.consumed_syllables == 2
+
+
+def test_long_word_priority_requires_half_of_argmax_probability():
+    # 世界 0.3 < 0.5 * 0.8 → not eligible, 时 wins
+    scorer = _FixedScorer({(): {8: 0.8, 2: 0.3}, (8,): {10: 0.9}})
+    result = ConstrainedGreedyDecoder.decode(scorer, ("shi", "jie"), _index())
+    assert result.text == "时界"
+
+
+def test_tie_breaks_to_smaller_token_id():
+    scorer = _FixedScorer({(): {8: 0.5, 11: 0.5}, (8,): {10: 0.9}})
+    result = ConstrainedGreedyDecoder.decode(scorer, ("shi", "jie"), _index())
+    assert result.text == "时界"
+
+
+def test_no_legal_first_token_abstains_with_empty_text():
+    scorer = _FixedScorer({(): {0: 1.0}})
+    result = ConstrainedGreedyDecoder.decode(scorer, ("xx",), _index())
+    assert result.text == ""
+    assert result.confidence == 0.0
+    assert result.consumed_syllables == 0
+
+
+def test_mid_decode_dead_end_abstains_with_empty_text():
+    # 你 consumes "ni"; "hao" has candidate 好 but scorer returns nothing
+    scorer = _FixedScorer({(): {0: 0.7}})
+    result = ConstrainedGreedyDecoder.decode(scorer, ("ni", "hao"), _index())
+    assert result.text == ""
+    assert result.confidence == 0.0
+    assert result.consumed_syllables == 1
+
+
+def test_exceeding_max_characters_abstains_with_empty_text():
+    scorer = _FixedScorer(
+        {(): {0: 0.9}, (0,): {1: 0.9}, (0, 1): {3: 0.9}}
+    )
+    result = ConstrainedGreedyDecoder.decode(
+        scorer, ("ni", "hao", "de"), _index(), max_characters=2
+    )
+    assert result.text == ""
+    assert result.confidence == 0.0
+    assert result.consumed_syllables == 2
