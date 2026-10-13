@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "status": "frozen_test_baseline",
+  "recorded_at": "2026-10-13",
+  "dataset": {
+    "path": ".rimeai/datasets/p0-librime-1.17.0-luna-simp.jsonl",
+    "sha256": "f0d46219a334d9d408518e387899c57b4881da27e8388d721827ebc86087b35d",
+    "split": "test",
+    "samples": 974,
+    "candidate_limit": 10
+  },
+  "comparison": {
+    "constrained-v1": {
+      "model_artifact_id": "qwen2.5-0.5b@060db649:sha256-88c142557820:mps:fp16:constrained-v1",
+      "lock": "models/qwen2.5-0.5b.lock.json",
+      "decoding": "pinyin-constrained beam (width 4, fuzzy pairs an/ang en/eng in/ing z/zh c/ch s/sh), invariant seed context '。', no prompt, no chat template",
+      "sentence_accuracy": 0.899384,
+      "baseline_sentence_accuracy": 0.726899,
+      "relative_lift": 0.237289,
+      "domain_slices": {
+        "developer": 0.977117,
+        "general": 0.836127
+      },
+      "valid_suggestions": 963,
+      "empty_suggestions": 0,
+      "pinyin_rejections": 11,
+      "errors": 0,
+      "latency_ms": { "p50": 151.042625, "p95": 314.804209 },
+      "cold_start_ms": 9614.435541,
+      "peak_rss_bytes": 1055752192
+    },
+    "syllable-decoder-v3": {
+      "model_artifact_id": "qwen2.5-0.5b-instruct@7ae55760:sha256-fdf756fa7fcb:mps:fp16:syllable-decoder-v3",
+      "decoding": "chat-template prompt generation (the prompt-engineering route)",
+      "sentence_accuracy": 0.725873,
+      "baseline_sentence_accuracy": 0.726899,
+      "relative_lift": -0.001411,
+      "valid_suggestions": 7,
+      "empty_suggestions": 910,
+      "pinyin_rejections": 57,
+      "errors": 0,
+      "latency_ms": { "p50": 157.581917, "p95": 311.240292 },
+      "cold_start_ms": 12385.109125,
+      "peak_rss_bytes": 720814080
+    }
+  },
+  "conclusion": "Constrained decoding beats the prompt route decisively at the same model size: 89.9% vs 72.6% sentence accuracy. The prompt route is effectively non-functional on 0.5B for this dataset (910/974 empty suggestions; its accuracy equals the dictionary fallback). The constrained decoder's output is legal by construction (pinyin mask + fuzzy gate), so its 11 rejections are the only failure mode short of wrong-but-legal readings. Latency parity: both ~150ms p50 on MPS fp16; the constrained route spends its budget on forward passes instead of prompt prefill, and every output token is legal so no output-cleaning gate ever discards a response.",
+  "reproduce_constrained": "uv run --extra neural rimeai-eval evaluate-sentence .rimeai/datasets/p0-librime-1.17.0-luna-simp.jsonl --decoder-config examples/constrained_qwen_decoder.json --rime-dictionary .rimeai/rime/shared/luna_pinyin.dict.yaml --split test",
+  "reproduce_prompt_baseline": "uv run --extra neural rimeai-eval evaluate-sentence .rimeai/datasets/p0-librime-1.17.0-luna-simp.jsonl --decoder-config examples/qwen_sentence_decoder.json --rime-dictionary .rimeai/rime/shared/luna_pinyin.dict.yaml --split test"
+}
