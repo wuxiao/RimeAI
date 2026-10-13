@@ -8,7 +8,8 @@ from pathlib import Path
 import tempfile
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from .ngram_ranker import NGramRankerModel, ORDERS
+from .lm_fusion import CharLMScorer, StaticCharLM
+from .ngram_ranker import NGramRankerModel
 from .pinyin_guard import PinyinGuard
 
 MAX_SENTENCE_CHARACTERS = 30
@@ -73,6 +74,7 @@ class BeamSentenceDecoder:
                 character_frequencies.get(character, 0) + count
             )
         self._character_frequencies = character_frequencies
+        self._default_scorer = StaticCharLM(language_model)
         reverse: Dict[str, set[str]] = {}
         for text, pronunciations in guard.pronunciations.items():
             if len(text) != 1:
@@ -90,34 +92,30 @@ class BeamSentenceDecoder:
             for syllable, characters in reverse.items()
         }
 
-    def _next_score(self, text: str, character: str) -> float:
-        full_text = text + character
-        score = 0.5 * math.log1p(
+    def _next_score(
+        self,
+        scorer: CharLMScorer,
+        text: str,
+        character: str,
+    ) -> float:
+        # The frequency prior stays static, sourced from the decoder's own
+        # order-2 table; only the language-model term honors `scorer`.
+        return 0.5 * math.log1p(
             self._character_frequencies.get(character, 0)
-        )
-        for order in ORDERS:
-            if len(full_text) < order:
-                continue
-            gram = full_text[-order:]
-            prefix = gram[:-1]
-            score += math.log(
-                (
-                    self.language_model.ngram_counts[order].get(gram, 0)
-                    + 0.1
-                )
-                / (
-                    self.language_model.prefix_counts[order].get(prefix, 0)
-                    + 1000.0
-                )
-            )
-        return score
+        ) + scorer.next_char_log_prob(text, character)
 
-    def _sequence_score(self, context: str, text: str) -> float:
+    def _sequence_score(
+        self,
+        scorer: CharLMScorer,
+        context: str,
+        text: str,
+    ) -> float:
         prefix = ""
         score = 0.0
-        context_suffix = context[-self.language_model.max_context_characters :]
+        context_suffix = context[-scorer.max_context_characters :]
         for character in text:
             score += self._next_score(
+                scorer,
                 context_suffix + prefix,
                 character,
             )
@@ -147,7 +145,10 @@ class BeamSentenceDecoder:
         context: str,
         pinyin: str,
         candidates: Sequence[str],
+        scorer: CharLMScorer | None = None,
     ) -> Tuple[str, float]:
+        if scorer is None:
+            scorer = self._default_scorer
         if not candidates:
             return "", 0.0
         complete = self._first_complete_candidate(
@@ -167,7 +168,7 @@ class BeamSentenceDecoder:
             for candidate in candidates[:10]
         ]
         beam: List[Tuple[str, float]] = [("", 0.0)]
-        context_suffix = context[-self.language_model.max_context_characters :]
+        context_suffix = context[-scorer.max_context_characters :]
         for position, syllable in enumerate(syllables):
             characters = set(
                 self._characters_by_syllable.get(syllable, [])[
@@ -189,6 +190,7 @@ class BeamSentenceDecoder:
                     prefix + character,
                     score
                     + self._next_score(
+                        scorer,
                         context_suffix + prefix,
                         character,
                     ),
@@ -199,7 +201,7 @@ class BeamSentenceDecoder:
             expanded.sort(key=lambda item: (-item[1], item[0]))
             beam = expanded[: self.config.beam_width]
         best_text, best_score = beam[0]
-        baseline_score = self._sequence_score(context, baseline)
+        baseline_score = self._sequence_score(scorer, context, baseline)
         return best_text, best_score - baseline_score
 
     def suggest(
@@ -208,6 +210,7 @@ class BeamSentenceDecoder:
         context: str,
         pinyin: str,
         candidates: Sequence[str],
+        scorer: CharLMScorer | None = None,
     ) -> BeamSuggestion:
         if not candidates:
             return BeamSuggestion("", 0.0, 0.0, "no_candidate")
@@ -224,6 +227,7 @@ class BeamSentenceDecoder:
             context=context,
             pinyin=pinyin,
             candidates=candidates,
+            scorer=scorer,
         )
         if not text or text == candidates[0]:
             return BeamSuggestion("", 0.0, margin, "no_change")
@@ -246,6 +250,7 @@ class BeamSentenceDecoder:
         context: str,
         segments: Sequence[SegmentDecodeInput],
         active_candidates: Sequence[str],
+        scorer: CharLMScorer | None = None,
     ) -> BeamSuggestion:
         if not active_candidates:
             return BeamSuggestion("", 0.0, 0.0, "no_candidate")
@@ -264,11 +269,15 @@ class BeamSentenceDecoder:
             else:
                 baseline = ""
                 candidates = []
+            segment_kwargs = (
+                {"scorer": scorer} if scorer is not None else {}
+            )
             suggestion = (
                 self.suggest(
                     context=accumulated,
                     pinyin=segment.pinyin,
                     candidates=candidates,
+                    **segment_kwargs,
                 )
                 if candidates
                 else None

@@ -12,6 +12,7 @@ from rimeai_runtime.beam_decoder import (
     load_beam_config,
 )
 from rimeai_runtime.candidate_policy import partition_full_length_candidates
+from rimeai_runtime.lm_fusion import CharLMScorer, StaticCharLM
 from rimeai_runtime.neural_ranker import (
     HybridSemanticRanker,
     load_neural_ranker,
@@ -20,6 +21,7 @@ from rimeai_runtime.ngram_ranker import load_ngram_model
 from rimeai_runtime.pinyin_guard import PinyinGuard
 from rimeai_runtime.ranking import RankerError
 
+from .fused_lm import FusedCharLM
 from .user_lm import UserLanguageModel
 
 SENTENCE_MIN_CONFIDENCE = 0.60
@@ -86,6 +88,7 @@ class LocalInferenceEngine:
             guard,
             beam_config,
         )
+        self._static_scorer = StaticCharLM(language_model)
         self._ranker_min_confidence = ranker_min_confidence
         self._user_lm_path = user_lm_path
         self._user_lm: UserLanguageModel | None = None
@@ -182,6 +185,57 @@ class LocalInferenceEngine:
             return ranking
         return reranked
 
+    def _fused_scorer(self, request: dict[str, Any]) -> FusedCharLM | None:
+        """Per-request fused scorer, or None to keep the static default.
+
+        Construction is O(1) (reference wrapping); a failure to build the
+        fused scorer must never take the sentence path down."""
+        user_lm = self._user_lm
+        if user_lm is None:
+            return None
+        domain = request.get("domain")
+        if not isinstance(domain, str):
+            domain = None
+        try:
+            return FusedCharLM(self._static_scorer, user_lm, domain)
+        except Exception:
+            return None
+
+    def _decode_sentence(
+        self,
+        request: dict[str, Any],
+        candidates: list[str],
+        scorer: CharLMScorer | None,
+    ) -> Any:
+        """One sentence-decode pass; `scorer` None uses the static default."""
+        segments = request.get("segments")
+        decoder = self._sentence_decoder
+        if segments and len(segments) > 1:
+            kwargs: dict[str, Any] = {
+                "context": request["context"],
+                "segments": [
+                    SegmentDecodeInput(
+                        pinyin=segment["pinyin"],
+                        separator=segment["separator"],
+                        committed_text=segment.get("committed_text")
+                        or "",
+                    )
+                    for segment in segments
+                ],
+                "active_candidates": candidates,
+            }
+            decode = decoder.suggest_segments
+        else:
+            kwargs = {
+                "context": request["context"],
+                "pinyin": request["pinyin"],
+                "candidates": candidates,
+            }
+            decode = decoder.suggest
+        if scorer is not None:
+            kwargs["scorer"] = scorer
+        return decode(**kwargs)
+
     def infer(self, request: dict[str, Any]) -> dict[str, Any]:
         # Cheap stat per request: consolidation rewrites the artifact in
         # another process; pick it up without a daemon restart.
@@ -232,27 +286,15 @@ class LocalInferenceEngine:
         sentence_suggestion = ""
         sentence_confidence = 0.0
         if request["allow_sentence"]:
-            segments = request.get("segments")
-            if segments and len(segments) > 1:
-                suggestion = self._sentence_decoder.suggest_segments(
-                    context=request["context"],
-                    segments=[
-                        SegmentDecodeInput(
-                            pinyin=segment["pinyin"],
-                            separator=segment["separator"],
-                            committed_text=segment.get("committed_text")
-                            or "",
-                        )
-                        for segment in segments
-                    ],
-                    active_candidates=candidates,
+            try:
+                suggestion = self._decode_sentence(
+                    request,
+                    candidates,
+                    self._fused_scorer(request),
                 )
-            else:
-                suggestion = self._sentence_decoder.suggest(
-                    context=request["context"],
-                    pinyin=request["pinyin"],
-                    candidates=candidates,
-                )
+            except Exception:
+                # Fail-closed: retry once with the default static scorer.
+                suggestion = self._decode_sentence(request, candidates, None)
             suggestion_text = suggestion.text
             sentence_confidence = suggestion.confidence
             if (

@@ -300,6 +300,27 @@ def test_suggest_segments_reports_overlength_joined_sentence(
     assert result.reason == "too_long"
 
 
+def test_suggest_accepts_custom_scorer(tmp_path: Path):
+    from rimeai_runtime.lm_fusion import StaticCharLM
+
+    model = _language_model()
+    decoder = _decoder(tmp_path)
+
+    default = decoder.suggest(
+        context="请执行这条",
+        pinyin="mingling",
+        candidates=["明令", "命令"],
+    )
+    explicit = decoder.suggest(
+        context="请执行这条",
+        pinyin="mingling",
+        candidates=["明令", "命令"],
+        scorer=StaticCharLM(model),
+    )
+
+    assert explicit == default
+
+
 def test_threshold_training_uses_validation_and_never_test_labels(
     tmp_path: Path,
 ):

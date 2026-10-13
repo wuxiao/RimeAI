@@ -420,6 +420,84 @@ def test_real_constructor_loads_user_lm_and_applies_evidence(tmp_path):
     assert warm_result["ranked_candidate"] == "明令"
 
 
+def test_sentence_path_identical_with_empty_user_lm(tmp_path):
+    # Review Focus 1 回归：空 user-LM 工件（冷启动）必须让整句路径与
+    # 无工件路径逐位一致，包括 segments 多段路径。
+    from rimeai_daemon.user_lm import UserLanguageModel
+
+    empty_artifact = tmp_path / "empty-user-lm.json.gz"
+    UserLanguageModel().save(empty_artifact)
+
+    request = {
+        "context": "请执行这条",
+        "pinyin": "mingling",
+        "candidates": ["明令", "命令"],
+        "allow_sentence": True,
+        "sensitive": False,
+    }
+    segment_request = dict(request)
+    segment_request["pinyin"] = "shi"
+    segment_request["candidates"] = ["是", "时"]
+    segment_request["segments"] = [
+        {"pinyin": "mingling", "separator": "，", "committed_text": "明令"},
+        {"pinyin": "shi", "separator": ""},
+    ]
+
+    cold = _real_engine(tmp_path / "absent.json.gz")
+    warm = _real_engine(empty_artifact)
+
+    assert warm.infer(dict(request)) == cold.infer(dict(request))
+    assert warm.infer(dict(segment_request)) == cold.infer(
+        dict(segment_request)
+    )
+
+
+class _ScorerRecordingDecoder:
+    def __init__(self, inner):
+        self.inner = inner
+        self.scorers = []
+
+    def suggest(self, *, context, pinyin, candidates, scorer=None):
+        self.scorers.append(scorer)
+        return self.inner.suggest(
+            context=context,
+            pinyin=pinyin,
+            candidates=candidates,
+            scorer=scorer,
+        )
+
+
+def test_user_lm_domain_influences_sentence_suggestion(tmp_path):
+    # 偏置 domain 用户 LM 后整句建议路径确实走融合打分器，且输出不再
+    # 与静态路径全等、不抛异常。
+    from rimeai_daemon.user_lm import UserLanguageModel
+
+    artifact = tmp_path / "biased-user-lm.json.gz"
+    biased = UserLanguageModel()
+    biased.update("chat", ["明令禁止"] * 400)
+    biased.save(artifact)
+
+    request = {
+        "context": "请执行这条",
+        "pinyin": "mingling",
+        "candidates": ["命令", "明令"],
+        "allow_sentence": True,
+        "domain": "chat",
+        "sensitive": False,
+    }
+    cold = _real_engine(tmp_path / "absent.json.gz")
+    warm = _real_engine(artifact)
+    recorder = _ScorerRecordingDecoder(warm._sentence_decoder)
+    warm._sentence_decoder = recorder
+
+    warm_result = warm.infer(dict(request))
+
+    assert len(recorder.scorers) == 1
+    assert recorder.scorers[0] is not None
+    assert warm_result == warm.infer(dict(request))
+    assert warm_result != cold.infer(dict(request))
+
+
 def test_running_engine_reloads_user_lm_on_rewrite(tmp_path):
     # I1 回归：固化循环在另一进程重写 user-lm.json.gz 后，运行中的
     # daemon 无需重启即可拿到新证据（mtime 触发重载）。
