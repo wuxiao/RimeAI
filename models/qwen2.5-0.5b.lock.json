@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "model": "Qwen/Qwen2.5-0.5B",
+  "revision": "060db6499f32faf8b98477b0a26969ef7d8b9987",
+  "license": "Apache-2.0",
+  "files": {
+    "LICENSE": {
+      "git_blob_sha1": "6634c8cc3133b3848ec74b9f275acaaa1ea618ab"
+    },
+    "config.json": {
+      "git_blob_sha1": "141506237b9022c4ab3e01734cfafb9310b57d2d"
+    },
+    "generation_config.json": {
+      "git_blob_sha1": "cbbb3133034e192527e5321b4c679154e4819ab8"
+    },
+    "merges.txt": {
+      "git_blob_sha1": "20024bfe7c83998e9aeaf98a0cd6a2ce6306c2f0"
+    },
+    "model.safetensors": {
+      "bytes": 988097824,
+      "sha256": "88c142557820ccad55bb59756bfcfcf891de9cc6202816bd346445188a0ed342"
+    },
+    "tokenizer.json": {
+      "git_blob_sha1": "443909a61d429dff23010e5bddd28ff530edda00"
+    },
+    "tokenizer_config.json": {
+      "git_blob_sha1": "ba7e4c5637b9732dadcd66286ce48334e8b31e9e"
+    },
+    "vocab.json": {
+      "git_blob_sha1": "4783fe10ac3adce15ac8f358ef5462739852c569"
+    }
+  }
+}

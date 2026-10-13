@@ -155,11 +155,14 @@ class DecodeResult:
 
 
 class ConstrainedGreedyDecoder:
-    """Greedy next-token decoding under a hard pinyin mask.
+    """Constrained next-token decoding under a hard pinyin mask.
 
-    Long-word priority: when the argmax candidate's probability is below
-    0.9, the candidate consuming the most syllables wins among those with
-    probability >= 0.5 * argmax. Ties break to the smaller token id.
+    beam_width=1 is stepwise greedy with the long-word priority rule
+    (argmax below 0.9 promotes the longest candidate with probability
+    >= 0.5 * argmax; ties break to the smaller token id). beam_width > 1
+    expands every allowed candidate and keeps the best complete paths by
+    joint log-probability, which recovers sentences whose best reading
+    needs the whole path compared, not stepwise winners.
     """
 
     ARGMAX_CONFIDENT = 0.9
@@ -174,6 +177,27 @@ class ConstrainedGreedyDecoder:
         *,
         max_characters: int = 30,
         fuzzy: bool = False,
+        beam_width: int = 1,
+    ) -> DecodeResult:
+        if beam_width <= 1:
+            return cls._decode_greedy(
+                scorer, syllables, index,
+                max_characters=max_characters, fuzzy=fuzzy,
+            )
+        return cls._decode_beam(
+            scorer, syllables, index,
+            max_characters=max_characters, fuzzy=fuzzy, beam_width=beam_width,
+        )
+
+    @classmethod
+    def _decode_greedy(
+        cls,
+        scorer: Callable[[Sequence[int]], Mapping[int, float]],
+        syllables: Sequence[str],
+        index: PinyinTokenIndex,
+        *,
+        max_characters: int,
+        fuzzy: bool,
     ) -> DecodeResult:
         remaining = list(syllables)
         generated: List[int] = []
@@ -215,3 +239,60 @@ class ConstrainedGreedyDecoder:
             del remaining[: len(reading)]
         confidence = math.exp(log_probability_sum / steps) if steps else 0.0
         return DecodeResult("".join(text_parts), confidence, len(syllables))
+
+    @classmethod
+    def _decode_beam(
+        cls,
+        scorer: Callable[[Sequence[int]], Mapping[int, float]],
+        syllables: Sequence[str],
+        index: PinyinTokenIndex,
+        *,
+        max_characters: int,
+        fuzzy: bool,
+        beam_width: int,
+    ) -> DecodeResult:
+        total = len(syllables)
+
+        def expand(state):
+            tokens, text, consumed, log_probability_sum, steps = state
+            probabilities = scorer(tokens)
+            expanded = []
+            for token_id, reading in index.candidates(
+                syllables[consumed:], fuzzy=fuzzy
+            ).items():
+                probability = probabilities.get(token_id, 0.0)
+                if probability <= 0.0:
+                    continue
+                token_text = index.token_texts.get(token_id, "")
+                if len(text) + len(token_text) > max_characters:
+                    continue
+                expanded.append(
+                    (
+                        tokens + [token_id],
+                        text + token_text,
+                        consumed + len(reading),
+                        log_probability_sum + math.log(max(probability, 1e-12)),
+                        steps + 1,
+                    )
+                )
+            return expanded
+
+        frontier = [([], "", 0, 0.0, 0)]
+        completed: List[tuple] = []
+        deepest = 0
+        while frontier:
+            next_frontier: List[tuple] = []
+            for state in frontier:
+                deepest = max(deepest, state[2])
+                for child in expand(state):
+                    if child[2] == total:
+                        completed.append(child)
+                    else:
+                        next_frontier.append(child)
+            next_frontier.sort(key=lambda state: (-state[3], state[0]))
+            frontier = next_frontier[:beam_width]
+        if not completed:
+            return DecodeResult("", 0.0, deepest)
+        best = min(completed, key=lambda state: (-state[3], state[0]))
+        confidence = math.exp(best[3] / best[4]) if best[4] else 0.0
+        return DecodeResult(best[1], confidence, total)

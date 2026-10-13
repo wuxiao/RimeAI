@@ -17,8 +17,11 @@ from rimeai_runtime.pinyin_guard import PinyinGuard
 class _StubTokenizer:
     """Duck-typed stand-in for a transformers tokenizer."""
 
-    vocab_size = 12
-    _tokens = ["你", "好", "世界", "的", "是", "<pad>", "\n", "长", "时", "四季", "界", "试"]
+    vocab_size = 17
+    _tokens = [
+        "你", "好", "世界", "的", "是", "<pad>", "\n", "长", "时", "四季",
+        "界", "试", "我", "们", "门", "明天", "我们",
+    ]
 
     def decode(self, ids):
         return self._tokens[ids[0]]
@@ -37,6 +40,11 @@ def _guard() -> PinyinGuard:
             "长": frozenset({"chang", "zhang"}),
             "时": frozenset({"shi"}),
             "试": frozenset({"shi"}),
+            "我": frozenset({"wo"}),
+            "们": frozenset({"men"}),
+            "门": frozenset({"men"}),
+            "明": frozenset({"ming"}),
+            "天": frozenset({"tian"}),
         }
     )
 
@@ -158,6 +166,28 @@ def test_exceeding_max_characters_abstains_with_empty_text():
     assert result.text == ""
     assert result.confidence == 0.0
     assert result.consumed_syllables == 2
+
+
+def test_beam_prefers_jointly_better_path_over_greedy():
+    # Greedy step scores favor 我(0.5) then 门(0.6), but the joint path
+    # through 我们(0.2)+明天(0.9) dominates 我(0.5)+门(0.6)+明天(0.1).
+    scorer = _FixedScorer(
+        {
+            (): {12: 0.5, 16: 0.2},
+            (12,): {14: 0.6, 13: 0.3},
+            (16,): {15: 0.9},
+            (12, 14): {15: 0.1},
+            (12, 13): {15: 0.9},
+        }
+    )
+    greedy = ConstrainedGreedyDecoder.decode(scorer, ("wo", "men", "ming", "tian"), _index())
+    assert greedy.text == "我门明天"
+    beam = ConstrainedGreedyDecoder.decode(
+        scorer, ("wo", "men", "ming", "tian"), _index(), beam_width=4
+    )
+    assert beam.text == "我们明天"
+    assert beam.consumed_syllables == 4
+    assert beam.confidence == pytest.approx(math.sqrt(0.2 * 0.9))
 
 
 def test_fuzzy_equal_covers_frozen_pairs_both_directions():
