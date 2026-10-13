@@ -86,7 +86,7 @@ daemon_executable="${current_link}/runtime/rimeai-daemon/rimeai-daemon"
 fusion_id=$(plutil -extract artifact_id raw -o - \
   "${release_root}/models/rimeai-ranker-s-24m-fusion-v1.json")
 beam_sha=$(shasum -a 256 \
-  "${release_root}/models/p0-beam-sentence-v1.json" | awk '{ print $1 }')
+  "${release_root}/models/p0-beam-sentence-v3.json" | awk '{ print $1 }')
 expected_model_artifact="${fusion_id}:beam-${beam_sha[1,12]}"
 for _ in {1..240}; do
   if [[ -S "${socket_file}" ]] \

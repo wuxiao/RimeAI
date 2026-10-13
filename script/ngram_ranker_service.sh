@@ -4,7 +4,7 @@ set -euo pipefail
 
 script_dir=${0:A:h}
 project_root=${script_dir:h}
-model_path=${RIMEAI_NGRAM_MODEL:-"${project_root}/.rimeai/models/p0-char-ngram-v1.json.gz"}
+model_path=${RIMEAI_NGRAM_MODEL:-"${project_root}/.rimeai/models/p0-char-ngram-v2.json.gz"}
 
 if [[ ! -f "${model_path}" ]]; then
   print -u2 "error: train the n-gram model before starting the service"

@@ -8,11 +8,11 @@ runtime_dir="${HOME}/Library/Application Support/RimeAI/runtime"
 socket_path="${runtime_dir}/rimeai.sock"
 pid_path="${runtime_dir}/rimeai-daemon.pid"
 log_path="${runtime_dir}/rimeai-daemon.log"
-language_model="${project_root}/.rimeai/models/p0-char-ngram-v1.json.gz"
-beam_config="${project_root}/.rimeai/models/p0-beam-sentence-v1.json"
+language_model="${project_root}/.rimeai/models/p0-char-ngram-v2.json.gz"
+beam_config="${project_root}/.rimeai/models/p0-beam-sentence-v3.json"
 rime_dictionary="${project_root}/.rimeai/rime/shared/luna_pinyin.dict.yaml"
 neural_model="${project_root}/.rimeai/models/rimeai-ranker-s-24m-v1"
-fusion_config="${project_root}/.rimeai/models/rimeai-ranker-s-24m-fusion-v1.json"
+fusion_config="${project_root}/.rimeai/models/rimeai-ranker-s-24m-fusion-v2.json"
 
 for artifact in \
   "${language_model}" \

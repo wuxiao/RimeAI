@@ -31,12 +31,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--language-model",
         type=Path,
-        default=project_root / ".rimeai/models/p0-char-ngram-v1.json.gz",
+        default=project_root / ".rimeai/models/p0-char-ngram-v2.json.gz",
     )
     parser.add_argument(
         "--beam-config",
         type=Path,
-        default=project_root / ".rimeai/models/p0-beam-sentence-v1.json",
+        default=project_root / ".rimeai/models/p0-beam-sentence-v3.json",
     )
     parser.add_argument(
         "--rime-dictionary",

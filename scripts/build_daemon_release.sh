@@ -36,8 +36,8 @@ if [[ -e "${output_archive}" || -L "${output_archive}" \
 fi
 mkdir -p "${output_parent}"
 
-language_model_source="${project_root}/.rimeai/models/p0-char-ngram-v1.json.gz"
-beam_config_source="${project_root}/.rimeai/models/p0-beam-sentence-v1.json"
+language_model_source="${project_root}/.rimeai/models/p0-char-ngram-v2.json.gz"
+beam_config_source="${project_root}/.rimeai/models/p0-beam-sentence-v3.json"
 dictionary_source="${project_root}/.rimeai/rime/shared/luna_pinyin.dict.yaml"
 neural_model_source="${project_root}/.rimeai/models/rimeai-ranker-s-24m-int8-onnx-v1"
 fusion_config_source="${project_root}/.rimeai/models/rimeai-ranker-s-24m-int8-onnx-fusion-v1.json"
@@ -193,9 +193,9 @@ rsync -a \
   "${build_root}/dist/rimeai-cloud-broker/" \
   "${staging_root}/runtime/rimeai-cloud-broker/"
 install -m 644 "${language_model_source}" \
-  "${staging_root}/models/p0-char-ngram-v1.json.gz"
+  "${staging_root}/models/p0-char-ngram-v2.json.gz"
 install -m 644 "${beam_config_source}" \
-  "${staging_root}/models/p0-beam-sentence-v1.json"
+  "${staging_root}/models/p0-beam-sentence-v3.json"
 install -m 644 "${dictionary_source}" \
   "${staging_root}/models/luna_pinyin.dict.yaml"
 # Keep the stable release path so rollback can switch between PyTorch and ONNX
@@ -301,8 +301,8 @@ codesign \
     "${staging_root}/models/rimeai-ranker-s-24m-v1/manifest.json" \
   --fusion-config \
     "${staging_root}/models/rimeai-ranker-s-24m-fusion-v1.json" \
-  --beam-config "${staging_root}/models/p0-beam-sentence-v1.json" \
-  --language-model "${staging_root}/models/p0-char-ngram-v1.json.gz" \
+  --beam-config "${staging_root}/models/p0-beam-sentence-v3.json" \
+  --language-model "${staging_root}/models/p0-char-ngram-v2.json.gz" \
   --dictionary "${staging_root}/models/luna_pinyin.dict.yaml" \
   --python-version "${python_version}" \
   --pyinstaller-version "${pyinstaller_version}"
@@ -313,7 +313,7 @@ codesign \
 expected_artifact_id=$(
   "${release_python}" - \
     "${staging_root}/models/rimeai-ranker-s-24m-fusion-v1.json" \
-    "${staging_root}/models/p0-beam-sentence-v1.json" <<'PY'
+    "${staging_root}/models/p0-beam-sentence-v3.json" <<'PY'
 import hashlib
 import json
 import sys
@@ -330,8 +330,8 @@ socket_file="${runtime_directory}/rimeai.sock"
 daemon_log="${build_root}/daemon.log"
 "${daemon_executable}" \
   --socket "${socket_file}" \
-  --language-model "${staging_root}/models/p0-char-ngram-v1.json.gz" \
-  --beam-config "${staging_root}/models/p0-beam-sentence-v1.json" \
+  --language-model "${staging_root}/models/p0-char-ngram-v2.json.gz" \
+  --beam-config "${staging_root}/models/p0-beam-sentence-v3.json" \
   --rime-dictionary "${staging_root}/models/luna_pinyin.dict.yaml" \
   --neural-model "${staging_root}/models/rimeai-ranker-s-24m-v1" \
   --fusion-config \

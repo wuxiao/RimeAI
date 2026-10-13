@@ -188,8 +188,8 @@ fi
 
 stable_release="${current_link}"
 daemon_executable="${stable_release}/runtime/rimeai-daemon/rimeai-daemon"
-language_model="${stable_release}/models/p0-char-ngram-v1.json.gz"
-beam_config="${stable_release}/models/p0-beam-sentence-v1.json"
+language_model="${stable_release}/models/p0-char-ngram-v2.json.gz"
+beam_config="${stable_release}/models/p0-beam-sentence-v3.json"
 rime_dictionary="${stable_release}/models/luna_pinyin.dict.yaml"
 neural_model="${stable_release}/models/rimeai-ranker-s-24m-v1"
 fusion_config="${stable_release}/models/rimeai-ranker-s-24m-fusion-v1.json"
@@ -270,7 +270,7 @@ if (( ai_enabled )); then
   fusion_artifact_id=$(plutil -extract artifact_id raw -o - \
     "${target_release}/models/rimeai-ranker-s-24m-fusion-v1.json")
   beam_sha=$(shasum -a 256 \
-    "${target_release}/models/p0-beam-sentence-v1.json" | awk '{ print $1 }')
+    "${target_release}/models/p0-beam-sentence-v3.json" | awk '{ print $1 }')
   expected_model_artifact="${fusion_artifact_id}:beam-${beam_sha[1,12]}"
   daemon_ready=0
   for _ in {1..240}; do

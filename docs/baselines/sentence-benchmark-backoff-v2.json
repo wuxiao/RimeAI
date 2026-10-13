@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "benchmark_type": "sentence-benchmark",
+  "dataset": {
+    "path": ".rimeai/datasets/p0-librime-1.17.0-luna-simp.jsonl",
+    "sha256": "f0d46219a334d9d408518e387899c57b4881da27e8388d721827ebc86087b35d"
+  },
+  "split": "test",
+  "samples": 974,
+  "artifacts": {
+    "language_model": ".rimeai/models/p0-char-ngram-v2.json.gz",
+    "language_model_sha256": "05213235f4b7f3673b4ff6e0a1fe0bd09b03aaa68619c4da48b31e3877573b53",
+    "decoder_config": ".rimeai/models/p0-beam-sentence-v3.json",
+    "decoder_config_sha256": "5ae65003fc221a5fcf252ede54d3962f80528d08fea9241a8b74904b4a2f4629",
+    "user_lm": "~/Library/Application Support/RimeAI/language_profile/user-lm.json.gz",
+    "user_lm_sha256": "956eba8ba1b1a6d51df6b7a256a5d8482fe6f3ae8b163fcf822f9fc407e142ec",
+    "fusion_config": ".rimeai/models/rimeai-ranker-s-24m-fusion-v2.json",
+    "fusion_config_sha256": "ce9860b69c4577e1ac2ec57c489ecc954d2e0c21d15993dda81ec226a7df8e7d"
+  },
+  "metrics": {
+    "baseline_char_accuracy": 0.808179,
+    "baseline_sentence_accuracy": 0.726899,
+    "decoder_char_accuracy": 0.853268,
+    "decoder_latency_ms": {"p50": 1.298834, "p95": 2.774334},
+    "decoder_sentence_accuracy": 0.790554,
+    "fused_char_accuracy": 0.840691,
+    "fused_decoder_latency_ms": {"p50": 2.913834, "p95": 5.32925},
+    "fused_sentence_accuracy": 0.774127,
+    "gold_in_top10_coverage": 0.810062,
+    "mean_edit_distance": 0.309035
+  },
+  "decision_counts": {
+    "decoder": {"below_threshold": 157, "no_change": 649, "suggestion": 168},
+    "fused": {"below_threshold": 165, "no_change": 682, "suggestion": 127}
+  },
+  "hyperparameters": {"min_confidence": 0.0},
+  "gates": {
+    "gold_in_top10_coverage": 0.810062,
+    "decoder_minus_baseline": {
+      "sentence_accuracy": 0.063655,
+      "char_accuracy": 0.045089
+    },
+    "fused_minus_decoder": {
+      "sentence_accuracy": -0.016427,
+      "char_accuracy": -0.012577
+    },
+    "latency_budget": {
+      "budget_ms": 1.0,
+      "decoder_latency_ms_p95": 2.774334,
+      "fused_decoder_latency_ms_p95": 5.32925,
+      "delta_ms": 2.554916,
+      "verdict": "FAIL",
+      "note": "fused (user-LM CharLMScorer) p95 exceeds decoder-only p95 by 2.554916 ms, over the +1 ms budget; the fused arm also loses accuracy on this frozen corpus, so the user-LM beam fusion arm is not deployable as-is on held-out corpus data"
+    }
+  },
+  "fusion_recalibration": {
+    "command": ".venv/bin/python -m rimeai_eval train-neural-fusion .rimeai/datasets/p0-librime-1.17.0-luna-simp.jsonl --neural-model .rimeai/models/rimeai-ranker-s-24m-v1 --language-model .rimeai/models/p0-char-ngram-v2.json.gz --rime-dictionary .rimeai/rime/shared/luna_pinyin.dict.yaml --output .rimeai/models/rimeai-ranker-s-24m-fusion-v2.json",
+    "output": {
+      "artifact_id": "rimeai-24m-fusion:241c2689224ff6c7",
+      "decision": {"changed_samples": 61, "losses": 4, "margin_threshold": 0.2745329499967264, "precision": 0.9016393442622951, "target_precision": 0.9, "wins": 55},
+      "fusion_type": "rimeai-neural-ngram-v1",
+      "neural_artifact_id": "rimeai-ranker-s-24m:d2e5385dc877f058",
+      "neural_weight": 0.5,
+      "ngram_dataset_sha256": "f0d46219a334d9d408518e387899c57b4881da27e8388d721827ebc86087b35d",
+      "validation": {"changed_samples": 71, "net_gain": 51, "raw_top1_accuracy": 0.9539375928677564, "samples": 673, "test_samples_used": 0},
+      "validation_dataset_sha256": "f0d46219a334d9d408518e387899c57b4881da27e8388d721827ebc86087b35d"
+    },
+    "previous_fusion_v1_margin_threshold": 0.47086944401130104
+  },
+  "language_profile_drift": {
+    "command": ".venv/bin/python -m rimeai_eval language-profile --history-db ~/Library/Application\\ Support/RimeAI/History/history.sqlite3 --frozen-samples .rimeai/datasets/p0-librime-1.17.0-luna-simp.jsonl --baseline-model .rimeai/models/p0-char-ngram-v2.json.gz --report .rimeai/reports/language-profile-backoff-v2-eval.json",
+    "first_eval_2026_10_12": {"baseline": "p0-char-ngram-v1", "learning_gain_nats": 0.298756, "phrase_hit_rate": 0.522936, "history_total_commits": 4356, "report": ".rimeai/reports/language-profile-first-eval.json"},
+    "rerun_2026_10_13": {"baseline": "p0-char-ngram-v2", "learning_gain_nats": 2.270836, "phrase_hit_rate": 0.501548, "history_total_commits": 3229, "frozen_samples": 10000, "covered_samples": 8307, "report": ".rimeai/reports/language-profile-backoff-v2-eval.json"},
+    "caveat": "learning_gain is not comparable across the two runs: the baseline changed (v1 backoff-scoring v2, alpha=0.2) and raw log-prob scales differ (baseline_mean_log_prob_test -7.074577 vs -10.652365); history_total_commits also decreased (4356 to 3229), so the history DB state differs from the first evaluation"
+  },
+  "notes": [
+    "Neural (constrained-qwen) benchmark arm skipped: RIMEAI_QWEN_MODEL_DIR is unset, so no Qwen worker model weights could be located; 待 constrained-qwen-v1 bake-off.",
+    "ONNX fusion config (.rimeai/models/rimeai-ranker-s-24m-int8-onnx-fusion-v1.json) could not be recalibrated: train-neural-fusion requires the torch scorer; its calibration (margin_threshold 0.3896937286754103) was fitted against the v1 n-gram scoring distribution and now silently mis-fits the v2 distribution. Follow-up: recalibrate via the ONNX path or gate it before the next release build.",
+    "Deployment entry points (rimeai_daemon/__main__.py, start_daemon.sh, ngram_ranker_service.sh, beam_sentence_service.sh, install_daemon_launch_agent.sh, build_daemon_release.sh, install_release_daemon.sh, rollback_release_daemon.sh) now reference p0-char-ngram-v2.json.gz / p0-beam-sentence-v3.json; the torch daemon path also carries the recalibrated rimeai-ranker-s-24m-fusion-v2.json. The release bundle keeps the stable fusion alias name rimeai-ranker-s-24m-fusion-v1.json (ONNX content, see note above).",
+    "rollback_release_daemon.sh now expects p0-beam-sentence-v3.json inside the previous release layout; rolling back to a pre-v3 release archive requires the archive's own names."
+  ],
+  "reproduce": {
+    "benchmark": ".venv/bin/python -m rimeai_eval sentence-benchmark .rimeai/datasets/p0-librime-1.17.0-luna-simp.jsonl --language-model .rimeai/models/p0-char-ngram-v2.json.gz --decoder-config .rimeai/models/p0-beam-sentence-v3.json --rime-dictionary .rimeai/rime/shared/luna_pinyin.dict.yaml --user-lm \"$HOME/Library/Application Support/RimeAI/language_profile/user-lm.json.gz\"",
+    "fusion": ".venv/bin/python -m rimeai_eval train-neural-fusion .rimeai/datasets/p0-librime-1.17.0-luna-simp.jsonl --neural-model .rimeai/models/rimeai-ranker-s-24m-v1 --language-model .rimeai/models/p0-char-ngram-v2.json.gz --rime-dictionary .rimeai/rime/shared/luna_pinyin.dict.yaml --output .rimeai/models/rimeai-ranker-s-24m-fusion-v2.json"
+  }
+}
