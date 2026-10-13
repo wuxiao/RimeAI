@@ -15,6 +15,8 @@ from .cloud_evaluation import (
 )
 from rimeai_runtime.beam_decoder import (
     BeamDecoderError,
+    BeamSentenceDecoder,
+    load_beam_config,
     train_beam_decoder_config,
     write_beam_config_atomic,
 )
@@ -49,12 +51,14 @@ from rimeai_runtime.neural_ranker import (
     train_neural_ranker,
 )
 from rimeai_runtime.pinyin_guard import PinyinGuard
+from rimeai_daemon.user_lm import UserLanguageModel
 from .reporting import (
     ReportError,
     load_reports,
     render_markdown_comparison,
     write_jsonl_atomic,
 )
+from .sentence_benchmark import run_sentence_benchmark
 from .sentence_evaluation import evaluate_sentence_dataset
 from .voice_dataset import VoiceDatasetError, load_voice_corpus
 from .voice_evaluation import (
@@ -316,6 +320,33 @@ def _build_parser() -> argparse.ArgumentParser:
         "--rime-dictionary", required=True, type=Path
     )
     train_beam_parser.add_argument("--output", required=True, type=Path)
+
+    sentence_benchmark_parser = subparsers.add_parser(
+        "sentence-benchmark",
+        help="benchmark the beam sentence decoder against the Rime baseline",
+    )
+    sentence_benchmark_parser.add_argument("dataset", type=Path)
+    sentence_benchmark_parser.add_argument(
+        "--language-model", required=True, type=Path
+    )
+    sentence_benchmark_parser.add_argument(
+        "--decoder-config", required=True, type=Path
+    )
+    sentence_benchmark_parser.add_argument(
+        "--rime-dictionary", required=True, type=Path
+    )
+    sentence_benchmark_parser.add_argument("--user-lm", type=Path)
+    sentence_benchmark_parser.add_argument(
+        "--command-decoder-config", type=Path
+    )
+    sentence_benchmark_parser.add_argument(
+        "--split",
+        choices=("train", "validation", "test", "all"),
+        default="test",
+    )
+    sentence_benchmark_parser.add_argument(
+        "--min-confidence", type=float, default=0.0
+    )
 
     language_profile_parser = subparsers.add_parser(
         "language-profile",
@@ -985,6 +1016,80 @@ def _evaluate_sentence(
     return 0
 
 
+def _sentence_benchmark(
+    dataset_path: Path,
+    language_model_path: Path,
+    decoder_config_path: Path,
+    dictionary_path: Path,
+    user_lm_path: Optional[Path],
+    command_decoder_config_path: Optional[Path],
+    split: str,
+    min_confidence: float,
+) -> int:
+    if not isfinite(min_confidence) or not 0 <= min_confidence <= 1:
+        print(
+            "error: --min-confidence must be from 0 to 1",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        dataset = load_dataset(dataset_path)
+        guard = PinyinGuard.from_rime_dictionary(dictionary_path)
+        language_model = load_ngram_model(language_model_path)
+        config = load_beam_config(decoder_config_path)
+        user_lm = (
+            UserLanguageModel.load(user_lm_path)
+            if user_lm_path is not None
+            else None
+        )
+    except (
+        DatasetValidationError,
+        NGramModelError,
+        BeamDecoderError,
+        OSError,
+        ValueError,
+    ) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    samples = (
+        dataset.samples
+        if split == "all"
+        else [sample for sample in dataset.samples if sample["split"] == split]
+    )
+    if not samples:
+        print(
+            f"error: {dataset_path}: dataset contains no samples for split '{split}'",
+            file=sys.stderr,
+        )
+        return 2
+    decoder = BeamSentenceDecoder(language_model, guard, config)
+    if command_decoder_config_path is None:
+        report = run_sentence_benchmark(
+            samples,
+            decoder,
+            min_confidence=min_confidence,
+            user_lm=user_lm,
+        )
+    else:
+        try:
+            command_decoder = CommandSentenceDecoder.from_config(
+                command_decoder_config_path
+            )
+        except SentenceDecoderConfigurationError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 2
+        with command_decoder as neural_decoder:
+            report = run_sentence_benchmark(
+                samples,
+                decoder,
+                min_confidence=min_confidence,
+                user_lm=user_lm,
+                command_decoder=neural_decoder,
+            )
+    print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+    return 0
+
+
 def _evaluate_keyboard(observations_path: Path) -> int:
     try:
         observations = load_keyboard_observations(observations_path)
@@ -1190,6 +1295,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             args.language_model,
             args.rime_dictionary,
             args.output,
+        )
+    if args.command == "sentence-benchmark":
+        return _sentence_benchmark(
+            args.dataset,
+            args.language_model,
+            args.decoder_config,
+            args.rime_dictionary,
+            args.user_lm,
+            args.command_decoder_config,
+            args.split,
+            args.min_confidence,
         )
     if args.command == "language-profile":
         return _language_profile_main(
