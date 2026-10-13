@@ -9,8 +9,6 @@ from rimeai_daemon.user_lm import UserLanguageModel
 from rimeai_runtime.beam_decoder import BeamSentenceDecoder, SegmentDecodeInput
 from rimeai_runtime.lm_fusion import CharLMScorer, StaticCharLM
 
-from .command_sentence_decoder import SentenceDecoderProtocolError
-
 ScorerFactory = Callable[[Dict[str, Any]], Optional[CharLMScorer]]
 
 
@@ -164,9 +162,10 @@ def run_sentence_benchmark(
 
     `user_lm` adds `fused_`-prefixed twin metrics by re-decoding every
     sample with a per-domain `FusedCharLM` scorer. `command_decoder` (a
-    `CommandSentenceDecoder`) adds side-by-side neural metrics: empty
-    suggestions count as abstentions, and a protocol error is treated as an
-    abstention rather than aborting the benchmark.
+    `CommandSentenceDecoder`) adds side-by-side neural metrics where an
+    abstention is an empty suggestion; a `SentenceDecoderProtocolError`
+    propagates so the caller can abort instead of miscounting failures as
+    abstentions.
     """
     report = benchmark_sentence_decoder(
         samples,
@@ -199,12 +198,9 @@ def run_sentence_benchmark(
         neural_hits = 0
         abstains = 0
         for sample in samples:
-            try:
-                text = command_decoder.suggest(sample).text
-            except SentenceDecoderProtocolError:
-                text = ""
-            abstains += not text
-            neural_hits += text == sample["gold_text"]
+            suggestion = command_decoder.suggest(sample)
+            abstains += not suggestion.text
+            neural_hits += suggestion.text == sample["gold_text"]
         report["metrics"]["neural_sentence_accuracy"] = _ratio(
             neural_hits,
             len(samples),

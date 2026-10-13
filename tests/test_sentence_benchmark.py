@@ -1,9 +1,13 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from rimeai_eval.cli import main
 from rimeai_eval.command_sentence_decoder import (
     CommandSentenceDecoder,
+    SentenceDecoderConfigurationError,
+    SentenceDecoderProtocolError,
     SentenceSuggestion,
 )
 from rimeai_eval.sentence_benchmark import (
@@ -408,3 +412,117 @@ def test_command_decoder_arm_omitted_without_flag(
     report = json.loads(capsys.readouterr().out)
     assert report["metrics"]["neural_sentence_accuracy"] == 1.0
     assert report["metrics"]["neural_abstain_rate"] == 0.0
+
+
+def test_benchmark_propagates_neural_protocol_errors():
+    samples = [
+        _sample(
+            "sample-1",
+            "test",
+            "请在终端执行这条",
+            "命令",
+            ["命令", "明令"],
+        ),
+    ]
+    decoder = _ScriptedDecoder(
+        [BeamSuggestion("命令", 0.9, 1.0, "suggestion")]
+    )
+
+    class _FailingNeuralDecoder:
+        def suggest(self, sample):
+            raise SentenceDecoderProtocolError("decoder response timed out")
+
+    with pytest.raises(SentenceDecoderProtocolError):
+        run_sentence_benchmark(
+            samples,
+            decoder,
+            command_decoder=_FailingNeuralDecoder(),
+        )
+
+
+def test_cli_sentence_benchmark_neural_protocol_error_exits_two(
+    tmp_path: Path, capsys, monkeypatch
+):
+    dataset, language_model, decoder_config, dictionary = (
+        _write_cli_artifacts(tmp_path)
+    )
+
+    class _FailingNeuralDecoder:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def suggest(self, sample):
+            raise SentenceDecoderProtocolError("decoder response timed out")
+
+    monkeypatch.setattr(
+        CommandSentenceDecoder,
+        "from_config",
+        lambda path: _FailingNeuralDecoder(),
+    )
+
+    exit_code = main(
+        [
+            "sentence-benchmark",
+            str(dataset),
+            "--language-model",
+            str(language_model),
+            "--decoder-config",
+            str(decoder_config),
+            "--rime-dictionary",
+            str(dictionary),
+            "--command-decoder-config",
+            str(tmp_path / "neural.json"),
+        ]
+    )
+
+    assert exit_code == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.startswith("error: ")
+    assert "timed out" in captured.err
+
+
+def test_cli_sentence_benchmark_neural_launch_failure_exits_two(
+    tmp_path: Path, capsys, monkeypatch
+):
+    dataset, language_model, decoder_config, dictionary = (
+        _write_cli_artifacts(tmp_path)
+    )
+
+    class _UnlaunchableNeuralDecoder:
+        def __enter__(self):
+            raise SentenceDecoderConfigurationError(
+                "cannot start decoder command"
+            )
+
+        def __exit__(self, *args):
+            return None
+
+    monkeypatch.setattr(
+        CommandSentenceDecoder,
+        "from_config",
+        lambda path: _UnlaunchableNeuralDecoder(),
+    )
+
+    exit_code = main(
+        [
+            "sentence-benchmark",
+            str(dataset),
+            "--language-model",
+            str(language_model),
+            "--decoder-config",
+            str(decoder_config),
+            "--rime-dictionary",
+            str(dictionary),
+            "--command-decoder-config",
+            str(tmp_path / "neural.json"),
+        ]
+    )
+
+    assert exit_code == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.startswith("error: cannot start decoder command")

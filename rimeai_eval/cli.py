@@ -24,6 +24,7 @@ from .command_ranker import CommandRanker, RankerConfigurationError
 from .command_sentence_decoder import (
     CommandSentenceDecoder,
     SentenceDecoderConfigurationError,
+    SentenceDecoderProtocolError,
 )
 from .dataset import DatasetValidationError, load_dataset
 from .evaluation import (
@@ -1072,20 +1073,22 @@ def _sentence_benchmark(
         )
     else:
         try:
-            command_decoder = CommandSentenceDecoder.from_config(
+            with CommandSentenceDecoder.from_config(
                 command_decoder_config_path
-            )
-        except SentenceDecoderConfigurationError as error:
+            ) as neural_decoder:
+                report = run_sentence_benchmark(
+                    samples,
+                    decoder,
+                    min_confidence=min_confidence,
+                    user_lm=user_lm,
+                    command_decoder=neural_decoder,
+                )
+        except (
+            SentenceDecoderConfigurationError,
+            SentenceDecoderProtocolError,
+        ) as error:
             print(f"error: {error}", file=sys.stderr)
             return 2
-        with command_decoder as neural_decoder:
-            report = run_sentence_benchmark(
-                samples,
-                decoder,
-                min_confidence=min_confidence,
-                user_lm=user_lm,
-                command_decoder=neural_decoder,
-            )
     print(json.dumps(report, ensure_ascii=False, sort_keys=True))
     return 0
 
