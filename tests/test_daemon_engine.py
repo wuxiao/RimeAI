@@ -385,9 +385,9 @@ def _real_engine(user_lm_path):
     project_root = Path(__file__).resolve().parent.parent
     return LocalInferenceEngine(
         language_model_path=project_root
-        / ".rimeai/models/p0-char-ngram-v1.json.gz",
+        / ".rimeai/models/p0-char-ngram-v2.json.gz",
         beam_config_path=project_root
-        / ".rimeai/models/p0-beam-sentence-v1.json",
+        / ".rimeai/models/p0-beam-sentence-v3.json",
         rime_dictionary_path=project_root
         / ".rimeai/rime/shared/luna_pinyin.dict.yaml",
         user_lm_path=user_lm_path,
