@@ -85,8 +85,12 @@ release_root="${releases_root}/${previous_name}"
 daemon_executable="${current_link}/runtime/rimeai-daemon/rimeai-daemon"
 fusion_id=$(plutil -extract artifact_id raw -o - \
   "${release_root}/models/rimeai-ranker-s-24m-fusion-v1.json")
-beam_sha=$(shasum -a 256 \
-  "${release_root}/models/p0-beam-sentence-v3.json" | awk '{ print $1 }')
+beam_configs=("${release_root}/models"/p0-beam-sentence-*.json(N))
+if (( ${#beam_configs} != 1 )); then
+  print -u2 "error: rollback release must contain exactly one p0-beam-sentence-*.json model"
+  exit 1
+fi
+beam_sha=$(shasum -a 256 "${beam_configs[1]}" | awk '{ print $1 }')
 expected_model_artifact="${fusion_id}:beam-${beam_sha[1,12]}"
 for _ in {1..240}; do
   if [[ -S "${socket_file}" ]] \

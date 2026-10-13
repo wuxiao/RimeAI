@@ -341,6 +341,17 @@ def load_ngram_model(path: Path) -> NGramRankerModel:
     smoothing = hyperparameters.get("smoothing")
     if not isinstance(smoothing, dict):
         raise NGramModelError("model smoothing hyperparameters are missing")
+    alpha = smoothing.get("alpha")
+    if (
+        smoothing.get("method") != "stupid-backoff"
+        or isinstance(alpha, bool)
+        or not isinstance(alpha, (int, float))
+        or not 0 < alpha <= 1
+    ):
+        raise NGramModelError(
+            "unsupported n-gram smoothing configuration; retrain the model "
+            "to produce a schema v2 stupid-backoff artifact"
+        )
     try:
         return NGramRankerModel(
             dataset_sha256=payload["dataset_sha256"],

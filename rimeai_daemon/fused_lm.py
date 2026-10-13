@@ -6,9 +6,10 @@ user LM's shrinkage-capped `user_weights`. Cold-start safe: when no user
 layer carries evidence, scoring delegates to the base scorer exactly, so
 an empty user LM keeps the static beam output bit-for-bit.
 
-Used for final-path adjudication in beam decoding (Ruling 10): a request
-makes only ~2×sentence-length calls, so the scorer stays allocation-free
-and without memoization.
+Used only to adjudicate the final margin in beam decoding (the beam
+search itself always scores statically): a request makes only
+~2×sentence-length calls, so the scorer stays allocation-free and
+without memoization.
 """
 
 from __future__ import annotations

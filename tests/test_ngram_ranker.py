@@ -246,6 +246,45 @@ def test_load_rejects_schema_v1_artifact(tmp_path: Path):
     assert "retrain" in str(excinfo.value)
 
 
+@pytest.mark.parametrize(
+    "method,alpha",
+    [
+        ("kneser-ney", 0.4),
+        ("stupid-backoff", 0),
+        ("stupid-backoff", 1.5),
+        ("stupid-backoff", True),
+    ],
+)
+def test_load_rejects_invalid_smoothing_hyperparameters(
+    tmp_path: Path,
+    method: str,
+    alpha: float,
+):
+    model, _ = train_ngram_model(_backoff_samples(), dataset_sha256="d" * 64)
+    payload = model.to_dict()
+    payload["hyperparameters"]["smoothing"]["method"] = method
+    payload["hyperparameters"]["smoothing"]["alpha"] = alpha
+    artifact = tmp_path / "ranker.json.gz"
+    with gzip.open(artifact, "wt", encoding="utf-8") as file:
+        json.dump(payload, file, ensure_ascii=False)
+
+    with pytest.raises(NGramModelError) as excinfo:
+        load_ngram_model(artifact)
+
+    assert "retrain" in str(excinfo.value)
+
+
+def test_load_accepts_boundary_backoff_alpha(tmp_path: Path):
+    model, _ = train_ngram_model(_backoff_samples(), dataset_sha256="d" * 64)
+    payload = model.to_dict()
+    payload["hyperparameters"]["smoothing"]["alpha"] = 1.0
+    artifact = tmp_path / "ranker.json.gz"
+    with gzip.open(artifact, "wt", encoding="utf-8") as file:
+        json.dump(payload, file, ensure_ascii=False)
+
+    assert load_ngram_model(artifact).backoff_alpha == 1.0
+
+
 def test_train_reports_selected_alpha():
     model, report = train_ngram_model(
         _backoff_samples(), dataset_sha256="d" * 64

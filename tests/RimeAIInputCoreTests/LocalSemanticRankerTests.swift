@@ -152,7 +152,7 @@ func compactArtifactParserRejectsLegacyV1Artifacts() throws {
         .deletingLastPathComponent()
         .deletingLastPathComponent()
     let legacy = repositoryRoot
-        .appendingPathComponent("ios/SemanticModel/rimeai-p0-ngram-v1.bin")
+        .appendingPathComponent("tests/Fixtures/rimeai-p0-ngram-v1.bin")
 
     do {
         _ = try LocalSemanticRanker(contentsOf: legacy)

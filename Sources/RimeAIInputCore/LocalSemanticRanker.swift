@@ -341,7 +341,7 @@ private struct CompactCountStorage: Sendable {
               data.readUInt32LE(at: 8) == 2
         else {
             throw LocalSemanticRankerError.invalidArtifact(
-                "头部或版本不兼容；请 retrain 并重新导出 schema v2 工件"
+                "incompatible header or schema version; retrain and re-export a schema v2 artifact"
             )
         }
         let tableCount = Int(data.readUInt32LE(at: 12))
