@@ -19,6 +19,7 @@ enum SherpaOnnxProductBackendError: Error, Equatable, Sendable {
     case resultUnavailable
     case invalidAudioFrame
     case decodeStepLimitExceeded
+    case hotwordsUnsupported
 }
 
 struct SherpaOnnxRuntimeIdentity: Equatable, Sendable {
@@ -251,7 +252,9 @@ final class SherpaOnnxProductBackendLoader:
         let driver = SherpaOnnxRecognizerDriver(
             artifactGeneration: lease.generation,
             recognizer: recognizer,
-            openedRuntimeFiles: openFiles
+            openedRuntimeFiles: openFiles,
+            hotwordsSupported: manifest.capabilities.hotwordMode
+                == .boundedPhraseList
         )
 
         // Exercise a model-approved non-empty hotword, end-of-input, result
@@ -259,21 +262,23 @@ final class SherpaOnnxProductBackendLoader:
         // advertised to the server. The manifest phrase is integrity-bound
         // metadata, never user text.
         do {
-            let probeHotwords = Array(
-                repeating: manifest.runtime.hotwordProbePhrase,
-                count: min(
-                    manifest.capabilities.maximumHotwords,
-                    VoiceDictationConstants.maximumHotwordCount
+            if manifest.capabilities.hotwordMode == .boundedPhraseList {
+                let probeHotwords = Array(
+                    repeating: manifest.runtime.hotwordProbePhrase,
+                    count: min(
+                        manifest.capabilities.maximumHotwords,
+                        VoiceDictationConstants.maximumHotwordCount
+                    )
                 )
-            )
-            try driver.startSession(
-                hotwords: probeHotwords
-            )
-            let hotwordProbe = try driver.finish()
-            guard hotwordProbe.text.isEmpty else {
-                throw VoiceProductBackendLoadError.emptyStreamProbeFailed
+                try driver.startSession(
+                    hotwords: probeHotwords
+                )
+                let hotwordProbe = try driver.finish()
+                guard hotwordProbe.text.isEmpty else {
+                    throw VoiceProductBackendLoadError.emptyStreamProbeFailed
+                }
+                driver.cancel()
             }
-            driver.cancel()
             try driver.startSession(hotwords: [])
             let freshProbe = try driver.finish()
             guard freshProbe.text.isEmpty else {
@@ -295,7 +300,7 @@ final class SherpaOnnxProductBackendLoader:
             adapterID: Self.adapterID,
             adapterVersion: Self.adapterVersion,
             adapterABIVersion: Self.adapterABIVersion,
-            runtimeKind: .sherpaOnnxOnlineTransducer,
+            runtimeKind: manifest.runtime.kind,
             supportedLocales: locales,
             supportsStreaming: true,
             supportsPartialResults: true,
@@ -321,7 +326,8 @@ final class SherpaOnnxProductBackendLoader:
         guard manifest.adapter.id == adapterID,
               manifest.adapter.version == adapterVersion,
               manifest.adapter.abiVersion == adapterABIVersion,
-              manifest.runtime.kind == .sherpaOnnxOnlineTransducer,
+              manifest.runtime.kind == .sherpaOnnxOnlineTransducer
+                  || manifest.runtime.kind == .sherpaOnnxOnlineParaformer,
               manifest.networkPolicy == .offline,
               !Set(manifest.locales).intersection(supportedLocales).isEmpty,
               manifest.capabilities.maximumAlternatives == 1
@@ -417,13 +423,20 @@ final class SherpaOnnxProductBackendLoader:
         snapshotOperations: SherpaOnnxRuntimeSnapshotOperations
     ) throws -> SherpaOnnxOpenedRuntimeFiles {
         let runtime = artifact.manifest.runtime
-        let paths = [
+        var paths = [
             (runtime.encoderPath, configuration.encoderPath),
             (runtime.decoderPath, configuration.decoderPath),
-            (runtime.joinerPath ?? "", configuration.joinerPath),
-            (runtime.tokensPath, configuration.tokensPath),
-            (runtime.bpeVocabularyPath ?? "", configuration.bpeVocabularyPath),
         ]
+        if runtime.kind == .sherpaOnnxOnlineTransducer {
+            paths.append((runtime.joinerPath ?? "", configuration.joinerPath))
+            paths.append((runtime.tokensPath, configuration.tokensPath))
+            paths.append((
+                runtime.bpeVocabularyPath ?? "",
+                configuration.bpeVocabularyPath
+            ))
+        } else {
+            paths.append((runtime.tokensPath, configuration.tokensPath))
+        }
         let inventory = Dictionary(uniqueKeysWithValues:
             artifact.manifest.inventory.map { ($0.path, $0) }
         )
@@ -1282,8 +1295,37 @@ final class SherpaOnnxProductBackendLoader:
         _ configuration: SherpaOnnxRecognizerConfiguration,
         boundTo files: SherpaOnnxOpenedRuntimeFiles
     ) -> SherpaOnnxRecognizerConfiguration {
-        precondition(files.runtimeSnapshot.runtimePaths.count == 5)
         let paths = files.runtimeSnapshot.runtimePaths
+        if configuration.modelType
+            == VoiceASRArtifactManifest.Runtime.ModelType.paraformer.rawValue
+        {
+            precondition(paths.count == 3)
+            return SherpaOnnxRecognizerConfiguration(
+                encoderPath: paths[0],
+                decoderPath: paths[1],
+                joinerPath: "",
+                tokensPath: paths[2],
+                bpeVocabularyPath: "",
+                sampleRateHertz: configuration.sampleRateHertz,
+                featureDimension: configuration.featureDimension,
+                numberOfThreads: configuration.numberOfThreads,
+                provider: configuration.provider,
+                modelType: configuration.modelType,
+                modelingUnit: configuration.modelingUnit,
+                decodingMethod: configuration.decodingMethod,
+                maximumActivePaths: configuration.maximumActivePaths,
+                endpointEnabled: configuration.endpointEnabled,
+                rule1MinimumTrailingSilenceSeconds:
+                    configuration.rule1MinimumTrailingSilenceSeconds,
+                rule2MinimumTrailingSilenceSeconds:
+                    configuration.rule2MinimumTrailingSilenceSeconds,
+                rule3MinimumUtteranceSeconds:
+                    configuration.rule3MinimumUtteranceSeconds,
+                hotwordsScore: configuration.hotwordsScore,
+                blankPenalty: configuration.blankPenalty
+            )
+        }
+        precondition(paths.count == 5)
         return SherpaOnnxRecognizerConfiguration(
             encoderPath: paths[0],
             decoderPath: paths[1],
@@ -1516,18 +1558,24 @@ private final class SherpaOnnxRecognizerDriver:
     let artifactGeneration: UUID
     private let recognizer: any SherpaOnnxRecognizerRunning
     private let openedRuntimeFiles: SherpaOnnxOpenedRuntimeFiles
+    private let hotwordsSupported: Bool
 
     init(
         artifactGeneration: UUID,
         recognizer: any SherpaOnnxRecognizerRunning,
-        openedRuntimeFiles: SherpaOnnxOpenedRuntimeFiles
+        openedRuntimeFiles: SherpaOnnxOpenedRuntimeFiles,
+        hotwordsSupported: Bool
     ) {
         self.artifactGeneration = artifactGeneration
         self.recognizer = recognizer
         self.openedRuntimeFiles = openedRuntimeFiles
+        self.hotwordsSupported = hotwordsSupported
     }
 
     func startSession(hotwords: [String]) throws {
+        guard hotwordsSupported || hotwords.isEmpty else {
+            throw SherpaOnnxProductBackendError.hotwordsUnsupported
+        }
         try recognizer.startSession(hotwords: hotwords)
     }
 
@@ -1586,18 +1634,35 @@ private struct SystemSherpaOnnxRuntime:
         config.feat_config.feature_dim = Int32(
             configuration.featureDimension
         )
-        config.model_config.transducer.encoder = try strings.copy(
-            configuration.encoderPath
-        )
-        config.model_config.transducer.decoder = try strings.copy(
-            configuration.decoderPath
-        )
-        config.model_config.transducer.joiner = try strings.copy(
-            configuration.joinerPath
-        )
-        config.model_config.tokens = try strings.copy(
-            configuration.tokensPath
-        )
+        if configuration.modelType
+            == VoiceASRArtifactManifest.Runtime.ModelType.paraformer.rawValue
+        {
+            config.model_config.paraformer.encoder = try strings.copy(
+                configuration.encoderPath
+            )
+            config.model_config.paraformer.decoder = try strings.copy(
+                configuration.decoderPath
+            )
+            config.model_config.tokens = try strings.copy(
+                configuration.tokensPath
+            )
+        } else {
+            config.model_config.transducer.encoder = try strings.copy(
+                configuration.encoderPath
+            )
+            config.model_config.transducer.decoder = try strings.copy(
+                configuration.decoderPath
+            )
+            config.model_config.transducer.joiner = try strings.copy(
+                configuration.joinerPath
+            )
+            config.model_config.tokens = try strings.copy(
+                configuration.tokensPath
+            )
+            config.model_config.bpe_vocab = try strings.copy(
+                configuration.bpeVocabularyPath
+            )
+        }
         config.model_config.num_threads = Int32(
             configuration.numberOfThreads
         )
@@ -1609,9 +1674,6 @@ private struct SystemSherpaOnnxRuntime:
         )
         config.model_config.modeling_unit = try strings.copy(
             configuration.modelingUnit
-        )
-        config.model_config.bpe_vocab = try strings.copy(
-            configuration.bpeVocabularyPath
         )
         config.decoding_method = try strings.copy(
             configuration.decodingMethod

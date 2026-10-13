@@ -179,6 +179,94 @@ struct SherpaOnnxProductBackendTests {
         #expect(loaded.loadProbe.bitsPerChannel == 32)
     }
 
+    @Test("paraformer configuration maps encoder, decoder and tokens only")
+    func test_paraformerConfigBuilds() throws {
+        let fixture = try SherpaBackendStoreFixture(cohort: .paraformer)
+        defer { fixture.remove() }
+        let runtime = SherpaBackendFakeRuntime()
+        let loader = SherpaOnnxProductBackendLoader(runtime: runtime)
+
+        let (loaded, _) = try fixture.load(using: loader)
+        let configuration = try #require(runtime.capturedConfiguration)
+        let snapshotPrefix = fixture.artifactDirectory
+            .deletingLastPathComponent().path
+            + "/.rimeai-sherpa-runtime-"
+
+        #expect(configuration.modelType == "paraformer")
+        #expect(configuration.modelingUnit == "cjkchar")
+        #expect(configuration.decodingMethod == "greedy_search")
+        #expect(configuration.hotwordsScore == 0)
+        #expect(configuration.joinerPath.isEmpty)
+        #expect(configuration.bpeVocabularyPath.isEmpty)
+        let descriptorPaths = [
+            configuration.encoderPath,
+            configuration.decoderPath,
+            configuration.tokensPath,
+        ]
+        #expect(
+            descriptorPaths.allSatisfy {
+                $0.hasPrefix(snapshotPrefix) && !$0.hasPrefix("/dev/fd/")
+            }
+        )
+        #expect(Set(descriptorPaths).count == descriptorPaths.count)
+        #expect(loaded.loadProbe.runtimeKind == .sherpaOnnxOnlineParaformer)
+        #expect(loaded.loadProbe.maximumHotwords == 0)
+    }
+
+    @Test("paraformer snapshot binds exactly three model files")
+    func test_paraformerSnapshotUsesThreeFiles() throws {
+        let fixture = try SherpaBackendStoreFixture(cohort: .paraformer)
+        defer { fixture.remove() }
+        let runtime = SherpaBackendFakeRuntime()
+        let loader = SherpaOnnxProductBackendLoader(runtime: runtime)
+
+        _ = try fixture.load(using: loader)
+
+        #expect(runtime.capturedModelContents == [
+            Data("encoder\n".utf8),
+            Data("decoder\n".utf8),
+            Data("tokens\n".utf8),
+        ])
+        #expect(runtime.reopenedModelContents == runtime.capturedModelContents)
+        for file in fixture.runtimeModelFiles {
+            var status = stat()
+            #expect(lstat(file.path, &status) == 0)
+            #expect(status.st_nlink == 1)
+        }
+    }
+
+    @Test("paraformer load probe skips the non-empty hotword probe")
+    func test_paraformerLoadProbeSkipsHotwordProbe() throws {
+        let fixture = try SherpaBackendStoreFixture(cohort: .paraformer)
+        defer { fixture.remove() }
+        let recognizer = SherpaBackendFakeRecognizer()
+        let runtime = SherpaBackendFakeRuntime(recognizer: recognizer)
+        let loader = SherpaOnnxProductBackendLoader(runtime: runtime)
+
+        _ = try fixture.load(using: loader)
+
+        #expect(recognizer.startedHotwords.count == 1)
+        #expect(recognizer.startedHotwords[0].isEmpty)
+        #expect(recognizer.finishCount == 1)
+        #expect(recognizer.cancelCount == 1)
+    }
+
+    @Test("paraformer engine rejects a non-empty hotword snapshot")
+    func test_paraformerRejectsHotwordSnapshot() throws {
+        let fixture = try SherpaBackendStoreFixture(cohort: .paraformer)
+        defer { fixture.remove() }
+        let runtime = SherpaBackendFakeRuntime()
+        let loader = SherpaOnnxProductBackendLoader(runtime: runtime)
+
+        let (loaded, _) = try fixture.load(using: loader)
+
+        #expect(
+            throws: SherpaOnnxProductBackendError.hotwordsUnsupported
+        ) {
+            try loaded.recognizerDriver.startSession(hotwords: ["RIMEAI"])
+        }
+    }
+
     @Test("clone failure uses the descriptor-copy fallback")
     func cloneFailureUsesDescriptorCopyFallback() throws {
         let fixture = try SherpaBackendStoreFixture()
@@ -1012,6 +1100,7 @@ private final class SherpaBackendFakeRuntime:
             configuration.tokensPath,
             configuration.bpeVocabularyPath,
         ]
+        .filter { !$0.isEmpty }
         let contents = try paths.map(Self.readAll)
         let reopenedContents = try paths.map(Self.readAll)
         try afterModelReads?(configuration)
@@ -1167,7 +1256,12 @@ private struct SherpaBackendVerifier: VoiceASRArtifactVerifying {
 }
 
 private final class SherpaBackendStoreFixture {
-    private static let modelFiles: [(String, String)] = [
+    enum Cohort {
+        case zipformer
+        case paraformer
+    }
+
+    private static let zipformerModelFiles: [(String, String)] = [
         ("model/encoder.onnx", "encoder\n"),
         ("model/decoder.onnx", "decoder\n"),
         ("model/joiner.onnx", "joiner\n"),
@@ -1175,16 +1269,30 @@ private final class SherpaBackendStoreFixture {
         ("model/bpe.vocab", "bpe\n"),
     ]
 
+    private static let paraformerModelFiles: [(String, String)] = [
+        ("model/encoder.onnx", "encoder\n"),
+        ("model/decoder.onnx", "decoder\n"),
+        ("model/tokens.txt", "tokens\n"),
+    ]
+
     let home: URL
     let artifactDirectory: URL
     let store: VoiceASRArtifactStore
+    private let cohortModelFiles: [(String, String)]
 
     init(
         homeParent: URL = URL(
             fileURLWithPath: "/private/tmp",
             isDirectory: true
-        )
+        ),
+        cohort: Cohort = .zipformer
     ) throws {
+        let manifestJSON = cohort == .zipformer
+            ? sherpaBackendManifestJSON
+            : sherpaBackendParaformerManifestJSON
+        cohortModelFiles = cohort == .zipformer
+            ? Self.zipformerModelFiles
+            : Self.paraformerModelFiles
         home = homeParent.appendingPathComponent(
             "rimeai-sherpa-backend-\(UUID().uuidString)",
             isDirectory: true
@@ -1197,7 +1305,7 @@ private final class SherpaBackendStoreFixture {
         #expect(chmod(home.path, mode_t(0o700)) == 0)
 
         let manifest = try VoiceASRArtifactManifest.decodeStrict(
-            Data(sherpaBackendManifestJSON.utf8),
+            Data(manifestJSON.utf8),
             verifyContentDigest: false
         )
         let layout = RimeAIProductDataLayout(homeDirectory: home)
@@ -1220,7 +1328,7 @@ private final class SherpaBackendStoreFixture {
             withIntermediateDirectories: false,
             attributes: [.posixPermissions: 0o700]
         )
-        for (relativePath, contents) in Self.modelFiles {
+        for (relativePath, contents) in cohortModelFiles {
             let file = path(relativePath)
             try Data(contents.utf8).write(to: file, options: .atomic)
             #expect(chmod(file.path, mode_t(0o600)) == 0)
@@ -1233,7 +1341,7 @@ private final class SherpaBackendStoreFixture {
     }
 
     var runtimeModelFiles: [URL] {
-        Self.modelFiles.map { path($0.0) }
+        cohortModelFiles.map { path($0.0) }
     }
 
     func load(
@@ -1293,6 +1401,48 @@ private let sherpaBackendManifestJSON = """
     {"path":"model/tokens.txt","bytes":7,"sha256":"2de8bce5133f08dc3ebb75abcb1ef6c0951800ee3ae8ca06fcf58395d1244218"}
   ],
   "content_sha256":"4fa8f1ad946857620cf81ab549cf10e4135962e81eb45758d522e5df62a04504"
+}
+"""
+
+private let sherpaBackendParaformerManifestJSON = """
+{
+  "schema_version": 2,
+  "artifact_type": "rimeai.voice-asr-model",
+  "asset_management": "product-managed",
+  "artifact_id": "sherpa-paraformer-zh-en-v1",
+  "adapter": {"id":"sherpa-onnx","version":"1.13.6","abi_version":1},
+  "model": {"id":"funasr-streaming-paraformer-zh-en","revision":"2026-10-13","format":"onnx","quantization":"fp32"},
+  "target": {"os":"macos","architecture":"arm64","minimum_os_version":"14.0"},
+  "audio": {"sample_rate_hz":16000,"channel_count":1,"sample_format":"float32le","frame_duration_ms":20},
+  "runtime": {
+    "kind":"sherpa-onnx-online-paraformer",
+    "encoder_path":"model/encoder.onnx",
+    "decoder_path":"model/decoder.onnx",
+    "tokens_path":"model/tokens.txt",
+    "modeling_unit":"cjkchar",
+    "model_type":"paraformer",
+    "feature_dimension":80,
+    "provider":"cpu",
+    "num_threads":2,
+    "decoding_method":"greedy_search",
+    "max_active_paths":4,
+    "endpoint":{"enabled":true,"rule1_min_trailing_silence_ms":2400,"rule2_min_trailing_silence_ms":1200,"rule3_min_utterance_ms":30000},
+    "hotword_probe_phrase":"",
+    "hotwords_score_milli":0,
+    "blank_penalty_milli":0
+  },
+  "network_policy":"offline",
+  "locales":["en-US","zh-CN"],
+  "capabilities":{"streaming":true,"partial_results":true,"endpoint_detection":true,"hotword_mode":"unsupported","maximum_hotwords":0,"maximum_alternatives":1},
+  "license":{"spdx_id":"Apache-2.0","license_path":"licenses/LICENSE.txt","notice_path":"licenses/NOTICE.txt","source_url":"https://example.invalid/model-card"},
+  "inventory":[
+    {"path":"licenses/LICENSE.txt","bytes":8,"sha256":"c0c56958ef8be5c1979366896b7e0c7206949a5aa2b23f51429c7f56b10990d3"},
+    {"path":"licenses/NOTICE.txt","bytes":7,"sha256":"5de37b4c620461f2b695f1cf6b8ee36e7d025da8334a3693c4ed9aa48a5c7d6a"},
+    {"path":"model/decoder.onnx","bytes":8,"sha256":"eacbeef293be61f2a85d929cadb4cbb5248c8b8a1478b3d4b3180ea365d5e687"},
+    {"path":"model/encoder.onnx","bytes":8,"sha256":"b1c4c05f286afb2531d4c847c4ca1e56260fc61281b7a04d50e09d09ab7a682b"},
+    {"path":"model/tokens.txt","bytes":7,"sha256":"2de8bce5133f08dc3ebb75abcb1ef6c0951800ee3ae8ca06fcf58395d1244218"}
+  ],
+  "content_sha256":"0000000000000000000000000000000000000000000000000000000000000000"
 }
 """
 
