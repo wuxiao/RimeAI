@@ -60,6 +60,7 @@ public struct LocalSemanticRanker: Sendable {
     private let rankWeight: Double
     private let frequencyWeight: Double
     private let languageWeight: Double
+    private let backoffAlpha: Double
     private let maximumContextCharacters: Int
     private let topCandidateCount: Int
     private let storage: CountStorage
@@ -71,6 +72,7 @@ public struct LocalSemanticRanker: Sendable {
         rankWeight = compact.rankWeight
         frequencyWeight = compact.frequencyWeight
         languageWeight = compact.languageWeight
+        backoffAlpha = compact.backoffAlpha
         maximumContextCharacters = compact.maximumContextCharacters
         topCandidateCount = compact.topCandidateCount
         artifactID = compact.artifactID
@@ -85,11 +87,13 @@ public struct LocalSemanticRanker: Sendable {
         ngramCounts: [Int: [String: Int]],
         prefixCounts: [Int: [String: Int]],
         maximumContextCharacters: Int = 40,
-        topCandidateCount: Int = 10
+        topCandidateCount: Int = 10,
+        backoffAlpha: Double = 0.4
     ) {
         self.rankWeight = rankWeight
         self.frequencyWeight = frequencyWeight
         self.languageWeight = languageWeight
+        self.backoffAlpha = backoffAlpha
         self.maximumContextCharacters = maximumContextCharacters
         self.topCandidateCount = topCandidateCount
         artifactID = "in-memory-test-model"
@@ -230,7 +234,8 @@ public struct LocalSemanticRanker: Sendable {
         var total = 0.0
         var terms = 0
         for position in candidateStart ..< characters.count {
-            for order in Self.orders {
+            var backedOff: Double?
+            for order in Self.orders.reversed() {
                 let start = position - order + 1
                 guard start >= 0 else {
                     continue
@@ -245,11 +250,23 @@ public struct LocalSemanticRanker: Sendable {
                     table: Self.prefixTableOffset + order,
                     key: prefix
                 )
-                total += Foundation.log(
-                    (Double(count) + 0.1) / (Double(prefixCount) + 1_000)
-                )
-                terms += 1
+                if count > 0 && prefixCount > 0 {
+                    backedOff = (Double(count) / Double(prefixCount))
+                        * pow(backoffAlpha, Double(5 - order))
+                    break
+                }
             }
+            let gram = String(characters[position - 1 ... position])
+            let count = value(table: Self.ngramTableOffset + 2, key: gram)
+            let prefixCount = value(
+                table: Self.prefixTableOffset + 2,
+                key: String(gram.dropLast())
+            )
+            let probability = backedOff
+                ?? ((Double(count) + 0.1) / (Double(prefixCount) + 1_000))
+                    * pow(backoffAlpha, 3)
+            total += Foundation.log(probability)
+            terms += 1
         }
         return total / Double(max(1, terms))
     }
@@ -294,8 +311,8 @@ private struct MemoryCountStorage: Sendable {
 }
 
 private struct CompactCountStorage: Sendable {
-    private static let magic = Array("RAINGRM1".utf8)
-    private static let headerSize = 176
+    private static let magic = Array("RAINGRM2".utf8)
+    private static let headerSize = 184
     private static let directoryEntrySize = 24
     private static let recordSize = 12
     private static let requiredTables: Set<Int> = [
@@ -312,6 +329,7 @@ private struct CompactCountStorage: Sendable {
     let rankWeight: Double
     let frequencyWeight: Double
     let languageWeight: Double
+    let backoffAlpha: Double
     let maximumContextCharacters: Int
     let topCandidateCount: Int
     let artifactID: String
@@ -320,9 +338,11 @@ private struct CompactCountStorage: Sendable {
         let data = try Data(contentsOf: url, options: .mappedIfSafe)
         guard data.count >= Self.headerSize,
               Array(data.prefix(Self.magic.count)) == Self.magic,
-              data.readUInt32LE(at: 8) == 1
+              data.readUInt32LE(at: 8) == 2
         else {
-            throw LocalSemanticRankerError.invalidArtifact("头部或版本不兼容")
+            throw LocalSemanticRankerError.invalidArtifact(
+                "头部或版本不兼容；请 retrain 并重新导出 schema v2 工件"
+            )
         }
         let tableCount = Int(data.readUInt32LE(at: 12))
         guard tableCount == Self.requiredTables.count else {
@@ -354,11 +374,11 @@ private struct CompactCountStorage: Sendable {
             throw LocalSemanticRankerError.invalidArtifact("缺少必要索引表")
         }
         guard let datasetHash = String(
-            bytes: data[48 ..< 112],
+            bytes: data[56 ..< 120],
             encoding: .ascii
         ),
         let sourceHash = String(
-            bytes: data[112 ..< 176],
+            bytes: data[120 ..< 184],
             encoding: .ascii
         ),
         datasetHash.count == 64,
@@ -371,13 +391,17 @@ private struct CompactCountStorage: Sendable {
         rankWeight = data.readDoubleLE(at: 16)
         frequencyWeight = data.readDoubleLE(at: 24)
         languageWeight = data.readDoubleLE(at: 32)
-        maximumContextCharacters = Int(data.readUInt32LE(at: 40))
-        topCandidateCount = Int(data.readUInt32LE(at: 44))
+        backoffAlpha = data.readDoubleLE(at: 40)
+        maximumContextCharacters = Int(data.readUInt32LE(at: 48))
+        topCandidateCount = Int(data.readUInt32LE(at: 52))
         artifactID = "p0-char-ngram:\(sourceHash.prefix(12)):"
             + "dataset-\(datasetHash.prefix(12))"
         guard rankWeight.isFinite,
               frequencyWeight.isFinite,
               languageWeight.isFinite,
+              backoffAlpha.isFinite,
+              backoffAlpha > 0,
+              backoffAlpha <= 1,
               (1 ... 400).contains(maximumContextCharacters),
               (1 ... 10).contains(topCandidateCount)
         else {

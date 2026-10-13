@@ -1,14 +1,14 @@
 {
   "schema_version": 1,
   "artifact": {
-    "path": "rimeai-p0-ngram-v1.bin",
-    "sha256": "16b5664cc016db1e44c0e9d881c121c1d2cf156e8ab440618af2179cb82a405c",
-    "format": "RAINGRM1",
-    "size_bytes": 11761820
+    "path": "rimeai-p0-ngram-v2.bin",
+    "sha256": "c3bb94e3be54923799b2325ab569c3dfd9b961a2e200dd18fbb8292e7c7e1255",
+    "format": "RAINGRM2",
+    "size_bytes": 11761828
   },
   "source": {
-    "path": ".rimeai/models/p0-char-ngram-v1.json.gz",
-    "sha256": "36457c630dc8376df8a9aa74cf94faa78eb43febc6779618ae0792b33d879b49",
+    "path": ".rimeai/models/p0-char-ngram-v2.json.gz",
+    "sha256": "05213235f4b7f3673b4ff6e0a1fe0bd09b03aaa68619c4da48b31e3877573b53",
     "dataset_sha256": "f0d46219a334d9d408518e387899c57b4881da27e8388d721827ebc86087b35d"
   },
   "runtime": "exact P0 character n-gram scoring with read-only hashed count tables",

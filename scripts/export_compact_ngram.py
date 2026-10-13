@@ -14,10 +14,10 @@ import tempfile
 from typing import Dict, Mapping
 
 
-MAGIC = b"RAINGRM1"
-SCHEMA_VERSION = 1
+MAGIC = b"RAINGRM2"
+SCHEMA_VERSION = 2
 TABLE_IDS = (0, 2, 3, 4, 5, 12, 13, 14, 15)
-HEADER_SIZE = 176
+HEADER_SIZE = 184
 DIRECTORY_ENTRY_SIZE = 24
 
 
@@ -58,13 +58,25 @@ def build_compact_artifact(source: Path) -> bytes:
         model = json.load(model_file)
     if (
         not isinstance(model, dict)
-        or model.get("schema_version") != 1
+        or model.get("schema_version") != 2
         or model.get("model_type") != "char-ngram-ranker"
     ):
-        raise ValueError("unsupported n-gram source artifact")
+        raise ValueError(
+            "unsupported n-gram source artifact; retrain the model to "
+            "produce a schema v2 artifact"
+        )
     hyperparameters = model.get("hyperparameters")
     if not isinstance(hyperparameters, dict):
         raise ValueError("source hyperparameters are missing")
+    smoothing = hyperparameters.get("smoothing")
+    if (
+        not isinstance(smoothing, dict)
+        or smoothing.get("method") != "stupid-backoff"
+        or not isinstance(smoothing.get("alpha"), (int, float))
+        or isinstance(smoothing.get("alpha"), bool)
+    ):
+        raise ValueError("source smoothing hyperparameters are invalid")
+    backoff_alpha = float(smoothing["alpha"])
     if hyperparameters.get("orders") != [2, 3, 4, 5]:
         raise ValueError("source n-gram orders are incompatible")
     dataset_hash = model.get("dataset_sha256")
@@ -95,10 +107,16 @@ def build_compact_artifact(source: Path) -> bytes:
     header.extend(struct.pack("<II", SCHEMA_VERSION, len(TABLE_IDS)))
     header.extend(
         struct.pack(
-            "<dddII",
+            "<ddd",
             float(hyperparameters["rank_weight"]),
             float(hyperparameters["frequency_weight"]),
             float(hyperparameters["language_weight"]),
+        )
+    )
+    header.extend(struct.pack("<d", backoff_alpha))
+    header.extend(
+        struct.pack(
+            "<II",
             int(hyperparameters["max_context_characters"]),
             int(hyperparameters["top_k"]),
         )
