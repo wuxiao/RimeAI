@@ -226,3 +226,20 @@ def test_fuzzy_segment_ok_accepts_exact_and_fuzzy():
     assert fuzzy_segment_ok(guard, "世界", ("si", "jie"))
     assert not fuzzy_segment_ok(guard, "世界", ("wu", "jie"))
     assert not fuzzy_segment_ok(guard, "世界", ("si",))
+
+
+def test_constrained_qwen_decoder_config_is_loadable():
+    from pathlib import Path
+
+    from rimeai_eval.command_sentence_decoder import (
+        CommandSentenceDecoder,
+        SentenceDecoderConfigurationError,
+    )
+
+    try:
+        decoder = CommandSentenceDecoder.from_config(
+            Path("examples/constrained_qwen_decoder.json")
+        )
+    except SentenceDecoderConfigurationError as error:
+        pytest.fail(f"decoder config rejected: {error}")
+    assert decoder.name == "constrained-qwen-v1"

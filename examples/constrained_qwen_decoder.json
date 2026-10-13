@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "name": "constrained-qwen-v1",
+  "command": ["./script/constrained_qwen_service.sh"],
+  "timeout_ms": 60000
+}
