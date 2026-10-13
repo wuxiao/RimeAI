@@ -55,6 +55,43 @@ struct SherpaOnnxEvaluationVoiceEngineFactoryTests {
     }
 
     @Test
+    func paraformerArtifactBuildsEngineWithoutHotwordCapabilities()
+        throws
+    {
+        let fixture = try EvaluationArtifactFixture(paraformer: true)
+        defer { fixture.remove() }
+        let verifier = EvaluationArtifactVerifier(
+            manifest: fixture.manifest
+        )
+        let backendLoader = EvaluationBackendLoader()
+        let sourceFactory = EvaluationSourceFactory()
+        let hotwordProvider = EvaluationHotwordProvider()
+
+        let engine = try SherpaOnnxEvaluationVoiceEngineFactory.makeEngine(
+            at: fixture.artifactDirectory,
+            verifier: verifier,
+            sourceFactory: sourceFactory,
+            hotwordProvider: hotwordProvider,
+            admittedEngineFactory: {
+                lease, sourceFactory, hotwordProvider in
+                try SherpaOnnxAdmittedArtifactVoiceEngineFactory.makeEngine(
+                    lease: lease,
+                    backendLoader: backendLoader,
+                    sourceFactory: sourceFactory,
+                    hotwordProvider: hotwordProvider
+                )
+            }
+        )
+
+        #expect(engine.descriptor.artifactID == fixture.manifest.artifactID)
+        #expect(engine.descriptor.hasIntegrityVerifiedProductArtifact)
+        #expect(engine.descriptor.hotwordMode == .unsupported)
+        #expect(!engine.descriptor.capabilities.contains(.hotwordSnapshot))
+        #expect(engine.descriptor.capabilities.contains(.localASR))
+        #expect(engine.descriptor.capabilities.contains(.streaming))
+    }
+
+    @Test
     func verifierAndBackendRemainDeferredUntilTracerAcknowledgement()
         throws
     {
@@ -430,7 +467,7 @@ private final class EvaluationArtifactFixture {
     let artifactDirectory: URL
     let manifest: VoiceASRArtifactManifest
 
-    init() throws {
+    init(paraformer: Bool = false) throws {
         artifactDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent(
                 "rimeai-evaluation-artifact-\(UUID().uuidString)",
@@ -441,8 +478,11 @@ private final class EvaluationArtifactFixture {
             withIntermediateDirectories: false,
             attributes: [.posixPermissions: 0o700]
         )
+        let json = paraformer
+            ? evaluationParaformerManifestJSON
+            : evaluationManifestJSON
         manifest = try VoiceASRArtifactManifest.decodeStrict(
-            Data(evaluationManifestJSON.utf8),
+            Data(json.utf8),
             verifyContentDigest: false
         )
     }
@@ -622,6 +662,48 @@ private func evaluationTracerMeasurementPolicyData(
             + #"","schema_version":2}"#).utf8
     )
 }
+
+private let evaluationParaformerManifestJSON = """
+{
+  "schema_version": 2,
+  "artifact_type": "rimeai.voice-asr-model",
+  "asset_management": "product-managed",
+  "artifact_id": "evaluation-sherpa-paraformer-zh-en-v1",
+  "adapter": {"id":"sherpa-onnx","version":"1.13.6","abi_version":1},
+  "model": {"id":"funasr-streaming-paraformer-zh-en","revision":"evaluation-2026-10-13","format":"onnx","quantization":"int8"},
+  "target": {"os":"macos","architecture":"arm64","minimum_os_version":"14.0"},
+  "audio": {"sample_rate_hz":16000,"channel_count":1,"sample_format":"float32le","frame_duration_ms":20},
+  "runtime": {
+    "kind":"sherpa-onnx-online-paraformer",
+    "encoder_path":"model/encoder.onnx",
+    "decoder_path":"model/decoder.onnx",
+    "tokens_path":"model/tokens.txt",
+    "modeling_unit":"cjkchar",
+    "model_type":"paraformer",
+    "feature_dimension":80,
+    "provider":"cpu",
+    "num_threads":2,
+    "decoding_method":"greedy_search",
+    "max_active_paths":4,
+    "endpoint":{"enabled":true,"rule1_min_trailing_silence_ms":2400,"rule2_min_trailing_silence_ms":1200,"rule3_min_utterance_ms":20000},
+    "hotword_probe_phrase":"",
+    "hotwords_score_milli":0,
+    "blank_penalty_milli":0
+  },
+  "network_policy":"offline",
+  "locales":["en-US","zh-CN"],
+  "capabilities":{"streaming":true,"partial_results":true,"endpoint_detection":true,"hotword_mode":"unsupported","maximum_hotwords":0,"maximum_alternatives":1},
+  "license":{"spdx_id":"Apache-2.0","license_path":"licenses/LICENSE.txt","notice_path":"licenses/NOTICE.txt","source_url":"https://example.invalid/model-card"},
+  "inventory":[
+    {"path":"licenses/LICENSE.txt","bytes":8,"sha256":"c0c56958ef8be5c1979366896b7e0c7206949a5aa2b23f51429c7f56b10990d3"},
+    {"path":"licenses/NOTICE.txt","bytes":7,"sha256":"5de37b4c620461f2b695f1cf6b8ee36e7d025da8334a3693c4ed9aa48a5c7d6a"},
+    {"path":"model/decoder.onnx","bytes":8,"sha256":"eacbeef293be61f2a85d929cadb4cbb5248c8b8a1478b3d4b3180ea365d5e687"},
+    {"path":"model/encoder.onnx","bytes":8,"sha256":"b1c4c05f286afb2531d4c847c4ca1e56260fc61281b7a04d50e09d09ab7a682b"},
+    {"path":"model/tokens.txt","bytes":7,"sha256":"2de8bce5133f08dc3ebb75abcb1ef6c0951800ee3ae8ca06fcf58395d1244218"}
+  ],
+  "content_sha256":"0000000000000000000000000000000000000000000000000000000000000000"
+}
+"""
 
 private let evaluationManifestJSON = """
 {

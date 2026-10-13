@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "status": "decision_probe_not_release_evidence",
+  "recorded_at": "2026-10-13",
+  "purpose": "Zipformer vs Paraformer 中英流式 cohort V0 决策探针：两 cohort 在同一音频上经真实 sherpa-onnx runtime、真实 eval driver（evaluation_replay、push-to-talk、无热词）解码对比。不是放行语料评测，不构成 release evidence。",
+  "corpus": {
+    "source": "上游 asr-models release 自带 test_wavs（两 archive 内同一组 16kHz mono s16 WAV，4 段中文/中英混说短句）",
+    "samples": 4,
+    "caveat": "上游未提供 gold 转录，无 CER；对比指标为解码假设并排、模型间字符编辑距离与延迟。正式 CER 等 200 句授权语料（VOICE_INPUT_DESIGN 第 5 节放行门）。"
+  },
+  "artifacts": {
+    "zipformer": {
+      "artifact_id": "sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20-eval-27ffbd9e",
+      "content_sha256": "13276809093a0cd38ecb1b166041172da3421848bbdbb9a1ddbf6cb189699dc9",
+      "payload_bytes": 199080356
+    },
+    "paraformer": {
+      "artifact_id": "sherpa-onnx-streaming-paraformer-bilingual-zh-en-eval-5462a1fc",
+      "content_sha256": "8fee261caf0ca6bc4cd733166e6b8d856b35f4ab8308dfb1dd3e1d66b3ffe7eb",
+      "payload_bytes": 237214088
+    }
+  },
+  "results": {
+    "probe-0": {
+      "audio_ms": 10054.75,
+      "zipformer": "昨天是 MONDAY礼拜二 THE DAY AFTER TOMORROW是星期三",
+      "paraformer": "昨天是 monday today is li 八二 the day after tomorrow 是星期",
+      "divergence_chars": 41
+    },
+    "probe-1": {
+      "audio_ms": 5108.13,
+      "zipformer": "这是第一种第二种叫呃与 ALWAYS ALWAYS什么",
+      "paraformer": "这这是第一种第二种叫呃与 always o s 什",
+      "divergence_chars": 14
+    },
+    "probe-2": {
+      "audio_ms": 4691.85,
+      "zipformer": "这个是频繁的啊不认识记下来 FREQUENTLY频繁的",
+      "paraformer": "这个是频繁的啊不认识接下来 frequently 频繁",
+      "divergence_chars": 13
+    },
+    "probe-3": {
+      "audio_ms": 8832.77,
+      "zipformer": "第一句是个什么时态加了 ES是一般现在时对后面它时态写上",
+      "paraformer": "第一句是个什么时态加了 yes s 是一般现代式对后把它实现些商品",
+      "divergence_chars": 14
+    },
+    "inter_model_divergence_total_chars": 82,
+    "final_latency_ms": {
+      "zipformer": [10054.75, 5108.13, 4691.85, 8832.77],
+      "paraformer": [10062.87, 5104.49, 4694.87, 8832.67],
+      "note": "final elapsed ≈ 音频时长（实时回放），两 cohort 停顿-收尾延迟差异 <10ms 量级。"
+    },
+    "process_cold_run_seconds": {
+      "zipformer": 30.53,
+      "paraformer": 31.87,
+      "note": "eval driver 进程冷启动（真实 native 加载 + 非空热词 probe（zipformer）+ fresh empty probe + 4 段解码）总墙钟；页缓存未清空，非 schema-2 九帧 tracer 冷加载证据。"
+    }
+  },
+  "observations_for_decision": [
+    "两 cohort 在全部 4 段音频上均完成流式解码且无引擎错误，paraformer 3 文件快照/热词 unsupported 协议路径（含空快照 start）端到端可用。",
+    "中文为主句（probe-3）zipformer 更准（一般现在时 vs 一般现代式）；中英混说句两模型错误形态不同：zipformer 倾向丢中英切换处的英文小词并大写化，paraformer 倾向把英文弱读词拆成单字母/数字（o s、li 八二）但英文大小写更自然。",
+    "延迟与加载耗时两 cohort 相当（本机 M 系列实测），paraformer 载荷大 38MB。",
+    "决策建议：中文主导向的场景继续以 Zipformer 为主候选；Paraformer 作为口音/方言鲁棒性的第二候选保留评测资格。正式取舍需 200 句授权语料的 CER/术语/口音矩阵。"
+  ],
+  "reproduce": "worktree .worktrees/voice-asr-paraformer；sealed artifacts 位于本机 ~/rimeai-voice-ab/{zipformer,paraformer}-artifact；plans/observations 位于 .superpowers/sdd/2026-10-13-voice-asr-paraformer-second-cohort/；.build/debug/rimeai-voice-eval-driver --plan <plan.json>"
+}

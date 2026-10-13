@@ -715,7 +715,7 @@ func serverPassesCompleteTypedRequestToEngineWithPrivateControlID() throws {
 }
 
 @Test
-func serverEnforcesNegotiatedHotwordContractBeforeStartingEngine() {
+func serverEnforcesNegotiatedHotwordContractBeforeStartingEngine() throws {
     let unsupportedEngine = ScriptedVoiceEngine(
         capabilities: [.localASR, .streaming]
     )
@@ -723,8 +723,17 @@ func serverEnforcesNegotiatedHotwordContractBeforeStartingEngine() {
         engine: unsupportedEngine
     )
     _ = unsupportedServer.handle(VoiceHelloRequest())
+    let loadedSnapshot = try VoiceHotwordSnapshot(phrases: ["API"])
     let unexpectedSnapshot = unsupportedServer.handle(
-        makeStart(requestID: "unexpected-hotwords")
+        VoiceDictationStart(
+            requestID: "unexpected-hotwords",
+            compositionID: UUID(),
+            appSessionID: "editor#focus",
+            bundleID: "com.example.Editor",
+            mode: .direct,
+            deadlineMilliseconds: 1_500,
+            hotwordSnapshot: loadedSnapshot
+        )
     )
     #expect(unsupportedEngine.startedRequests.isEmpty)
     guard case let .error(error)? = unexpectedSnapshot.first else {
@@ -732,6 +741,15 @@ func serverEnforcesNegotiatedHotwordContractBeforeStartingEngine() {
         return
     }
     #expect(error.errorCode == .invalidRequest)
+
+    // 空快照等价于"没有热词"：不支持热词的引擎必须接受它，
+    // 客户端才能保持协议统一的 start 载荷。
+    let emptyAccepted = unsupportedServer.handle(
+        makeStart(requestID: "empty-hotwords")
+    )
+    #expect(emptyAccepted.isEmpty)
+    let forwarded = try #require(unsupportedEngine.startedRequests.first)
+    #expect(forwarded.hotwordSnapshot.isEmpty)
 
     let supportedEngine = ScriptedVoiceEngine()
     let supportedServer = VoiceDictationServerCore(engine: supportedEngine)

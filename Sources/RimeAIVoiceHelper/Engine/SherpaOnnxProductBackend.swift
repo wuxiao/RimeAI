@@ -1957,7 +1957,8 @@ public enum SherpaOnnxAdmittedArtifactVoiceEngineFactory {
                 sourceFactory: sourceFactory,
                 hotwordProvider: hotwordProvider
             )
-        } catch is SherpaOnnxProductBackendError {
+        } catch let error as SherpaOnnxProductBackendError {
+            _ = error
             throw VoiceAdmittedArtifactEngineAssemblyError.backendLoadFailed
         } catch is VoiceProductBackendLoadError {
             throw VoiceAdmittedArtifactEngineAssemblyError.backendLoadFailed

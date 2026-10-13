@@ -112,7 +112,8 @@ struct VoiceEvaluationRunner: Sendable {
               descriptor.networkPolicy == .offline,
               descriptor.capabilities.contains(.localASR),
               descriptor.capabilities.contains(.streaming),
-              descriptor.capabilities.contains(.hotwordSnapshot),
+              !plan.policy.hotwordsEnabled
+                  || descriptor.capabilities.contains(.hotwordSnapshot),
               !descriptor.capabilities.contains(.cloudASR),
               !descriptor.capabilities.contains(.polish),
               descriptor.adapterID == plan.artifact.adapterID,
@@ -133,9 +134,10 @@ struct VoiceEvaluationRunner: Sendable {
               ready.networkPolicy == .offline,
               capabilities.contains(VoiceEngineCapability.localASR.rawValue),
               capabilities.contains(VoiceEngineCapability.streaming.rawValue),
-              capabilities.contains(
-                VoiceEngineCapability.hotwordSnapshot.rawValue
-              ),
+              !plan.policy.hotwordsEnabled
+                || capabilities.contains(
+                    VoiceEngineCapability.hotwordSnapshot.rawValue
+                ),
               !capabilities.contains(VoiceEngineCapability.cloudASR.rawValue),
               !capabilities.contains(VoiceEngineCapability.polish.rawValue),
               plan.hotwordSnapshot.phrases.count <= ready.maximumHotwords,

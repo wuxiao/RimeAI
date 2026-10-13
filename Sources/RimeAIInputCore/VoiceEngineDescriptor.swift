@@ -278,11 +278,23 @@ public struct VoiceEngineDescriptor: Equatable, Sendable {
             manifest.capabilities.maximumHotwords,
             loadProbe.maximumHotwords
         )
-        guard manifest.capabilities.hotwordMode == .boundedPhraseList,
-              maximumHotwords > 0
-        else {
-            throw VoiceProductEngineDescriptorError
-                .requiredHotwordCapabilityMissing
+        let hotwordCapabilities: [VoiceEngineCapability]
+        let hotwordMode: VoiceEngineHotwordMode
+        switch manifest.capabilities.hotwordMode {
+        case .boundedPhraseList:
+            guard maximumHotwords > 0 else {
+                throw VoiceProductEngineDescriptorError
+                    .requiredHotwordCapabilityMissing
+            }
+            hotwordCapabilities = [.hotwordSnapshot]
+            hotwordMode = .boundedPhraseList(maximumEntries: maximumHotwords)
+        case .unsupported:
+            guard maximumHotwords == 0 else {
+                throw VoiceProductEngineDescriptorError
+                    .requiredHotwordCapabilityMissing
+            }
+            hotwordCapabilities = []
+            hotwordMode = .unsupported
         }
         let maximumAlternatives = min(
             manifest.capabilities.maximumAlternatives,
@@ -302,16 +314,16 @@ public struct VoiceEngineDescriptor: Equatable, Sendable {
             artifactSHA256: artifact.contentSHA256,
             artifactGeneration: lease.generation,
             supportedLocales: locales,
-            capabilities: [.localASR, .streaming, .hotwordSnapshot],
+            capabilities: Set(
+                [.localASR, .streaming] + hotwordCapabilities
+            ),
             networkPolicy: .offline,
             audioFormat: .fixedLinearPCM(
                 sampleRateHertz: manifest.audio.sampleRateHertz,
                 channelCount: manifest.audio.channelCount,
                 bitsPerChannel: 32
             ),
-            hotwordMode: .boundedPhraseList(
-                maximumEntries: maximumHotwords
-            ),
+            hotwordMode: hotwordMode,
             maximumAlternatives: maximumAlternatives
         )
         guard descriptor.isStructurallyValid else {

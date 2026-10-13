@@ -273,7 +273,8 @@ public final class VoiceDictationServerCore: @unchecked Sendable {
                 $0.phrases.count
                     <= engineDescriptor.advertisedMaximumHotwords
             } == true
-            : message.hotwordSnapshot == nil
+            // 不支持热词的引擎：空快照等价于没有热词，载荷为空才放行。
+            : message.hotwordSnapshot.map(\.isEmpty) ?? true
         guard hasASR, supportsMode, hotwordContractMatches else {
             if session?.requestID == message.requestID {
                 let engineRequestID = failConnectionLocked()

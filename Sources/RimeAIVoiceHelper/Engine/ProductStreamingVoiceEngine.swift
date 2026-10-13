@@ -1246,14 +1246,22 @@ public final class ProductStreamingVoiceEngine: VoiceDictationEngine,
               descriptor.networkPolicy == .offline,
               descriptor.capabilities.contains(.localASR),
               descriptor.capabilities.contains(.streaming),
-              descriptor.capabilities.contains(.hotwordSnapshot),
               !descriptor.capabilities.contains(.cloudASR),
-              descriptor.maximumAlternatives == 1,
-              case let .boundedPhraseList(maximumHotwords) =
-                descriptor.hotwordMode,
-              maximumHotwords > 0
+              descriptor.maximumAlternatives == 1
         else {
             return false
+        }
+        switch descriptor.hotwordMode {
+        case .unsupported:
+            guard !descriptor.capabilities.contains(.hotwordSnapshot) else {
+                return false
+            }
+        case let .boundedPhraseList(maximumHotwords):
+            guard maximumHotwords > 0,
+                  descriptor.capabilities.contains(.hotwordSnapshot)
+            else {
+                return false
+            }
         }
         guard case let .fixedLinearPCM(sampleRate, channels, bits) =
             descriptor.audioFormat
