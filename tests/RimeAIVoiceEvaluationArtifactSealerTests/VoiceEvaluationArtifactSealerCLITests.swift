@@ -38,6 +38,82 @@ struct VoiceEvaluationArtifactSealerCLITests {
         #expect(object["verified_file_count"] as? Int == 7)
     }
 
+    @Test("explicit zipformer cohort behaves exactly like the default")
+    func explicitZipformerCohortMatchesDefault() throws {
+        let fixture = try EvaluationArtifactFixtureForCLI()
+        defer { fixture.remove() }
+
+        let result = VoiceEvaluationArtifactSealerCLI.execute(
+            arguments: [
+                "rimeai-voice-evaluation-artifact-sealer",
+                "--artifact-dir",
+                fixture.root.path,
+                "--cohort",
+                "zipformer-bilingual-zh-en",
+            ],
+            sealerForCohort: { VoiceEvaluationArtifactSealer(
+                cohort: $0,
+                expectedPayloads: nil
+            ) }
+        )
+
+        #expect(result.exitCode == 0)
+        let object = try #require(
+            JSONSerialization.jsonObject(
+                with: Data(result.standardOutput.dropLast())
+            ) as? [String: Any]
+        )
+        #expect(
+            object["artifact_id"] as? String
+                == VoiceEvaluationArtifactCohort.artifactID
+        )
+        #expect(object["verified_file_count"] as? Int == 7)
+    }
+
+    @Test("unknown or malformed cohort names map to fixed usage failure")
+    func test_cliUnknownCohortUsageError() {
+        for arguments in [
+            ["tool", "--artifact-dir", "/private/tmp/artifact", "--cohort", "nope"],
+            ["tool", "--artifact-dir", "/private/tmp/artifact", "--cohort"],
+            ["tool", "--artifact-dir", "/private/tmp/artifact", "--wrong", "x"],
+        ] as [[String]] {
+            let result = VoiceEvaluationArtifactSealerCLI.execute(
+                arguments: arguments
+            )
+            #expect(result.exitCode == 64)
+            #expect(result.standardOutput.isEmpty)
+            #expect(result.standardError == Data("E_USAGE\n".utf8))
+        }
+    }
+
+    @Test("cohort selection reaches the sealer factory")
+    func cohortSelectionReachesTheSealer() {
+        final class Captured: @unchecked Sendable {
+            var ids: [String] = []
+        }
+        let captured = Captured()
+        let result = VoiceEvaluationArtifactSealerCLI.execute(
+            arguments: [
+                "tool",
+                "--artifact-dir",
+                "/private/tmp/artifact",
+                "--cohort",
+                "paraformer-bilingual-zh-en",
+            ],
+            sealerForCohort: { cohort in
+                captured.ids.append(cohort.artifactID)
+                return TypedFailureSealer(error: .invalidArtifactTree)
+            }
+        )
+
+        #expect(result.exitCode == 65)
+        #expect(
+            captured.ids
+                == [VoiceEvaluationArtifactCohortDefinition
+                    .paraformerBilingualZhEn.artifactID]
+        )
+    }
+
     @Test("empty or malformed argv maps to fixed usage failure")
     func invalidArgumentsAreUsage() {
         for arguments in [

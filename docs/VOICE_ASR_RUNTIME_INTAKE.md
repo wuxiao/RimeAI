@@ -255,6 +255,13 @@ seal receipt。这些值只适用于该 evaluation cohort，不表示来源/权�
   - `model/tokens.txt` ← `tokens.txt`
     （`75,756` bytes，SHA-256
     `59aba8873a2ed1e122c25fee421e25f283b63290efbde85c1f01a853d83cb6e6`）
+- 2026-10-13 受控封印回执（`--cohort paraformer-bilingual-zh-en`）：
+  - artifactID
+    `sherpa-onnx-streaming-paraformer-bilingual-zh-en-eval-5462a1fc`
+  - content SHA-256
+    `8fee261caf0ca6bc4cd733166e6b8d856b35f4ab8308dfb1dd3e1d66b3ffe7eb`
+  - 5 个 inventory 文件、`237,214,088` bytes payload（model 237,202,501
+    + Apache-2.0 LICENSE 11,358 + 评测 NOTICE 229）。
 - 与 Zipformer cohort 的差异：runtime kind 为
   `sherpa-onnx-online-paraformer`（modeling unit `cjkchar`、greedy 解码、
   无 joiner/BPE），流式 Paraformer 不支持热词，manifest 必须声明

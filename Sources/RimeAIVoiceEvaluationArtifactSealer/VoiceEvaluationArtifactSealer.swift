@@ -28,8 +28,7 @@ public enum VoiceEvaluationArtifactCohort {
 
     /// Frozen from the independently verified archive intake and deterministic
     /// BPE exporter. The production initializer never accepts another cohort.
-    static let frozenPayloads: [VoiceEvaluationArtifactFrozenPayload] = [
-        .init(
+    static let frozenPayloads: [VoiceEvaluationArtifactFrozenPayload] = [        .init(
             path: "licenses/LICENSE.txt",
             bytes: 11_358,
             sha256: "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
@@ -87,6 +86,95 @@ struct VoiceEvaluationArtifactFrozenPayload: Equatable, Sendable {
     let sha256: String
 }
 
+/// One pinned evaluation cohort: identity, directory shape, frozen payload
+/// digests and the manifest runtime kind the sealer emits for it.
+public struct VoiceEvaluationArtifactCohortDefinition: Equatable, Sendable {
+    public enum RuntimeKind: String, Sendable {
+        case sherpaOnnxOnlineTransducer = "sherpa-onnx-online-transducer"
+        case sherpaOnnxOnlineParaformer = "sherpa-onnx-online-paraformer"
+    }
+
+    let artifactID: String
+    let modelID: String
+    let modelRevision: String
+    let hotwordProbePhrase: String?
+    let sourceURL: String
+    let modelFileNames: [String]
+    let payloadPaths: [String]
+    let frozenPayloads: [VoiceEvaluationArtifactFrozenPayload]
+    let runtimeKind: RuntimeKind
+}
+
+extension VoiceEvaluationArtifactCohortDefinition {
+    public static let zipformerBilingualZhEn2023 =
+        VoiceEvaluationArtifactCohortDefinition(
+            artifactID: VoiceEvaluationArtifactCohort.artifactID,
+            modelID: VoiceEvaluationArtifactCohort.modelID,
+            modelRevision: VoiceEvaluationArtifactCohort.modelRevision,
+            hotwordProbePhrase: VoiceEvaluationArtifactCohort
+                .hotwordProbePhrase,
+            sourceURL: VoiceEvaluationArtifactCohort.sourceURL,
+            modelFileNames: [
+                "bpe.vocab", "decoder.onnx", "encoder.onnx", "joiner.onnx",
+                "tokens.txt",
+            ],
+            payloadPaths: VoiceEvaluationArtifactCohort.payloadPaths,
+            frozenPayloads: VoiceEvaluationArtifactCohort.frozenPayloads,
+            runtimeKind: .sherpaOnnxOnlineTransducer
+        )
+
+    /// Frozen from the verified archive intake on 2026-10-13. The staged
+    /// int8 encoder/decoder combination follows the upstream real-time
+    /// example; hotwords are unsupported by streaming paraformer.
+    public static let paraformerBilingualZhEn =
+        VoiceEvaluationArtifactCohortDefinition(
+            artifactID: "sherpa-onnx-streaming-paraformer-bilingual-zh-en-eval-5462a1fc",
+            modelID: "sherpa-onnx-streaming-paraformer-bilingual-zh-en",
+            modelRevision:
+                "archive-sha256-5462a1fce42693deae572af1e8c4687124b12aa85fe61ff4d3168bb5280e205f",
+            hotwordProbePhrase: nil,
+            sourceURL:
+                "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/"
+                + "sherpa-onnx-streaming-paraformer-bilingual-zh-en.tar.bz2",
+            modelFileNames: ["decoder.onnx", "encoder.onnx", "tokens.txt"],
+            payloadPaths: [
+                "licenses/LICENSE.txt",
+                "licenses/NOTICE.txt",
+                "model/decoder.onnx",
+                "model/encoder.onnx",
+                "model/tokens.txt",
+            ],
+            frozenPayloads: [
+                .init(
+                    path: "licenses/LICENSE.txt",
+                    bytes: 11_358,
+                    sha256: "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+                ),
+                .init(
+                    path: "licenses/NOTICE.txt",
+                    bytes: 229,
+                    sha256: "94e2ce6616b74174dab7abb50c8f2f92b193e24d18518f9eb64db4d2e12bbb6a"
+                ),
+                .init(
+                    path: "model/decoder.onnx",
+                    bytes: 71_664_561,
+                    sha256: "f3cca9f77bb9d93c8fcbfb63ae617b6b1ee96818df3aa3b151c40658fe38594f"
+                ),
+                .init(
+                    path: "model/encoder.onnx",
+                    bytes: 165_462_184,
+                    sha256: "81a70226a8934e6ed92aa1d4fc486b428b5398e2f2619ed4897b7294cab90e9a"
+                ),
+                .init(
+                    path: "model/tokens.txt",
+                    bytes: 75_756,
+                    sha256: "59aba8873a2ed1e122c25fee421e25f283b63290efbde85c1f01a853d83cb6e6"
+                ),
+            ],
+            runtimeKind: .sherpaOnnxOnlineParaformer
+        )
+}
+
 public enum VoiceEvaluationArtifactSealerError: Error, Equatable, Sendable {
     case invalidArtifactPath
     case invalidArtifactTree
@@ -137,20 +225,38 @@ public struct VoiceEvaluationArtifactSealer:
     VoiceEvaluationArtifactSealing,
     Sendable
 {
+    private let cohort: VoiceEvaluationArtifactCohortDefinition
     private let expectedPayloads: [VoiceEvaluationArtifactFrozenPayload]?
     private let dependencies: VoiceEvaluationArtifactSealerDependencies
 
-    public init() {
-        expectedPayloads = VoiceEvaluationArtifactCohort.frozenPayloads
+    public init(
+        cohort: VoiceEvaluationArtifactCohortDefinition =
+            .zipformerBilingualZhEn2023
+    ) {
+        self.cohort = cohort
+        expectedPayloads = cohort.frozenPayloads
         dependencies = .live
+    }
+
+    init(
+        cohort: VoiceEvaluationArtifactCohortDefinition,
+        expectedPayloads: [VoiceEvaluationArtifactFrozenPayload]?,
+        dependencies: VoiceEvaluationArtifactSealerDependencies = .live
+    ) {
+        self.cohort = cohort
+        self.expectedPayloads = expectedPayloads
+        self.dependencies = dependencies
     }
 
     init(
         expectedPayloads: [VoiceEvaluationArtifactFrozenPayload]?,
         dependencies: VoiceEvaluationArtifactSealerDependencies = .live
     ) {
-        self.expectedPayloads = expectedPayloads
-        self.dependencies = dependencies
+        self.init(
+            cohort: .zipformerBilingualZhEn2023,
+            expectedPayloads: expectedPayloads,
+            dependencies: dependencies
+        )
     }
 
     public func sealArtifact(
@@ -195,10 +301,7 @@ public struct VoiceEvaluationArtifactSealer:
         defer { close(modelDescriptor) }
         guard try Self.names(in: licenseDescriptor) == [
             "LICENSE.txt", "NOTICE.txt",
-        ], try Self.names(in: modelDescriptor) == [
-            "bpe.vocab", "decoder.onnx", "encoder.onnx", "joiner.onnx",
-            "tokens.txt",
-        ] else {
+        ], try Self.names(in: modelDescriptor) == cohort.modelFileNames else {
             throw VoiceEvaluationArtifactSealerError.invalidArtifactTree
         }
 
@@ -207,8 +310,8 @@ public struct VoiceEvaluationArtifactSealer:
             "model": modelDescriptor,
         ]
         var inventory: [VoiceEvaluationArtifactFrozenPayload] = []
-        inventory.reserveCapacity(VoiceEvaluationArtifactCohort.payloadPaths.count)
-        for relativePath in VoiceEvaluationArtifactCohort.payloadPaths {
+        inventory.reserveCapacity(cohort.payloadPaths.count)
+        for relativePath in cohort.payloadPaths {
             let components = relativePath.split(separator: "/").map(String.init)
             guard components.count == 2,
                   let parent = parents[components[0]]
@@ -227,7 +330,7 @@ public struct VoiceEvaluationArtifactSealer:
                 sha256: digest.sha256
             ))
         }
-        guard inventory.map(\.path) == VoiceEvaluationArtifactCohort.payloadPaths
+        guard inventory.map(\.path) == cohort.payloadPaths
         else {
             throw VoiceEvaluationArtifactSealerError.invalidArtifactTree
         }
@@ -254,7 +357,10 @@ public struct VoiceEvaluationArtifactSealer:
                 .payloadDoesNotMatchFrozenCohort
         }
 
-        let manifestData = try Self.makeManifestData(inventory: inventory)
+        let manifestData = try Self.makeManifestData(
+            inventory: inventory,
+            cohort: cohort
+        )
         var manifestMayExist = false
         var installedManifestIdentity: FileIdentity?
         do {
@@ -277,10 +383,7 @@ public struct VoiceEvaluationArtifactSealer:
                 "licenses", VoiceASRArtifactManifest.manifestFileName, "model",
             ], try Self.names(in: licenseDescriptor) == [
                 "LICENSE.txt", "NOTICE.txt",
-            ], try Self.names(in: modelDescriptor) == [
-                "bpe.vocab", "decoder.onnx", "encoder.onnx", "joiner.onnx",
-                "tokens.txt",
-            ] else {
+            ], try Self.names(in: modelDescriptor) == cohort.modelFileNames else {
                 throw VoiceEvaluationArtifactSealerError.payloadMutation
             }
             try Self.revalidatePayloads(
@@ -313,7 +416,7 @@ public struct VoiceEvaluationArtifactSealer:
                 dependencies: dependencies
             )
             guard verified.manifest.artifactID.rawValue
-                    == VoiceEvaluationArtifactCohort.artifactID,
+                    == cohort.artifactID,
                   verified.verifiedFileCount == inventory.count,
                   verified.verifiedPayloadBytes
                     == inventory.reduce(Int64(0), { $0 + $1.bytes })
@@ -789,11 +892,13 @@ public struct VoiceEvaluationArtifactSealer:
     }
 
     private static func makeManifestData(
-        inventory: [VoiceEvaluationArtifactFrozenPayload]
+        inventory: [VoiceEvaluationArtifactFrozenPayload],
+        cohort: VoiceEvaluationArtifactCohortDefinition
     ) throws -> Data {
         let provisional = try canonicalManifestData(
             inventory: inventory,
-            contentSHA256: String(repeating: "0", count: 64)
+            contentSHA256: String(repeating: "0", count: 64),
+            cohort: cohort
         )
         let provisionalManifest: VoiceASRArtifactManifest
         do {
@@ -807,7 +912,8 @@ public struct VoiceEvaluationArtifactSealer:
         }
         let final = try canonicalManifestData(
             inventory: inventory,
-            contentSHA256: provisionalManifest.calculatedContentSHA256
+            contentSHA256: provisionalManifest.calculatedContentSHA256,
+            cohort: cohort
         )
         do {
             let decoded = try VoiceASRArtifactManifest.decodeStrict(final)
@@ -823,30 +929,14 @@ public struct VoiceEvaluationArtifactSealer:
 
     private static func canonicalManifestData(
         inventory: [VoiceEvaluationArtifactFrozenPayload],
-        contentSHA256: String
+        contentSHA256: String,
+        cohort: VoiceEvaluationArtifactCohortDefinition
     ) throws -> Data {
-        let object: [String: Any] = [
-            "schema_version": 2,
-            "artifact_type": VoiceASRArtifactManifest.supportedArtifactType,
-            "asset_management": "product-managed",
-            "artifact_id": VoiceEvaluationArtifactCohort.artifactID,
-            "adapter": [
-                "id": "sherpa-onnx", "version": "1.13.6", "abi_version": 1,
-            ],
-            "model": [
-                "id": VoiceEvaluationArtifactCohort.modelID,
-                "revision": VoiceEvaluationArtifactCohort.modelRevision,
-                "format": "onnx", "quantization": "mixed",
-            ],
-            "target": [
-                "os": "macos", "architecture": "arm64",
-                "minimum_os_version": "14.0",
-            ],
-            "audio": [
-                "sample_rate_hz": 16_000, "channel_count": 1,
-                "sample_format": "float32le", "frame_duration_ms": 20,
-            ],
-            "runtime": [
+        let runtime: [String: Any]
+        let capabilities: [String: Any]
+        switch cohort.runtimeKind {
+        case .sherpaOnnxOnlineTransducer:
+            runtime = [
                 "kind": "sherpa-onnx-online-transducer",
                 "encoder_path": "model/encoder.onnx",
                 "decoder_path": "model/decoder.onnx",
@@ -863,24 +953,73 @@ public struct VoiceEvaluationArtifactSealer:
                     "rule2_min_trailing_silence_ms": 1_200,
                     "rule3_min_utterance_ms": 30_000,
                 ],
-                "hotword_probe_phrase": VoiceEvaluationArtifactCohort
-                    .hotwordProbePhrase,
+                "hotword_probe_phrase": cohort.hotwordProbePhrase ?? "",
                 "hotwords_score_milli": 1_500,
                 "blank_penalty_milli": 0,
-            ],
-            "network_policy": "offline",
-            "locales": ["en-US", "zh-CN"],
-            "capabilities": [
+            ]
+            capabilities = [
                 "streaming": true, "partial_results": true,
                 "endpoint_detection": true,
                 "hotword_mode": "bounded-phrase-list",
                 "maximum_hotwords": 32, "maximum_alternatives": 1,
+            ]
+        case .sherpaOnnxOnlineParaformer:
+            runtime = [
+                "kind": "sherpa-onnx-online-paraformer",
+                "encoder_path": "model/encoder.onnx",
+                "decoder_path": "model/decoder.onnx",
+                "tokens_path": "model/tokens.txt",
+                "modeling_unit": "cjkchar", "model_type": "paraformer",
+                "feature_dimension": 80, "provider": "cpu", "num_threads": 2,
+                "decoding_method": "greedy_search",
+                "max_active_paths": 4,
+                "endpoint": [
+                    "enabled": true,
+                    "rule1_min_trailing_silence_ms": 2_400,
+                    "rule2_min_trailing_silence_ms": 1_200,
+                    "rule3_min_utterance_ms": 20_000,
+                ],
+                "hotword_probe_phrase": "",
+                "hotwords_score_milli": 0,
+                "blank_penalty_milli": 0,
+            ]
+            capabilities = [
+                "streaming": true, "partial_results": true,
+                "endpoint_detection": true,
+                "hotword_mode": "unsupported",
+                "maximum_hotwords": 0, "maximum_alternatives": 1,
+            ]
+        }
+        let object: [String: Any] = [
+            "schema_version": 2,
+            "artifact_type": VoiceASRArtifactManifest.supportedArtifactType,
+            "asset_management": "product-managed",
+            "artifact_id": cohort.artifactID,
+            "adapter": [
+                "id": "sherpa-onnx", "version": "1.13.6", "abi_version": 1,
             ],
+            "model": [
+                "id": cohort.modelID,
+                "revision": cohort.modelRevision,
+                "format": "onnx", "quantization": "mixed",
+            ],
+            "target": [
+                "os": "macos", "architecture": "arm64",
+                "minimum_os_version": "14.0",
+            ],
+            "audio": [
+                "sample_rate_hz": 16_000, "channel_count": 1,
+                "sample_format": "float32le", "frame_duration_ms": 20,
+            ],
+            "runtime": runtime,
+            "network_policy": "offline",
+            "locales": ["en-US", "zh-CN"],
+            "capabilities": capabilities,
             "license": [
                 "spdx_id": "Apache-2.0",
                 "license_path": "licenses/LICENSE.txt",
                 "notice_path": "licenses/NOTICE.txt",
-                "source_url": VoiceEvaluationArtifactCohort.sourceURL,
+                "source_url": cohort.sourceURL,
             ],
             "inventory": inventory.map { entry in
                 [

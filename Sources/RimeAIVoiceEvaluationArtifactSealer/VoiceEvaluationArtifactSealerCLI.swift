@@ -20,7 +20,21 @@ public struct VoiceEvaluationArtifactSealerCLIResult: Equatable, Sendable {
 public enum VoiceEvaluationArtifactSealerCLI {
     public static let usage =
         "usage: rimeai-voice-evaluation-artifact-sealer "
-        + "--artifact-dir <canonical-absolute-path>"
+        + "--artifact-dir <canonical-absolute-path> "
+        + "[--cohort zipformer-bilingual-zh-en|paraformer-bilingual-zh-en]"
+
+    public static func cohortDefinition(
+        named name: String
+    ) -> VoiceEvaluationArtifactCohortDefinition? {
+        switch name {
+        case "zipformer-bilingual-zh-en":
+            return .zipformerBilingualZhEn2023
+        case "paraformer-bilingual-zh-en":
+            return .paraformerBilingualZhEn
+        default:
+            return nil
+        }
+    }
 
     public static func run() -> Int32 {
         let result = execute(arguments: CommandLine.arguments)
@@ -35,14 +49,36 @@ public enum VoiceEvaluationArtifactSealerCLI {
 
     public static func execute(
         arguments: [String],
-        sealer: any VoiceEvaluationArtifactSealing =
-            VoiceEvaluationArtifactSealer()
+        sealer: any VoiceEvaluationArtifactSealing
     ) -> VoiceEvaluationArtifactSealerCLIResult {
-        guard arguments.count == 3,
+        execute(arguments: arguments, sealerForCohort: { _ in sealer })
+    }
+
+    public static func execute(
+        arguments: [String],
+        sealerForCohort:
+            @Sendable (VoiceEvaluationArtifactCohortDefinition)
+                -> any VoiceEvaluationArtifactSealing = { cohort in
+                VoiceEvaluationArtifactSealer(cohort: cohort)
+            }
+    ) -> VoiceEvaluationArtifactSealerCLIResult {
+        guard arguments.count >= 3,
               !arguments[0].isEmpty,
               arguments[1] == "--artifact-dir",
               !arguments[2].isEmpty
         else {
+            return failure(exitCode: 64, diagnostic: "E_USAGE\n")
+        }
+        var cohort = VoiceEvaluationArtifactCohortDefinition
+            .zipformerBilingualZhEn2023
+        if arguments.count == 5 {
+            guard arguments[3] == "--cohort",
+                  let named = cohortDefinition(named: arguments[4])
+            else {
+                return failure(exitCode: 64, diagnostic: "E_USAGE\n")
+            }
+            cohort = named
+        } else if arguments.count != 3 {
             return failure(exitCode: 64, diagnostic: "E_USAGE\n")
         }
         guard VoiceEvaluationArtifactSealer.isCanonicalAbsolutePath(
@@ -55,7 +91,8 @@ public enum VoiceEvaluationArtifactSealerCLI {
             isDirectory: true
         )
         do {
-            let receipt = try sealer.sealArtifact(at: artifactDirectory)
+            let receipt = try sealerForCohort(cohort)
+                .sealArtifact(at: artifactDirectory)
             var output = receipt.canonicalJSONData()
             output.append(0x0A)
             return VoiceEvaluationArtifactSealerCLIResult(

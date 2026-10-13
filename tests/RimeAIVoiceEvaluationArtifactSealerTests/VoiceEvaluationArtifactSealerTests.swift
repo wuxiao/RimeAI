@@ -6,6 +6,71 @@ import Testing
 
 @Suite("Internal voice evaluation artifact sealer")
 struct VoiceEvaluationArtifactSealerTests {
+    @Test("a synthetic second cohort seals with paraformer manifest fields")
+    func test_sealsSyntheticSecondCohort() throws {
+        let fixture = try ParaformerEvaluationArtifactFixture()
+        defer { fixture.remove() }
+        let synthetic = VoiceEvaluationArtifactCohortDefinition(
+            artifactID: "synthetic-paraformer-eval",
+            modelID: "synthetic-paraformer",
+            modelRevision: "synthetic-revision",
+            hotwordProbePhrase: nil,
+            sourceURL: "https://example.invalid/paraformer.tar.bz2",
+            modelFileNames: ["decoder.onnx", "encoder.onnx", "tokens.txt"],
+            payloadPaths: ParaformerEvaluationArtifactFixture.payloadPaths,
+            frozenPayloads: [],
+            runtimeKind: .sherpaOnnxOnlineParaformer
+        )
+
+        let receipt = try VoiceEvaluationArtifactSealer(
+            cohort: synthetic,
+            expectedPayloads: nil
+        ).sealArtifact(at: fixture.root)
+        let manifest = try VoiceASRArtifactManifest.decodeStrict(
+            Data(contentsOf: fixture.root.appendingPathComponent("manifest.json"))
+        )
+
+        #expect(receipt.artifactID == "synthetic-paraformer-eval")
+        #expect(receipt.verifiedFileCount == 5)
+        #expect(receipt.verifiedPayloadBytes == fixture.payloadBytes)
+        #expect(manifest.runtime.kind == .sherpaOnnxOnlineParaformer)
+        #expect(manifest.runtime.modelType == .paraformer)
+        #expect(manifest.runtime.modelingUnit == .cjkCharacter)
+        #expect(manifest.runtime.decodingMethod == .greedySearch)
+        #expect(manifest.runtime.joinerPath == nil)
+        #expect(manifest.runtime.bpeVocabularyPath == nil)
+        #expect(manifest.runtime.hotwordProbePhrase.isEmpty)
+        #expect(manifest.capabilities.hotwordMode == .unsupported)
+        #expect(manifest.capabilities.maximumHotwords == 0)
+        #expect(manifest.license.sourceURL == "https://example.invalid/paraformer.tar.bz2")
+    }
+
+    @Test("a cohort never accepts another cohort's directory shape or bytes")
+    func test_cohortDirShapeMismatchFails() throws {
+        let zipformerShaped = try EvaluationArtifactFixture()
+        defer { zipformerShaped.remove() }
+        #expect(
+            throws: VoiceEvaluationArtifactSealerError.invalidArtifactTree
+        ) {
+            _ = try VoiceEvaluationArtifactSealer(
+                cohort: .paraformerBilingualZhEn
+            ).sealArtifact(at: zipformerShaped.root)
+        }
+        #expect(!zipformerShaped.manifestExists)
+
+        let paraformerShaped = try ParaformerEvaluationArtifactFixture()
+        defer { paraformerShaped.remove() }
+        #expect(
+            throws: VoiceEvaluationArtifactSealerError
+                .payloadDoesNotMatchFrozenCohort
+        ) {
+            _ = try VoiceEvaluationArtifactSealer(
+                cohort: .paraformerBilingualZhEn
+            ).sealArtifact(at: paraformerShaped.root)
+        }
+        #expect(!paraformerShaped.manifestExists)
+    }
+
     @Test("prepared exact payload is sealed and fully verified")
     func preparedPayloadIsSealedAndVerified() throws {
         let fixture = try EvaluationArtifactFixture()
@@ -429,6 +494,81 @@ struct VoiceEvaluationArtifactSealerTests {
             ).sealArtifact(at: fixture.root)
         }
         #expect(!fixture.manifestExists)
+    }
+}
+
+private final class ParaformerEvaluationArtifactFixture {
+    static let payloadPaths = [
+        "licenses/LICENSE.txt",
+        "licenses/NOTICE.txt",
+        "model/decoder.onnx",
+        "model/encoder.onnx",
+        "model/tokens.txt",
+    ]
+
+    static let payloads: [(String, Data)] = [
+        ("licenses/LICENSE.txt", Data("license\n".utf8)),
+        (
+            "licenses/NOTICE.txt",
+            Data(
+                """
+                RimeAI Voice Evaluation Artifact Notice
+
+                Internal evaluation only.
+                Redistribution is not approved.
+                Production use or release is not approved.
+                Upstream rights, immutable revision mapping, and NOTICE obligations remain unresolved.
+
+                """.utf8
+            )
+        ),
+        ("model/decoder.onnx", Data("decoder\n".utf8)),
+        ("model/encoder.onnx", Data("encoder\n".utf8)),
+        ("model/tokens.txt", Data("tokens\n".utf8)),
+    ]
+
+    let root: URL
+    let payloadBytes: Int64
+
+    var manifestExists: Bool {
+        FileManager.default.fileExists(
+            atPath: root.appendingPathComponent("manifest.json").path
+        )
+    }
+
+    init() throws {
+        root = URL(fileURLWithPath: "/private/tmp", isDirectory: true)
+            .appendingPathComponent(
+            "rimeai-evaluation-sealer-paraformer-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        payloadBytes = Self.payloads.reduce(0) {
+            $0 + Int64($1.1.count)
+        }
+        try FileManager.default.createDirectory(
+            at: root,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700]
+        )
+        for directory in ["licenses", "model"] {
+            let url = root.appendingPathComponent(directory, isDirectory: true)
+            try FileManager.default.createDirectory(
+                at: url,
+                withIntermediateDirectories: false,
+                attributes: [.posixPermissions: 0o700]
+            )
+            #expect(chmod(url.path, mode_t(0o700)) == 0)
+        }
+        for (path, data) in Self.payloads {
+            let url = root.appendingPathComponent(path)
+            try data.write(to: url)
+            #expect(chmod(url.path, mode_t(0o600)) == 0)
+        }
+        #expect(chmod(root.path, mode_t(0o700)) == 0)
+    }
+
+    func remove() {
+        try? FileManager.default.removeItem(at: root)
     }
 }
 
