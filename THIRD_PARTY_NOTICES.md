@@ -32,9 +32,10 @@
 | PyInstaller bootloader | 6.21.0 | GPL-2.0-or-later with bootloader exception | macOS daemon 冻结构建 |
 | gte-multilingual-reranker-base | `8215cf04…` | Apache-2.0 | 被否决的 P0 实验 |
 | Alibaba `new-impl` | `40ced75c…` | Apache-2.0 | GTE 实验代码 |
-| Qwen2.5-0.5B-Instruct | `7ae55760…` | Apache-2.0 | 被否决的 P0 实验 |
-| PyTorch | 2.8.0 | BSD-3-Clause | 被否决模型的 P0 推理 |
-| Transformers | 4.39.3 | Apache-2.0 | 被否决模型的 P0 推理 |
+| Qwen2.5-0.5B (base) | `060db649…` | Apache-2.0 | 拼音约束整句解码路线基座（constrained-v2 评测，LM-001 部署化目标） |
+| Qwen2.5-0.5B-Instruct | `7ae55760…` | Apache-2.0 | 已证伪的 prompt 整句路线实验（syllable-decoder-v3） |
+| PyTorch | 2.8.0 | BSD-3-Clause | 约束解码与 beam 评测推理（开发机 neural extra，不进产品安装包） |
+| Transformers | 4.39.3 | Apache-2.0 | 约束解码与 beam 评测推理（开发机 neural extra，不进产品安装包） |
 
 固定来源、校验值和逐样本归因见：
 
@@ -42,6 +43,7 @@
 - [datasets/corpora.lock.json](datasets/corpora.lock.json)
 - [datasets/ATTRIBUTION.md](datasets/ATTRIBUTION.md)
 - [models/gte.lock.json](models/gte.lock.json)
+- [models/qwen2.5-0.5b.lock.json](models/qwen2.5-0.5b.lock.json)
 - [models/qwen2.5-0.5b-instruct.lock.json](models/qwen2.5-0.5b-instruct.lock.json)
 - [models/bge-small-zh-v1.5.lock.json](models/bge-small-zh-v1.5.lock.json)
 - [ios/Native/artifact-lock.json](ios/Native/artifact-lock.json)

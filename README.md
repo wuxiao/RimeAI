@@ -114,5 +114,52 @@ PYTHONDONTWRITEBYTECODE=1 python3.11 -m pytest -q -p no:cacheprovider
   ASR runtime/model intake 合同。
 - [docs/VOICE_EVAL_FORMAT.md](docs/VOICE_EVAL_FORMAT.md)：语音评测与证据 schema。
 - [ios/README.md](ios/README.md)：iOS 可行性工程边界。
-- [datasets/ATTRIBUTION.md](datasets/ATTRIBUTION.md) 与
-  [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)：数据与第三方归因。
+
+## 开源与第三方引用
+
+逐项的固定版本/提交、校验值、许可证文本随附关系见
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) 与
+[datasets/ATTRIBUTION.md](datasets/ATTRIBUTION.md)；本节只列引用来源。
+
+**输入引擎与 Rime 数据生态**
+
+- [librime](https://github.com/rime/librime)（BSD-3-Clause）：受控同步引擎。
+- [rime-luna-pinyin](https://github.com/rime/rime-luna-pinyin)、
+  [rime-prelude](https://github.com/rime/rime-prelude)、
+  [rime-essay](https://github.com/rime/rime-essay)、
+  [rime-stroke](https://github.com/rime/rime-stroke)（LGPL-3.0）：
+  schema、词典与语言数据。
+- [OpenCC](https://github.com/BYVoid/OpenCC)（Apache-2.0）：简繁转换与
+  数据（含错误归类分析用的 TSCharacters 字表）。
+- LevelDB、marisa-trie、Boost.Regex、yaml-cpp：librime 静态依赖。
+
+**模型**
+
+- [Qwen2.5-0.5B](https://huggingface.co/Qwen/Qwen2.5-0.5B)
+  （Apache-2.0）：零 prompt 拼音约束整句解码基座（base，
+  constrained-v2）。
+- Qwen2.5-0.5B-Instruct（Apache-2.0）：已证伪的 prompt 整句路线实验。
+- [BAAI/bge-small-zh-v1.5](https://huggingface.co/BAAI/bge-small-zh-v1.5)
+  （MIT）：24M 排序器初始化权重与 tokenizer。
+- gte-multilingual-reranker-base（Apache-2.0）：已否决的 P0 实验。
+
+**推理与评测运行时（开发机，不进产品安装包）**
+
+- PyTorch、Transformers、safetensors：约束解码与 beam 评测推理。
+- ONNX Runtime、sherpa-onnx：macOS INT8 排序与语音 runtime。
+- jieba、pypinyin、HF tokenizers、NumPy、PyYAML、PyInstaller：
+  分词、拼音、tokenizer、张量、配置与冻结构建。
+
+**语料**
+
+- 中文 Wikivoyage（CC BY-SA 4.0）与 MDN 中文文档（CC BY-SA 2.5+）：
+  冻结评测语料，逐样本归因见
+  [datasets/ATTRIBUTION.md](datasets/ATTRIBUTION.md)。
+
+**设计参考（非捆绑代码或数据）**
+
+- [lime](https://github.com/xushengfeng/lime)：零提示、零微调的拼音
+  约束解码思想参考；RimeAI 的差异（词典边界索引、beam per-path KV、
+  模糊音节终门）见
+  [docs/superpowers/plans/2026-10-13-pinyin-constrained-decoder.md](docs/superpowers/plans/2026-10-13-pinyin-constrained-decoder.md)。
+- PinyinGPT（拼音辅助 IME 生成模型研究）：LM-002 SFT 蒸馏配方参考。
