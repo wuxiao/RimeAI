@@ -33,7 +33,7 @@
 | 层级 | 同一工作树快照的 clean 命令族 | 结果 |
 |---|---|---|
 | SwiftPM | 清除 header 环境变量，使用全新 scratch，warnings-as-errors | 全量基线 907 tests / 63 suites（2026-08-24）；2026-10-13 时点 InputCore 子集 449 通过 |
-| Python | 禁止 bytecode/cache，warnings-as-errors | 574 tests 通过（2026-10-13），无遗留测试进程 |
+| Python | 禁止 bytecode/cache，warnings-as-errors | 632 tests 通过（2026-10-13），无遗留测试进程 |
 | macOS | 全新 DerivedData，arm64，Swift/C/C++ warnings-as-errors | 40 tests 通过（2026-10-13） |
 | iOS | 全新 DerivedData，Simulator unit + system-keyboard UI | 11 tests 通过（2026-08-24 基线） |
 | Native / shell / generation | XCFramework contract、部分候选 C++ 集成、脚本直接调用、XcodeGen 精确再生成 | 全部通过 |
