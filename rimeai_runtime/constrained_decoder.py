@@ -78,6 +78,7 @@ class PinyinTokenIndex:
         self.token_syllables = token_syllables
         self.first_syllable_tokens = first_syllable_tokens
         self.token_texts = token_texts if token_texts is not None else {}
+        self._readings_by_text: Optional[Dict[str, FrozenSet[Syllables]]] = None
 
     @classmethod
     def build(cls, tokenizer, guard: PinyinGuard) -> "PinyinTokenIndex":
@@ -149,6 +150,21 @@ class PinyinTokenIndex:
                     result[token_id] = reading
                     break
         return result
+
+    def readings_by_text(self) -> Dict[str, FrozenSet[Syllables]]:
+        """Token text -> readings, cached; substrings of gold text are
+        looked up here when tiling a reachable path."""
+        if self._readings_by_text is None:
+            merged: Dict[str, Set[Syllables]] = {}
+            for token_id, text in self.token_texts.items():
+                readings = self.token_syllables.get(token_id)
+                if not readings:
+                    continue
+                merged.setdefault(text, set()).update(readings)
+            self._readings_by_text = {
+                text: frozenset(readings) for text, readings in merged.items()
+            }
+        return self._readings_by_text
 
 
 @dataclass(frozen=True)
@@ -304,3 +320,51 @@ class ConstrainedGreedyDecoder:
         best = min(completed, key=lambda state: (-state[3], state[0]))
         confidence = math.exp(best[3] / best[4]) if best[4] else 0.0
         return DecodeResult(best[1], confidence, total)
+
+
+def _syllable_matches(actual: str, typed: str, *, fuzzy: bool) -> bool:
+    return actual == typed or (fuzzy and fuzzy_equal(actual, typed))
+
+
+def gold_path_reachable(
+    index: PinyinTokenIndex,
+    gold_text: str,
+    syllables: Sequence[str],
+    *,
+    fuzzy: bool = True,
+) -> bool:
+    """True when ``gold_text`` can be produced token-by-token under the
+    index while consuming exactly ``syllables``.
+
+    Index readings compose one syllable per character, so this reduces to:
+    syllable count equals character count, each position's character has a
+    reading matching the typed syllable, and the text can be tiled by
+    indexed token texts (a character without its own token must be covered
+    by a multi-character token)."""
+    if not gold_text or len(syllables) != len(gold_text):
+        return False
+    readings_by_text = index.readings_by_text()
+    if not readings_by_text:
+        return False
+    total = len(gold_text)
+    max_length = min(max(len(text) for text in readings_by_text), total)
+    reachable = {0}
+    stack = [0]
+    while stack:
+        start = stack.pop()
+        for length in range(1, min(max_length, total - start) + 1):
+            text = gold_text[start : start + length]
+            for reading in readings_by_text.get(text, ()):
+                window = syllables[start : start + length]
+                if len(reading) == length and all(
+                    _syllable_matches(actual, typed, fuzzy=fuzzy)
+                    for actual, typed in zip(reading, window)
+                ):
+                    end = start + length
+                    if end == total:
+                        return True
+                    if end not in reachable:
+                        reachable.add(end)
+                        stack.append(end)
+                    break
+    return False
