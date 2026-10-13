@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "status": "frozen_test_baseline",
+  "recorded_at": "2026-10-13",
+  "dataset": {
+    "path": ".rimeai/datasets/p0-librime-1.17.0-luna-simp.jsonl",
+    "sha256": "f0d46219a334d9d408518e387899c57b4881da27e8388d721827ebc86087b35d",
+    "split": "test",
+    "samples": 974,
+    "candidate_limit": 10
+  },
+  "comparison": {
+    "constrained-v2": {
+      "model_artifact_id": "qwen2.5-0.5b@060db649:sha256-88c142557820:mps:fp16:constrained-v2",
+      "lock": "models/qwen2.5-0.5b.lock.json",
+      "decoding": "pinyin-constrained beam (width 4, per-path KV history, fuzzy pairs an/ang en/eng in/ing z/zh c/ch s/sh at syllable level), invariant seed context '。', no prompt, no chat template",
+      "sentence_accuracy": 0.921971,
+      "baseline_sentence_accuracy": 0.726899,
+      "relative_lift": 0.268362,
+      "domain_slices": {
+        "developer": 0.988558,
+        "general": 0.867784
+      },
+      "valid_suggestions": 955,
+      "empty_suggestions": 0,
+      "pinyin_rejections": 19,
+      "errors": 0,
+      "latency_ms": { "p50": 280.534208, "p95": 568.791667 },
+      "cold_start_ms": 5889.571167,
+      "peak_rss_bytes": 1138098176
+    },
+    "syllable-decoder-v3": {
+      "model_artifact_id": "qwen2.5-0.5b-instruct@7ae55760:sha256-fdf756fa7fcb:mps:fp16:syllable-decoder-v3",
+      "decoding": "chat-template prompt generation (the prompt-engineering route)",
+      "sentence_accuracy": 0.725873,
+      "baseline_sentence_accuracy": 0.726899,
+      "relative_lift": -0.001411,
+      "valid_suggestions": 7,
+      "empty_suggestions": 910,
+      "pinyin_rejections": 57,
+      "errors": 0,
+      "latency_ms": { "p50": 157.581917, "p95": 311.240292 },
+      "cold_start_ms": 12385.109125,
+      "peak_rss_bytes": 720814080
+    }
+  },
+  "history_note": "An earlier constrained-v1 measurement (89.9% accuracy, p50 151ms) was taken with two decoder defects: beam paths scored against wrong KV histories, and final-swap fuzzy matching only applied to bare syllables. Both are fixed in constrained-v2; the v2 numbers above are the designed system. Latency doubled as the price of per-path histories — cross-path KV sharing (prefix-tree cache) is the known optimization path.",
+  "conclusion": "Constrained decoding beats the prompt route decisively at the same model size: 92.2% vs 72.6% sentence accuracy. The prompt route is effectively non-functional on 0.5B for this dataset (910/974 empty suggestions; its accuracy equals the dictionary fallback). The constrained decoder never returns illegal text (mask + worker fuzzy gate); the eval-side exact-pinyin gate still rejects 19 of its outputs, which are precisely fuzzy corrections the harness's stricter matching does not credit. Latency parity is lost: the prompt route prefills once per request while the constrained route re-prefills per diverging beam path (p50 281ms vs 158ms on MPS fp16) — KV-prefix sharing is the next lever.",
+  "reproduce_constrained": "uv run --extra neural rimeai-eval evaluate-sentence .rimeai/datasets/p0-librime-1.17.0-luna-simp.jsonl --decoder-config examples/constrained_qwen_decoder.json --rime-dictionary .rimeai/rime/shared/luna_pinyin.dict.yaml --split test",
+  "reproduce_prompt_baseline": "uv run --extra neural rimeai-eval evaluate-sentence .rimeai/datasets/p0-librime-1.17.0-luna-simp.jsonl --decoder-config examples/qwen_sentence_decoder.json --rime-dictionary .rimeai/rime/shared/luna_pinyin.dict.yaml --split test"
+}

@@ -8,10 +8,9 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import re
 import sys
 from time import monotonic
-from typing import Any, Dict, Iterator, List, Mapping, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Sequence, Tuple
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -33,7 +32,7 @@ MODEL_REVISION = "060db6499f32faf8b98477b0a26969ef7d8b9987"
 MODEL_SHA256 = "88c142557820ccad55bb59756bfcfcf891de9cc6202816bd346445188a0ed342"
 EXPECTED_TORCH = "2.8.0"
 EXPECTED_TRANSFORMERS = "4.39.3"
-PROMPT_VERSION = "constrained-v1"
+PROMPT_VERSION = "constrained-v2"
 # The base (non-instruct) variant is required: the instruct model's raw
 # next-token distribution ranks homophones by RLHF noise, not by natural
 # Chinese (measured 2026-10-13: P(今天|。) ranked 5th behind 仅/紧/金/锦
@@ -42,7 +41,6 @@ PROMPT_VERSION = "constrained-v1"
 # the model at a sentence boundary. It is a context stabilizer, not an
 # instruction — no chat template is ever applied.
 SEED_CONTEXT = "。"
-HAN_ONLY = re.compile(r"^[\u3400-\u9fff]{1,30}$")
 
 
 def fail(message: str) -> None:
@@ -165,31 +163,27 @@ def load_runtime() -> WorkerRuntime:
     return WorkerRuntime(tokenizer, model, device, artifact_id)
 
 
-class _ProbabilityView(Mapping):
-    """Read-only probability lookup backed by a vocab-sized tensor; the
-    decoder only probes a handful of token ids per step, so the view
-    never materializes the full vocab as a dict."""
+class _ProbabilityView:
+    """Probability lookup backing the scorer protocol: the decoder only
+    probes a handful of token ids per step, so the full vocab is never
+    materialized as a dict."""
 
     def __init__(self, probabilities: Any) -> None:
         self._probabilities = probabilities
 
-    def __getitem__(self, token_id: int) -> float:
-        return float(self._probabilities[int(token_id)])
-
-    def __iter__(self) -> Iterator[int]:
-        return iter(())
-
-    def __len__(self) -> int:
-        return int(self._probabilities.shape[-1])
+    def get(self, token_id: int, default: float = 0.0) -> float:
+        index = int(token_id)
+        if 0 <= index < self._probabilities.shape[-1]:
+            return float(self._probabilities[index])
+        return default
 
 
 def make_scorer(
     runtime: WorkerRuntime, context_ids: Sequence[int]
 ) -> Any:
-    tokenizer = runtime.tokenizer
     model = runtime.model
     device = runtime.device
-    seed = list(context_ids) or [tokenizer.eos_token_id]
+    seed = list(context_ids)
     with torch.inference_mode():
         output = model(
             input_ids=torch.tensor(
@@ -197,25 +191,42 @@ def make_scorer(
             ),
             use_cache=True,
         )
+    # Beam paths diverge by construction: the cached history is only
+    # valid while the requested path extends it, otherwise the whole
+    # seed+path is re-prefilled so every path is scored against its own
+    # history (bounded: <= 30 tokens x beam_width per step).
     state = {
+        "fed": [],
         "past": output.past_key_values,
         "logits": output.logits[0, -1],
-        "fed": 0,
     }
 
     def scorer(step_token_ids: Sequence[int]) -> Mapping[int, float]:
+        ids = [int(token_id) for token_id in step_token_ids]
         with torch.inference_mode():
-            for token_id in step_token_ids[state["fed"]:]:
+            if ids[: len(state["fed"])] == state["fed"]:
+                new_tokens = ids[len(state["fed"]):]
+                if new_tokens:
+                    output = model(
+                        input_ids=torch.tensor(
+                            [new_tokens], dtype=torch.long, device=device
+                        ),
+                        past_key_values=state["past"],
+                        use_cache=True,
+                    )
+                    state["past"] = output.past_key_values
+                    state["logits"] = output.logits[0, -1]
+                    state["fed"] = ids
+            else:
                 output = model(
                     input_ids=torch.tensor(
-                        [[int(token_id)]], dtype=torch.long, device=device
+                        [seed + ids], dtype=torch.long, device=device
                     ),
-                    past_key_values=state["past"],
                     use_cache=True,
                 )
                 state["past"] = output.past_key_values
                 state["logits"] = output.logits[0, -1]
-                state["fed"] += 1
+                state["fed"] = ids
         return _ProbabilityView(
             torch.softmax(state["logits"].float(), dim=-1)
         )

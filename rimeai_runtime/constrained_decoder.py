@@ -26,11 +26,15 @@ _FUZZY_INITIAL_PREFIXES = (("zh", "z"), ("ch", "c"), ("sh", "s"))
 
 
 def fuzzy_equal(a: str, b: str) -> bool:
-    """Syllable-level pinyin equivalence for the frozen confusion pairs."""
+    """Syllable-level pinyin equivalence for the frozen confusion pairs:
+    initials swap as zh/z, ch/c, sh/s prefixes; finals swap as
+    an/ang, en/eng, in/ing suffixes (so jin~jing, shan~shang). A
+    syllable confusing both initial and final is out of scope."""
     if a == b:
         return True
-    if (a, b) in _FUZZY_FINAL_PAIRS:
-        return True
+    for first, second in _FUZZY_FINAL_PAIRS:
+        if a.endswith(first) and b.endswith(second) and a[: -len(first)] == b[: -len(second)]:
+            return True
     for thick, thin in _FUZZY_INITIAL_PREFIXES:
         for x, y in ((a, b), (b, a)):
             if x.startswith(thick) and y == thin + x[len(thick):]:

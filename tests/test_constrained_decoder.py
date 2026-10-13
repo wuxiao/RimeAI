@@ -17,10 +17,10 @@ from rimeai_runtime.pinyin_guard import PinyinGuard
 class _StubTokenizer:
     """Duck-typed stand-in for a transformers tokenizer."""
 
-    vocab_size = 17
+    vocab_size = 18
     _tokens = [
         "你", "好", "世界", "的", "是", "<pad>", "\n", "长", "时", "四季",
-        "界", "试", "我", "们", "门", "明天", "我们",
+        "界", "试", "我", "们", "门", "明天", "我们", "今天",
     ]
 
     def decode(self, ids):
@@ -45,6 +45,7 @@ def _guard() -> PinyinGuard:
             "门": frozenset({"men"}),
             "明": frozenset({"ming"}),
             "天": frozenset({"tian"}),
+            "今": frozenset({"jin"}),
         }
     )
 
@@ -202,6 +203,22 @@ def test_fuzzy_equal_covers_frozen_pairs_both_directions():
     assert fuzzy_equal("an", "an")
     assert not fuzzy_equal("an", "en")
     assert not fuzzy_equal("shi", "xi")
+
+
+def test_fuzzy_equal_applies_final_swaps_to_whole_syllables():
+    assert fuzzy_equal("jin", "jing")
+    assert fuzzy_equal("shan", "shang")
+    assert fuzzy_equal("chen", "cheng")
+    assert fuzzy_equal("fen", "feng")
+    assert fuzzy_equal("wan", "wang")
+    # double confusion (initial AND final) stays out of scope
+    assert not fuzzy_equal("chen", "chang")
+    assert not fuzzy_equal("zhan", "zang")
+
+
+def test_fuzzy_candidates_recover_mistyped_final():
+    result = _index().candidates(("jing", "tian"), fuzzy=True)
+    assert result[17] == ("jin", "tian")  # 今天 via jin ~ jing
 
 
 def test_fuzzy_candidates_match_mistyped_initials():

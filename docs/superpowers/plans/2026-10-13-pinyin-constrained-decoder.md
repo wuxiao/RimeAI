@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- 版本锁定：torch `2.8.0`、transformers `4.39.3`，模型 `Qwen/Qwen2.5-0.5B-Instruct` revision `7ae557604adf67be50417f59c2c2f167def9a775`、权重 SHA-256 `fdf756fa7fcbe7404d5c60e26bff1a0c8b8aa1f72ced49e7dd0210fe288fb7fe`（见 `models/qwen2.5-0.5b-instruct.lock.json`）。
+- 版本锁定：torch `2.8.0`、transformers `4.39.3`，模型 ~~`Qwen/Qwen2.5-0.5B-Instruct` revision `7ae557604adf67be50417f59c2c2f167def9a775`、权重 SHA-256 `fdf756fa7fcbe7404d5c60e26bff1a0c8b8aa1f72ced49e7dd0210fe288fb7fe`~~（**已被终审裁决取代**：实测 instruct 裸分布不适配零提示打分，改用 `Qwen/Qwen2.5-0.5B` base revision `060db6499f32faf8b98477b0a26969ef7d8b9987`、SHA-256 `88c142557820ccad55bb59756bfcfcf891de9cc6202816bd346445188a0ed342`，见 `models/qwen2.5-0.5b.lock.json` 与账本）→（后续裁决：解码行为修复后 `PROMPT_VERSION` = `constrained-v2`）。
 - 不新增任何运行时依赖；纯逻辑模块不得 import torch/transformers（worker 才可以）。
 - Worker 协议冻结（`rimeai_eval/command_sentence_decoder.py:134-222`）：请求 `{schema_version:1, task:"generate_sentence", request_id, context, pinyin, domain, candidates, max_characters}`，响应 `{schema_version:1, request_id, suggestion, confidence, model_artifact_id}`；`suggestion` ≤30 字符、单行；空字符串 = 弃权。
 - 环境变量沿用：`RIMEAI_QWEN_MODEL_DIR`、`RIMEAI_QWEN_DEVICE`（mps→fp16 / cpu→fp32）、`RIMEAI_RIME_DICTIONARY`。
