@@ -381,11 +381,11 @@ final class SherpaOnnxProductBackendLoader:
         return try SherpaOnnxRecognizerConfiguration(
             encoderPath: absolutePath(runtime.encoderPath),
             decoderPath: absolutePath(runtime.decoderPath),
-            joinerPath: absolutePath(runtime.joinerPath),
+            joinerPath: runtime.joinerPath.map(absolutePath) ?? "",
             tokensPath: absolutePath(runtime.tokensPath),
-            bpeVocabularyPath: absolutePath(
-                runtime.bpeVocabularyPath
-            ),
+            bpeVocabularyPath: runtime.bpeVocabularyPath.map(
+                absolutePath
+            ) ?? "",
             sampleRateHertz: manifest.audio.sampleRateHertz,
             featureDimension: runtime.featureDimension,
             numberOfThreads: runtime.numberOfThreads,
@@ -420,12 +420,9 @@ final class SherpaOnnxProductBackendLoader:
         let paths = [
             (runtime.encoderPath, configuration.encoderPath),
             (runtime.decoderPath, configuration.decoderPath),
-            (runtime.joinerPath, configuration.joinerPath),
+            (runtime.joinerPath ?? "", configuration.joinerPath),
             (runtime.tokensPath, configuration.tokensPath),
-            (
-                runtime.bpeVocabularyPath,
-                configuration.bpeVocabularyPath
-            ),
+            (runtime.bpeVocabularyPath ?? "", configuration.bpeVocabularyPath),
         ]
         let inventory = Dictionary(uniqueKeysWithValues:
             artifact.manifest.inventory.map { ($0.path, $0) }

@@ -436,6 +436,16 @@ private struct VoiceASRStrictJSONObject {
     ) throws -> Value {
         try container.decode(type, forKey: VoiceASRJSONKey(stringValue: key)!)
     }
+
+    func decodeIfPresent<Value: Decodable>(
+        _ type: Value.Type,
+        forKey key: String
+    ) throws -> Value? {
+        try container.decodeIfPresent(
+            type,
+            forKey: VoiceASRJSONKey(stringValue: key)!
+        )
+    }
 }
 
 /// Versioned metadata for a local voice-ASR model pack managed by RimeAI.
@@ -583,14 +593,18 @@ public struct VoiceASRArtifactManifest: Equatable, Sendable {
         public enum Kind: String, Decodable, Equatable, Sendable {
             case sherpaOnnxOnlineTransducer =
                 "sherpa-onnx-online-transducer"
+            case sherpaOnnxOnlineParaformer =
+                "sherpa-onnx-online-paraformer"
         }
 
         public enum ModelingUnit: String, Decodable, Equatable, Sendable {
             case cjkCharacterAndBPE = "cjkchar+bpe"
+            case cjkCharacter = "cjkchar"
         }
 
         public enum ModelType: String, Decodable, Equatable, Sendable {
             case zipformer
+            case paraformer
         }
 
         public enum Provider: String, Decodable, Equatable, Sendable {
@@ -599,6 +613,7 @@ public struct VoiceASRArtifactManifest: Equatable, Sendable {
 
         public enum DecodingMethod: String, Decodable, Equatable, Sendable {
             case modifiedBeamSearch = "modified_beam_search"
+            case greedySearch = "greedy_search"
         }
 
         public struct Endpoint: Decodable, Equatable, Sendable {
@@ -637,9 +652,9 @@ public struct VoiceASRArtifactManifest: Equatable, Sendable {
         public let kind: Kind
         public let encoderPath: String
         public let decoderPath: String
-        public let joinerPath: String
+        public let joinerPath: String?
         public let tokensPath: String
-        public let bpeVocabularyPath: String
+        public let bpeVocabularyPath: String?
         public let modelingUnit: ModelingUnit
         public let modelType: ModelType
         public let featureDimension: Int
@@ -653,28 +668,38 @@ public struct VoiceASRArtifactManifest: Equatable, Sendable {
         public let blankPenaltyMilli: Int
 
         public init(from decoder: Decoder) throws {
+            let peekContainer = try decoder.container(
+                keyedBy: VoiceASRJSONKey.self
+            )
+            let peekedKind = try peekContainer.decodeIfPresent(
+                Kind.self,
+                forKey: VoiceASRJSONKey(stringValue: "kind")!
+            )
+            var expectedKeys: Set<String> = [
+                "kind",
+                "encoder_path",
+                "decoder_path",
+                "tokens_path",
+                "modeling_unit",
+                "model_type",
+                "feature_dimension",
+                "provider",
+                "num_threads",
+                "decoding_method",
+                "max_active_paths",
+                "endpoint",
+                "hotword_probe_phrase",
+                "hotwords_score_milli",
+                "blank_penalty_milli",
+            ]
+            if peekedKind != .sherpaOnnxOnlineParaformer {
+                expectedKeys.insert("joiner_path")
+                expectedKeys.insert("bpe_vocab_path")
+            }
             let object = try VoiceASRStrictJSONObject(
                 decoder,
                 context: "runtime",
-                expectedKeys: [
-                    "kind",
-                    "encoder_path",
-                    "decoder_path",
-                    "joiner_path",
-                    "tokens_path",
-                    "bpe_vocab_path",
-                    "modeling_unit",
-                    "model_type",
-                    "feature_dimension",
-                    "provider",
-                    "num_threads",
-                    "decoding_method",
-                    "max_active_paths",
-                    "endpoint",
-                    "hotword_probe_phrase",
-                    "hotwords_score_milli",
-                    "blank_penalty_milli",
-                ]
+                expectedKeys: expectedKeys
             )
             kind = try object.decode(Kind.self, forKey: "kind")
             encoderPath = try object.decode(
@@ -685,7 +710,7 @@ public struct VoiceASRArtifactManifest: Equatable, Sendable {
                 String.self,
                 forKey: "decoder_path"
             )
-            joinerPath = try object.decode(
+            joinerPath = try object.decodeIfPresent(
                 String.self,
                 forKey: "joiner_path"
             )
@@ -693,7 +718,7 @@ public struct VoiceASRArtifactManifest: Equatable, Sendable {
                 String.self,
                 forKey: "tokens_path"
             )
-            bpeVocabularyPath = try object.decode(
+            bpeVocabularyPath = try object.decodeIfPresent(
                 String.self,
                 forKey: "bpe_vocab_path"
             )
@@ -1064,48 +1089,7 @@ public struct VoiceASRArtifactManifest: Equatable, Sendable {
                 "revision": .string(model.revision),
             ]),
             "network_policy": .string(networkPolicy.rawValue),
-            "runtime": .object([
-                "bpe_vocab_path": .string(runtime.bpeVocabularyPath),
-                "blank_penalty_milli": .integer(
-                    Int64(runtime.blankPenaltyMilli)
-                ),
-                "decoding_method": .string(runtime.decodingMethod.rawValue),
-                "decoder_path": .string(runtime.decoderPath),
-                "encoder_path": .string(runtime.encoderPath),
-                "endpoint": .object([
-                    "enabled": .boolean(runtime.endpoint.enabled),
-                    "rule1_min_trailing_silence_ms": .integer(Int64(
-                        runtime.endpoint
-                            .rule1MinimumTrailingSilenceMilliseconds
-                    )),
-                    "rule2_min_trailing_silence_ms": .integer(Int64(
-                        runtime.endpoint
-                            .rule2MinimumTrailingSilenceMilliseconds
-                    )),
-                    "rule3_min_utterance_ms": .integer(Int64(
-                        runtime.endpoint.rule3MinimumUtteranceMilliseconds
-                    )),
-                ]),
-                "feature_dimension": .integer(
-                    Int64(runtime.featureDimension)
-                ),
-                "hotword_probe_phrase": .string(
-                    runtime.hotwordProbePhrase
-                ),
-                "hotwords_score_milli": .integer(
-                    Int64(runtime.hotwordsScoreMilli)
-                ),
-                "joiner_path": .string(runtime.joinerPath),
-                "kind": .string(runtime.kind.rawValue),
-                "max_active_paths": .integer(
-                    Int64(runtime.maximumActivePaths)
-                ),
-                "model_type": .string(runtime.modelType.rawValue),
-                "modeling_unit": .string(runtime.modelingUnit.rawValue),
-                "num_threads": .integer(Int64(runtime.numberOfThreads)),
-                "provider": .string(runtime.provider.rawValue),
-                "tokens_path": .string(runtime.tokensPath),
-            ]),
+            "runtime": runtimeCanonicalJSON,
             "schema_version": .integer(Int64(schemaVersion)),
             "target": .object([
                 "architecture": .string(target.architecture.rawValue),
@@ -1122,6 +1106,46 @@ public struct VoiceASRArtifactManifest: Equatable, Sendable {
         SHA256.hash(data: canonicalContentData).map {
             String(format: "%02x", $0)
         }.joined()
+    }
+
+    private var runtimeCanonicalJSON: VoiceASRCanonicalJSON {
+        var pairs: [String: VoiceASRCanonicalJSON] = [
+            "blank_penalty_milli": .integer(Int64(runtime.blankPenaltyMilli)),
+            "decoding_method": .string(runtime.decodingMethod.rawValue),
+            "decoder_path": .string(runtime.decoderPath),
+            "encoder_path": .string(runtime.encoderPath),
+            "endpoint": .object([
+                "enabled": .boolean(runtime.endpoint.enabled),
+                "rule1_min_trailing_silence_ms": .integer(Int64(
+                    runtime.endpoint.rule1MinimumTrailingSilenceMilliseconds
+                )),
+                "rule2_min_trailing_silence_ms": .integer(Int64(
+                    runtime.endpoint.rule2MinimumTrailingSilenceMilliseconds
+                )),
+                "rule3_min_utterance_ms": .integer(Int64(
+                    runtime.endpoint.rule3MinimumUtteranceMilliseconds
+                )),
+            ]),
+            "feature_dimension": .integer(Int64(runtime.featureDimension)),
+            "hotword_probe_phrase": .string(runtime.hotwordProbePhrase),
+            "hotwords_score_milli": .integer(
+                Int64(runtime.hotwordsScoreMilli)
+            ),
+            "kind": .string(runtime.kind.rawValue),
+            "max_active_paths": .integer(Int64(runtime.maximumActivePaths)),
+            "model_type": .string(runtime.modelType.rawValue),
+            "modeling_unit": .string(runtime.modelingUnit.rawValue),
+            "num_threads": .integer(Int64(runtime.numberOfThreads)),
+            "provider": .string(runtime.provider.rawValue),
+            "tokens_path": .string(runtime.tokensPath),
+        ]
+        if let bpeVocabularyPath = runtime.bpeVocabularyPath {
+            pairs["bpe_vocab_path"] = .string(bpeVocabularyPath)
+        }
+        if let joinerPath = runtime.joinerPath {
+            pairs["joiner_path"] = .string(joinerPath)
+        }
+        return .object(pairs)
     }
 
     private func validate(
@@ -1166,13 +1190,9 @@ public struct VoiceASRArtifactManifest: Equatable, Sendable {
         }
         guard adapter.id == "sherpa-onnx",
               model.format == .onnx,
-              runtime.kind == .sherpaOnnxOnlineTransducer,
-              runtime.modelingUnit == .cjkCharacterAndBPE,
-              runtime.modelType == .zipformer,
               runtime.featureDimension == 80,
               runtime.provider == .cpu,
               (1 ... 8).contains(runtime.numberOfThreads),
-              runtime.decodingMethod == .modifiedBeamSearch,
               (1 ... 64).contains(runtime.maximumActivePaths),
               runtime.endpoint.enabled,
               (1 ... 30_000).contains(
@@ -1185,11 +1205,33 @@ public struct VoiceASRArtifactManifest: Equatable, Sendable {
                   >= runtime.endpoint.rule2MinimumTrailingSilenceMilliseconds,
               (1_000 ... 60_000).contains(
                   runtime.endpoint.rule3MinimumUtteranceMilliseconds
-              ),
-              (1 ... 10_000).contains(runtime.hotwordsScoreMilli),
-              (-10_000 ... 10_000).contains(runtime.blankPenaltyMilli)
+              )
         else {
             throw VoiceASRArtifactError.invalidField("runtime")
+        }
+        switch runtime.kind {
+        case .sherpaOnnxOnlineTransducer:
+            guard runtime.modelingUnit == .cjkCharacterAndBPE,
+                  runtime.modelType == .zipformer,
+                  runtime.decodingMethod == .modifiedBeamSearch,
+                  (1 ... 10_000).contains(runtime.hotwordsScoreMilli),
+                  (-10_000 ... 10_000).contains(runtime.blankPenaltyMilli),
+                  runtime.joinerPath != nil,
+                  runtime.bpeVocabularyPath != nil
+            else {
+                throw VoiceASRArtifactError.invalidField("runtime")
+            }
+        case .sherpaOnnxOnlineParaformer:
+            guard runtime.modelingUnit == .cjkCharacter,
+                  runtime.modelType == .paraformer,
+                  runtime.decodingMethod == .greedySearch,
+                  runtime.hotwordsScoreMilli == 0,
+                  runtime.blankPenaltyMilli == 0,
+                  runtime.joinerPath == nil,
+                  runtime.bpeVocabularyPath == nil
+            else {
+                throw VoiceASRArtifactError.invalidField("runtime")
+            }
         }
         guard locales == locales.sorted(),
               Set(locales).count == locales.count,
@@ -1284,13 +1326,27 @@ public struct VoiceASRArtifactManifest: Equatable, Sendable {
         else {
             throw VoiceASRArtifactError.invalidField("license paths")
         }
-        let runtimePaths = [
+        var runtimePaths = [
             runtime.encoderPath,
             runtime.decoderPath,
-            runtime.joinerPath,
             runtime.tokensPath,
-            runtime.bpeVocabularyPath,
         ]
+        var kindSpecificRuntimeChecks: Bool
+        switch runtime.kind {
+        case .sherpaOnnxOnlineTransducer:
+            guard let joinerPath = runtime.joinerPath,
+                  let bpeVocabularyPath = runtime.bpeVocabularyPath
+            else {
+                throw VoiceASRArtifactError.invalidField("runtime")
+            }
+            runtimePaths.append(contentsOf: [joinerPath, bpeVocabularyPath])
+            kindSpecificRuntimeChecks = joinerPath.hasSuffix(".onnx")
+                && bpeVocabularyPath.hasSuffix(".vocab")
+                && capabilities.hotwordMode == .boundedPhraseList
+        case .sherpaOnnxOnlineParaformer:
+            kindSpecificRuntimeChecks =
+                capabilities.hotwordMode == .unsupported
+        }
         guard Set(runtimePaths).count == runtimePaths.count,
               Set(runtimePaths).isDisjoint(with: Set([
                   license.licensePath,
@@ -1300,14 +1356,12 @@ public struct VoiceASRArtifactManifest: Equatable, Sendable {
               runtimePaths.allSatisfy(seen.contains),
               runtime.encoderPath.hasSuffix(".onnx"),
               runtime.decoderPath.hasSuffix(".onnx"),
-              runtime.joinerPath.hasSuffix(".onnx"),
               runtime.tokensPath.hasSuffix(".txt"),
-              runtime.bpeVocabularyPath.hasSuffix(".vocab"),
               capabilities.streaming,
               capabilities.partialResults,
               capabilities.endpointDetection,
-              capabilities.hotwordMode == .boundedPhraseList,
-              capabilities.maximumAlternatives == 1
+              capabilities.maximumAlternatives == 1,
+              kindSpecificRuntimeChecks
         else {
             throw VoiceASRArtifactError.invalidField("runtime")
         }
