@@ -544,3 +544,132 @@ def test_rejects_a_multiply_linked_archive(
         )
 
     assert list(staging_root.iterdir()) == []
+
+
+def test_frozen_cohort_registry_resolves_known_names_only() -> None:
+    zipformer = voice_artifact_intake.frozen_cohort("zipformer-bilingual-zh-en")
+    assert zipformer.archive_url == voice_artifact_intake.FROZEN_ARCHIVE_URL
+    assert zipformer.archive_bytes == voice_artifact_intake.FROZEN_ARCHIVE_BYTES
+    assert zipformer.archive_sha256 == voice_artifact_intake.FROZEN_ARCHIVE_SHA256
+    assert zipformer.archive_root == voice_artifact_intake.FROZEN_ARCHIVE_ROOT
+    assert zipformer.member_targets == voice_artifact_intake.FROZEN_MEMBER_TARGETS
+
+    paraformer = voice_artifact_intake.frozen_cohort(
+        "paraformer-bilingual-zh-en"
+    )
+    assert isinstance(paraformer, voice_artifact_intake.FrozenCohort)
+
+    with pytest.raises(ValueError):
+        voice_artifact_intake.frozen_cohort("unknown-cohort")
+
+
+def _synthetic_paraformer_cohort(
+    archive_path: Path,
+) -> "voice_artifact_intake.FrozenCohort":
+    root = "sherpa-onnx-streaming-paraformer-bilingual-zh-en-test"
+    return voice_artifact_intake.FrozenCohort(
+        archive_url="https://example.invalid/paraformer.tar.bz2",
+        archive_bytes=archive_path.stat().st_size,
+        archive_sha256=hashlib.sha256(archive_path.read_bytes()).hexdigest(),
+        archive_root=root,
+        member_targets=(
+            (f"{root}/encoder.onnx", "model/encoder.onnx", 1024 * 1024),
+            (f"{root}/decoder.onnx", "model/decoder.onnx", 1024 * 1024),
+            (f"{root}/tokens.txt", "model/tokens.txt", 64 * 1024),
+        ),
+    )
+
+
+def _write_paraformer_archive(
+    path: Path,
+    payloads: dict[str, bytes],
+) -> None:
+    root = "sherpa-onnx-streaming-paraformer-bilingual-zh-en-test"
+    with tarfile.open(path, mode="w:bz2") as archive:
+        root_member = tarfile.TarInfo(root)
+        root_member.type = tarfile.DIRTYPE
+        root_member.mode = 0o755
+        archive.addfile(root_member)
+        for name, payload in payloads.items():
+            member = tarfile.TarInfo(name)
+            member.size = len(payload)
+            member.mode = 0o644
+            archive.addfile(member, io.BytesIO(payload))
+    path.chmod(0o600)
+
+
+PARAFORMER_PAYLOADS = {
+    "sherpa-onnx-streaming-paraformer-bilingual-zh-en-test/encoder.onnx": (
+        b"paraformer encoder"
+    ),
+    "sherpa-onnx-streaming-paraformer-bilingual-zh-en-test/decoder.onnx": (
+        b"paraformer decoder"
+    ),
+    "sherpa-onnx-streaming-paraformer-bilingual-zh-en-test/tokens.txt": (
+        b"<blk> 0\n"
+    ),
+}
+
+
+def test_paraformer_member_allowlist_enforced(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive_path = tmp_path / "paraformer.tar.bz2"
+    incomplete = {
+        name: payload
+        for name, payload in PARAFORMER_PAYLOADS.items()
+        if not name.endswith("tokens.txt")
+    }
+    _write_paraformer_archive(archive_path, incomplete)
+    cohort = _synthetic_paraformer_cohort(archive_path)
+    monkeypatch.setattr(
+        voice_artifact_intake,
+        "FROZEN_PARAFORMER_COHORT",
+        cohort,
+    )
+    staging_root = tmp_path / "staging"
+    staging_root.mkdir(mode=0o700)
+    staging_root.chmod(0o700)
+
+    with pytest.raises(voice_artifact_intake.VoiceArtifactIntakeError):
+        voice_artifact_intake.materialize_frozen_voice_evaluation_artifact(
+            archive_path,
+            staging_root,
+            cohort_name="paraformer-bilingual-zh-en",
+        )
+
+    assert list(staging_root.iterdir()) == []
+
+
+def test_tampered_paraformer_archive_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive_path = tmp_path / "paraformer.tar.bz2"
+    _write_paraformer_archive(archive_path, dict(PARAFORMER_PAYLOADS))
+    cohort = _synthetic_paraformer_cohort(archive_path)
+    tampered = voice_artifact_intake.FrozenCohort(
+        archive_url=cohort.archive_url,
+        archive_bytes=cohort.archive_bytes,
+        archive_sha256="0" * 64,
+        archive_root=cohort.archive_root,
+        member_targets=cohort.member_targets,
+    )
+    monkeypatch.setattr(
+        voice_artifact_intake,
+        "FROZEN_PARAFORMER_COHORT",
+        tampered,
+    )
+    staging_root = tmp_path / "staging"
+    staging_root.mkdir(mode=0o700)
+    staging_root.chmod(0o700)
+
+    with pytest.raises(voice_artifact_intake.VoiceArtifactIntakeError):
+        voice_artifact_intake.materialize_frozen_voice_evaluation_artifact(
+            archive_path,
+            staging_root,
+            cohort_name="paraformer-bilingual-zh-en",
+        )
+
+    assert list(staging_root.iterdir()) == []
