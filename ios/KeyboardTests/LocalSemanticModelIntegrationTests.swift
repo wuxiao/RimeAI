@@ -4,11 +4,11 @@ final class LocalSemanticModelIntegrationTests: XCTestCase {
     func testBundledP0ModelLoadsAndMatchesApprovedFixture() throws {
         let bundle = Bundle(for: Self.self)
         let url = bundle.url(
-            forResource: "rimeai-p0-ngram-v1",
+            forResource: "rimeai-p0-ngram-v2",
             withExtension: "bin",
             subdirectory: "SemanticModel"
         ) ?? bundle.url(
-            forResource: "rimeai-p0-ngram-v1",
+            forResource: "rimeai-p0-ngram-v2",
             withExtension: "bin"
         )
         let modelURL = try XCTUnwrap(url, "P0 semantic model is not bundled")
@@ -16,7 +16,7 @@ final class LocalSemanticModelIntegrationTests: XCTestCase {
 
         XCTAssertEqual(
             ranker.artifactID,
-            "p0-char-ngram:36457c630dc8:dataset-f0d46219a334"
+            "p0-char-ngram:05213235f4b7:dataset-f0d46219a334"
         )
         let evaluation = ranker.evaluate(
             context: "请执行这条",

@@ -414,11 +414,11 @@ final class KeyboardViewController: UIInputViewController {
         let bundles = [Bundle(for: Self.self), .main]
         let modelURL = bundles.lazy.compactMap { bundle in
             bundle.url(
-                forResource: "rimeai-p0-ngram-v1",
+                forResource: "rimeai-p0-ngram-v2",
                 withExtension: "bin",
                 subdirectory: "SemanticModel"
             ) ?? bundle.url(
-                forResource: "rimeai-p0-ngram-v1",
+                forResource: "rimeai-p0-ngram-v2",
                 withExtension: "bin"
             )
         }.first
