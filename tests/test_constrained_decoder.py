@@ -12,6 +12,7 @@ from rimeai_runtime.constrained_decoder import (
     PinyinTokenIndex,
     fuzzy_equal,
     fuzzy_segment_ok,
+    gold_path_reachable,
 )
 from rimeai_runtime.pinyin_guard import PinyinGuard
 
@@ -260,7 +261,7 @@ def test_constrained_qwen_decoder_config_is_loadable():
         )
     except SentenceDecoderConfigurationError as error:
         pytest.fail(f"decoder config rejected: {error}")
-    assert decoder.name == "constrained-qwen-v1"
+    assert decoder.name == "constrained-qwen-v2"
 
 
 _REAL_DICTIONARY = Path(".rimeai/rime/shared/luna_pinyin.dict.yaml")
@@ -293,3 +294,39 @@ def test_real_dictionary_indexes_multi_char_tokens():
     assert index.token_syllables[1] == frozenset({("jin", "tian")})
     assert 0 in index.candidates(("shi", "jie", "hao"))
     assert 1 in index.candidates(("jin", "tian"))
+
+
+def test_gold_path_reachable_exact_readings():
+    assert gold_path_reachable(_index(), "你好", ("ni", "hao"))
+
+
+def test_gold_path_reachable_via_multichar_token_without_single_chars():
+    # 四/季 have no single-character token in the stub vocab; only the
+    # whole-word token 四季 exists, so tiling must go through it.
+    assert gold_path_reachable(_index(), "四季", ("si", "ji"))
+
+
+def test_gold_path_reachable_fuzzy_syllables():
+    assert gold_path_reachable(_index(), "四季", ("shi", "ji"))
+
+
+def test_gold_path_reachable_polyphone_readings():
+    assert gold_path_reachable(_index(), "长", ("zhang",))
+    assert gold_path_reachable(_index(), "长", ("chang",))
+
+
+def test_gold_path_reachable_rejects_reading_mismatch():
+    assert not gold_path_reachable(_index(), "世界", ("ni", "hao"))
+
+
+def test_gold_path_reachable_rejects_length_mismatch():
+    assert not gold_path_reachable(_index(), "四季", ("si",))
+
+
+def test_gold_path_reachable_rejects_unknown_character():
+    assert not gold_path_reachable(_index(), "四喵", ("si", "mi"))
+
+
+def test_gold_path_reachable_rejects_empty_inputs():
+    assert not gold_path_reachable(_index(), "", ())
+    assert not gold_path_reachable(_index(), "你好", ())

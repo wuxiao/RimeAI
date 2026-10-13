@@ -8,7 +8,9 @@
 
 **Tech Stack:** Python（现有 `.venv`，无新依赖）、torch 2.8.0 / transformers 4.39.3（已锁定）、pytest。
 
-**Spec:** 本计划自带完整规格（源于 2026-10-13 会话分析）。参考实现：`tools/qwen_sentence_worker.py`（被替换的 prompt 路线）、`rimeai_runtime/pinyin_guard.py`（拼音一致性）、`rimeai_eval/command_sentence_decoder.py`（协议）、https://github.com/xushengfeng/lime `main.ts`（约束解码参考，架构同源）。
+**Spec:** 本计划自带完整规格（源于 2026-10-13 会话分析）。参考实现：`tools/qwen_sentence_worker.py`（被替换的 prompt 路线）、`rimeai_runtime/pinyin_guard.py`（拼音一致性）、`rimeai_eval/command_sentence_decoder.py`（协议）、https://github.com/xushengfeng/lime `main.ts`（约束解码思想参考）。
+
+> **召回边界（与 lime 的关键差异，2026-10-13 修订）**：`PinyinTokenIndex` 只索引 `PinyinGuard.pronunciations`（Rime 词典条目）覆盖的 token，**不是** lime 的全词表拼音索引。这带来两个后果：(1) 词典外的字/词永远不可能被解码出来（由 `fuzzy_segment_ok` 终门与词典口径保持一致，是安全性选择）；(2) 本对照赛检验的是「约束解码 vs prompt 生成」，**不检验** lime 的字典外召回优势。若需要量化召回边界损失，见 Task 7 错误归类中的 `dict_recall_miss`（词典外字）与 `index_recall_miss`（词表无 token）桶。
 
 ## Global Constraints
 
@@ -202,8 +204,8 @@ Expected: PASS
 
 - [ ] **Step 5: 手工冒烟（有真模型目录时）**
 
-Run: `RIMEAI_QWEN_MODEL_DIR=.rimeai/models/qwen2.5-0.5b-instruct RIMEAI_QWEN_DEVICE=cpu RIMEAI_RIME_DICTIONARY=.rimeai/rime/shared/luna_pinyin.dict.yaml bash -c 'echo "{\"schema_version\":1,\"task\":\"generate_sentence\",\"request_id\":\"smoke\",\"context\":\"\",\"pinyin\":\"ni hao shi jie\",\"domain\":\"general\",\"candidates\":[\"你好世界\"],\"max_characters\":30}" | uv run python tools/constrained_qwen_worker.py'`
-Expected: 一行 JSON，`suggestion == "你好世界"`。模型目录路径以 `.rimeai/` 实际布局为准（`find .rimeai -name "*.safetensors"` 定位），目录缺失则跳过本步并在交付说明中注明。
+Run: `RIMEAI_QWEN_MODEL_DIR=.rimeai/models/qwen2.5-0.5b-base-060db64 RIMEAI_QWEN_DEVICE=cpu RIMEAI_RIME_DICTIONARY=.rimeai/rime/shared/luna_pinyin.dict.yaml bash -c 'echo "{\"schema_version\":1,\"task\":\"generate_sentence\",\"request_id\":\"smoke\",\"context\":\"\",\"pinyin\":\"nihaoshijie\",\"domain\":\"general\",\"candidates\":[\"你好世界\"],\"max_characters\":30}" | uv run python tools/constrained_qwen_worker.py'`
+Expected: 一行 JSON，`suggestion == "你好世界"`。注意模型目录是 **base**（`qwen2.5-0.5b-base-060db64`，对应 `models/qwen2.5-0.5b.lock.json`），不是 instruct——与 Global Constraints 的终审裁决一致；实际目录以 `.rimeai/models/` 布局为准（`find .rimeai/models -name "model.safetensors"` 定位），目录缺失则跳过本步并在交付说明中注明。拼音是无分隔连写串（如 `nihaoshijie`），worker 内部用 `guard.segment(candidates[0], pinyin)` 切音节。
 
 - [ ] **Step 6: Commit**
 
@@ -248,37 +250,65 @@ git add script/constrained_qwen_service.sh examples/constrained_qwen_decoder.jso
 git commit -m "feat(eval): constrained qwen decoder service and config"
 ```
 
-### Task 6: 对照基线（constrained-v1 vs syllable-decoder-v3）
+### Task 6: 对照基线（constrained vs syllable-decoder-v3）
+
+> **2026-10-13 执行修订**：基线在执行中经历了 v1→v2 两次裁决（beam 路径 KV 历史错误、裸音节模糊匹配缺陷，见 `docs/baselines/constrained-qwen-v2.json` 的 `history_note`），最终产物为 `constrained-qwen-v2.json`，worker `PROMPT_VERSION = constrained-v2`，解码从贪心升级为 beam width 4。本任务按 v2 口径记录。
 
 **Files:**
-- Create: `docs/baselines/constrained-qwen-v1.json`
+- Create: `docs/baselines/constrained-qwen-v2.json`
 
 **Interfaces:**
 - Consumes: Task 5 的配置；冻结数据集 `.rimeai/datasets/p0-librime-1.17.0-luna-simp.jsonl`（test split，SHA 见 `docs/baselines/macos-local-int8-test-v1.json`）；词典 `.rimeai/rime/shared/luna_pinyin.dict.yaml`。
 
-- [ ] **Step 1: 跑约束解码器**
+**Recording requirements（2026-10-13 修订）**：基线文件必须显式记录解码参数。beam 路径（width、per-path history）直接决定结果；贪心专用启发式参数 `ARGMAX_CONFIDENT = 0.9` 与 `LONG_WORD_FLOOR = 0.5`（源自 lime 手调，未在本基座做过敏感性验证）**只在 `beam_width<=1` 时生效**，worker 实跑 beam width 4 不受其影响——这一点要写进基线文件，避免后人误以为 92.2% 的结果是这两个 magic number 的函数。
 
-Run: `uv run rimeai-eval evaluate-sentence .rimeai/datasets/p0-librime-1.17.0-luna-simp.jsonl --decoder-config examples/constrained_qwen_decoder.json --rime-dictionary .rimeai/rime/shared/luna_pinyin.dict.yaml --split test --details-output /tmp/constrained-v1-details.jsonl`
-Expected: 正常输出准确率与延迟统计；`model_artifact_id` 含 `constrained-v1`。
+- [x] **Step 1: 跑约束解码器**
 
-- [ ] **Step 2: 跑 prompt 基线（同一 split 同一命令，换 `--decoder-config examples/qwen_sentence_decoder.json`，details 落 `/tmp/prompt-v3-details.jsonl`）**
+Run: `uv run --extra neural rimeai-eval evaluate-sentence .rimeai/datasets/p0-librime-1.17.0-luna-simp.jsonl --decoder-config examples/constrained_qwen_decoder.json --rime-dictionary .rimeai/rime/shared/luna_pinyin.dict.yaml --split test`
+Expected: 正常输出准确率与延迟统计；`model_artifact_id` 含 `constrained-v2`。
+
+- [x] **Step 2: 跑 prompt 基线（同一 split 同一命令，换 `--decoder-config examples/qwen_sentence_decoder.json`）**
 
 Expected: 正常完成（此为现有 P0 实验 worker，应直接可跑）。
 
-- [ ] **Step 3: 写基线文件**
+- [x] **Step 3: 写基线文件**
 
-`docs/baselines/constrained-qwen-v1.json` 对照 `macos-local-int8-test-v1.json` 的字段风格：dataset path/sha/split/samples、model artifact_id、准确率、弃权率（details 里 suggestion 为空的比例）、latency p50/p95、与 prompt-v3 的逐项对照结论、reproduce 命令行。
+`docs/baselines/constrained-qwen-v2.json` 对照 `macos-local-int8-test-v1.json` 的字段风格：dataset path/sha/split/samples、model artifact_id、准确率、弃权率、latency p50/p95、与 prompt-v3 的逐项对照结论、reproduce 命令行。
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
-git add docs/baselines/constrained-qwen-v1.json
+git add docs/baselines/constrained-qwen-v2.json
 git commit -m "docs(baselines): constrained-qwen-v1 vs syllable-decoder-v3 bake-off"
 ```
+
+### Task 7: 错误归类（2026-10-13 增补）
+
+> **动机**：Task 6 只有聚合数字（92.2% 准确率、19 个 pinyin_rejection），输赢都无法指导 Phase 2/3 的取舍——不知道错误是「词典召回边界造成」「gold 与键入拼音根本对不上」还是「路径存在但 beam/模型没选对」，就无法判断下一杆该打在 beam、KV 优化还是 SFT 上。
+
+**Files:**
+- Modify: `rimeai_runtime/constrained_decoder.py`（新增纯函数 `gold_path_reachable` + `PinyinTokenIndex.readings_by_text()`，不依赖 torch）
+- Create: `tools/constrained_error_taxonomy.py`
+- Test: `tests/test_constrained_decoder.py`（追加）
+
+**Interfaces:**
+- `PinyinTokenIndex.readings_by_text() -> Dict[str, FrozenSet[Syllables]]`：token 文本 → 读音集合（懒构建缓存），供可达性判定做子串拼覆盖。
+- `gold_path_reachable(index, gold_text, syllables, *, fuzzy=True) -> bool`：gold 能否被索引 token 完整拼出且逐音节（模糊）对上键入音节。索引读音按字组合（每字一音节），所以判定 = 音节数与字数相等 + 逐位置读音可模糊对上 + token 文本可拼覆盖整句。
+- `tools/constrained_error_taxonomy.py`：输入 details JSONL + 词典 + tokenizer 目录，对每个 `applied_hit == false` 样本归类五桶：
+  1. `gate_fuzzy_mismatch`：`status == "fallback-pinyin"`（worker 模糊门放行、eval 端严格门拒收；另计其中 `raw_suggestion == gold_text` 的「被门吃掉的赢面」数）
+  2. `dict_recall_miss`：gold 含词典外字（召回边界直接证据）
+  3. `pinyin_mismatch`：gold 读音与键入拼音（含模糊、缩写）对不上，模型原理上不可能产出
+  4. `index_recall_miss`：拼音对得上，但 gold 文本无法被索引 token 拼覆盖（如词典有读音、词表无对应单字 token）——tokenizer 词表召回边界，**不是**拼音失败（2026-10-13 评审后从 `pinyin_mismatch` 拆出）
+  5. `model_path_miss`：产出路径存在，beam/模型选错——SFT 与 beam 的作用靶
+- 输出 JSON：各桶计数（零计数的桶也显式列出）+ cross-cutting（baseline_hits / fixed / regressions / simplified_equivalent_wins，后者经 `--t2s-table` 的 OpenCC TSCharacters 字级映射计算）+ 每桶至多 8 个样例（id/pinyin/gold/raw_suggestion），结果写回 `docs/baselines/constrained-qwen-v2.json` 的 `error_taxonomy` 字段。
+
+> **Task 7 结果（2026-10-13 已执行，评审修订后数字）**：76 失败 = 61 model_path_miss + 9 gate_fuzzy_mismatch + 6 index_recall_miss + **0 pinyin_mismatch** + **0 dict_recall_miss**。横切发现：33/76 是繁体 gold + 简体等价答案的标签伪影（等效准确率 95.6%，含全部 6 个 index_recall_miss），11/974 是覆盖掉正确字典首选的回退（对照 201 个修复，绝对提升 19.5pp）。详见基线文件 `error_taxonomy` 字段。结论：词典召回边界在本数据集上零损失；剩余真实错误几乎全是模型路径选择——Phase 3 SFT 的作用靶得到量化确认。
 
 ---
 
 ## 后续阶段（不在本计划内，另行立计划）
 
-1. **Phase 2 部署化**：MLX/llama.cpp 4-bit 引擎替换 transformers（延时可进本地交互预算）；beam 宽度 >1；接入 `rimeai_daemon`。
-2. **Phase 3 SFT**：按 cloud decision cache 蒸馏数据做 LoRA（PinyinGPT 配方），Qwen3.5-0.8B/2B/4B 基座对照。
+> **2026-10-13 执行修订**：beam（width 4，per-path KV history）已随 constrained-v2 提前落地；KV 前缀共享是当前最明确的延迟杠杆。
+
+1. **Phase 2 部署化**：MLX/llama.cpp 4-bit 引擎替换 transformers（延时可进本地交互预算）；beam 路径的 KV 前缀共享缓存；接入 `rimeai_daemon`。
+2. **Phase 3 SFT**：按 cloud decision cache 蒸馏数据做 LoRA（PinyinGPT 配方），Qwen3.5-0.8B/2B/4B 基座对照。作用靶由 Task 7 的 `model_path_miss` 桶量化。

@@ -14,6 +14,11 @@
       "model_artifact_id": "qwen2.5-0.5b@060db649:sha256-88c142557820:mps:fp16:constrained-v2",
       "lock": "models/qwen2.5-0.5b.lock.json",
       "decoding": "pinyin-constrained beam (width 4, per-path KV history, fuzzy pairs an/ang en/eng in/ing z/zh c/ch s/sh at syllable level), invariant seed context '。', no prompt, no chat template",
+      "decoder_parameters": {
+        "beam_width": 4,
+        "per_path_kv_history": true,
+        "greedy_only_heuristics": "ARGMAX_CONFIDENT=0.9 / LONG_WORD_FLOOR=0.5 (lime-derived) apply only at beam_width<=1 and are NOT exercised by this measurement"
+      },
       "confidence_semantics": "geometric mean of raw (not mask-renormalized) next-token softmax probabilities; small absolute values that decay with length — comparable only within this route, never against prompt-route confidences",
       "sentence_accuracy": 0.921971,
       "baseline_sentence_accuracy": 0.726899,
@@ -46,7 +51,39 @@
     }
   },
   "history_note": "An earlier constrained-v1 measurement (89.9% accuracy, p50 151ms) was taken with two decoder defects: beam paths scored against wrong KV histories, and final-swap fuzzy matching only applied to bare syllables. Both are fixed in constrained-v2; the v2 numbers above are the designed system. Latency doubled as the price of per-path histories — cross-path KV sharing (prefix-tree cache) is the known optimization path.",
-  "conclusion": "Constrained decoding beats the prompt route decisively at the same model size: 92.2% vs 72.6% sentence accuracy. The prompt route is effectively non-functional on 0.5B for this dataset (910/974 empty suggestions; its accuracy equals the dictionary fallback). The constrained decoder never returns illegal text (mask + worker fuzzy gate); the eval-side exact-pinyin gate still rejects 19 of its outputs, which are precisely fuzzy corrections the harness's stricter matching does not credit. Latency parity is lost: the prompt route prefills once per request while the constrained route re-prefills per diverging beam path (p50 281ms vs 158ms on MPS fp16) — KV-prefix sharing is the next lever.",
+  "error_taxonomy": {
+    "recorded_at": "2026-10-13",
+    "tool": "tools/constrained_error_taxonomy.py",
+    "source": "rerun of reproduce_constrained with --details-output; aggregate metrics identical to the frozen numbers above (974 samples, 0.921971 accuracy, 19 pinyin_rejections). counts/cross_cutting below are the tool's exact output.",
+    "failures": 76,
+    "counts": {
+      "model_path_miss": 61,
+      "gate_fuzzy_mismatch": 9,
+      "index_recall_miss": 6,
+      "pinyin_mismatch": 0,
+      "dict_recall_miss": 0
+    },
+    "gate_lost_wins": 0,
+    "cross_cutting": {
+      "baseline_hits": 708,
+      "fixed": 201,
+      "regressions": 11,
+      "regression_note": "11/974 samples where the dictionary first choice was correct and the decoder overrode it wrongly (1.1%), against 201 samples fixed. Lift: 92.2% - 72.7% = 19.5pp absolute (26.8% relative).",
+      "simplified_equivalent_wins": 33,
+      "t2s_method": "char-level OpenCC TSCharacters (t2s(gold) == applied_text, failures only)",
+      "note": "33 of 76 failures have traditional-character gold with the suggestion being the exact simplified rendering (e.g., 遊客->游客, 國家->国家, 計程車->计程车); byte-exact comparison penalizes them. Includes all 6 index_recall_miss rows. Crediting them gives 43 genuine errors, i.e., 0.9559 effective accuracy."
+    },
+    "findings": [
+      "dict_recall_miss = 0: the dictionary-bounded token index lost nothing on this dataset; lime-style full-vocab recall would not have improved these results. The recall-boundary trade-off is free here.",
+      "index_recall_miss = 6 (攤販, 漸, 蠟燭, 峽, ...): pinyin aligns perfectly, but these traditional characters have no standalone token in the Qwen vocab while their simplified equivalents do — a tokenizer-vocabulary tiling boundary, not a pinyin failure. All 6 fall inside the t2s label artifacts, so the genuine-error count is unaffected. (Earlier recording conflated these into pinyin_mismatch; bucket split 2026-10-13 after code review.)",
+      "pinyin_mismatch = 0: every failure's gold pinyin aligns with the typed pinyin under fuzzy matching.",
+      "model_path_miss dominates the genuine errors: the producing path existed and the beam/model chose another one — this is the SFT / beam-quality lever, not recall.",
+      "43% of failures (33/76) are traditional-gold label artifacts; the eval harness should normalize traditional/simplified before comparing (t2s) or filter trad-gold rows, or Phase 2/3 decisions will read a 92.2% that is really 95.6%.",
+      "The 9 gate_fuzzy_mismatch rows are wrong fuzzy-neighbor words (沙箱->三项, 力行->立新), not lost wins; tightening the worker's fuzzy acceptance to the eval gate's strictness would trade them for empty suggestions."
+    ],
+    "reproduce": "uv run --extra neural rimeai-eval evaluate-sentence .rimeai/datasets/p0-librime-1.17.0-luna-simp.jsonl --decoder-config examples/constrained_qwen_decoder.json --rime-dictionary .rimeai/rime/shared/luna_pinyin.dict.yaml --split test --details-output /tmp/constrained-v2-details.jsonl && curl -sL https://raw.githubusercontent.com/BYVoid/OpenCC/master/data/dictionary/TSCharacters.txt -o /tmp/TSCharacters.txt && uv run --extra neural python tools/constrained_error_taxonomy.py /tmp/constrained-v2-details.jsonl --t2s-table /tmp/TSCharacters.txt"
+  },
+  "conclusion": "Constrained decoding beats the prompt route decisively at the same model size: 92.2% vs 72.6% sentence accuracy (95.6% effective once traditional/simplified label artifacts are credited; 201 samples fixed vs 11 regressed = 19.5pp absolute lift). The prompt route is effectively non-functional on 0.5B for this dataset (910/974 empty suggestions; its accuracy equals the dictionary fallback). The constrained decoder never returns illegal text (mask + worker fuzzy gate); the eval-side exact-pinyin gate still rejects 19 of its outputs — 9 of those rejected suggestions were wrong fuzzy-neighbor words (counted as failures above), the other 10 fell back to a correct dictionary candidate at no accuracy cost. Error taxonomy shows zero dictionary-recall losses and zero pinyin-alignment failures — remaining genuine errors are model path choices (SFT/beam lever). Latency parity is lost: the prompt route prefills once per request while the constrained route re-prefills per diverging beam path (p50 281ms vs 158ms on MPS fp16) — KV-prefix sharing is the next lever.",
   "reproduce_constrained": "uv run --extra neural rimeai-eval evaluate-sentence .rimeai/datasets/p0-librime-1.17.0-luna-simp.jsonl --decoder-config examples/constrained_qwen_decoder.json --rime-dictionary .rimeai/rime/shared/luna_pinyin.dict.yaml --split test",
   "reproduce_prompt_baseline": "uv run --extra neural rimeai-eval evaluate-sentence .rimeai/datasets/p0-librime-1.17.0-luna-simp.jsonl --decoder-config examples/qwen_sentence_decoder.json --rime-dictionary .rimeai/rime/shared/luna_pinyin.dict.yaml --split test"
 }
