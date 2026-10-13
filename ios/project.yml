@@ -38,6 +38,8 @@ targets:
       - path: ../Sources/RimeAIInputCore/RimeAISettingsStore.swift
       - path: ../Sources/RimeAIInputCore/SessionContextStore.swift
       - path: ../Sources/RimeAIInputCore/VoiceDictationKeyRouter.swift
+      - path: ../LICENSE
+        buildPhase: resources
       - path: ThirdPartyLicenses
         type: folder
         buildPhase: resources

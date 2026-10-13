@@ -33,6 +33,7 @@
 		834B8788E228BC8E5166D5AF /* CandidateSelectionTransition.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12B7515B53A6BE3F091BDA75 /* CandidateSelectionTransition.swift */; };
 		8AA6F2B5198DD0B91049DBBD /* KeyboardViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB547FDC85EEE87F199AE5C0 /* KeyboardViewController.swift */; };
 		8EC6730B703411FE2206EE31 /* RimeAIKeyboard.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 32CFB4D89CBF3678704EE31A /* RimeAIKeyboard.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		904016E8298661EA62EE49C9 /* LICENSE in Resources */ = {isa = PBXBuildFile; fileRef = 7D320EC1D0325B1E0CAB7EF9 /* LICENSE */; };
 		9535198E6F559FB24233E541 /* RimeBridgeC.cc in Sources */ = {isa = PBXBuildFile; fileRef = EA5391E955042D9DE660654E /* RimeBridgeC.cc */; };
 		998AB59E79516686F51DEAE1 /* SemanticModel in Resources */ = {isa = PBXBuildFile; fileRef = 4BE72A421A5A59F6F24ECC87 /* SemanticModel */; };
 		A75B3D427059FB4D0617810F /* RimeData in Resources */ = {isa = PBXBuildFile; fileRef = 2E844ACA905A4D402DF2F8B7 /* RimeData */; };
@@ -117,6 +118,7 @@
 		48AC0202340FE574C3962BC2 /* RimeAISettingsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RimeAISettingsStore.swift; sourceTree = "<group>"; };
 		4BE72A421A5A59F6F24ECC87 /* SemanticModel */ = {isa = PBXFileReference; lastKnownFileType = folder; path = SemanticModel; sourceTree = SOURCE_ROOT; };
 		799D19513770D553F55C218E /* LocalSemanticModelIntegrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalSemanticModelIntegrationTests.swift; sourceTree = "<group>"; };
+		7D320EC1D0325B1E0CAB7EF9 /* LICENSE */ = {isa = PBXFileReference; path = LICENSE; sourceTree = "<group>"; };
 		7F1470328C762376AE7332E6 /* SessionContextStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionContextStore.swift; sourceTree = "<group>"; };
 		9876EF2C99B4E9AA70FEACF8 /* RimeAIApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RimeAIApp.swift; sourceTree = "<group>"; };
 		9C6457861959051F08D81A85 /* RimeAI.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = RimeAI.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -234,6 +236,7 @@
 		9FBFED69CE190D01F7CA6982 /* RimeAI */ = {
 			isa = PBXGroup;
 			children = (
+				7D320EC1D0325B1E0CAB7EF9 /* LICENSE */,
 				E760E03B6F15F97B55DAE796 /* Sources */,
 			);
 			name = RimeAI;
@@ -420,6 +423,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				7A5B99929AB3B70F003EE5DB /* Assets.xcassets in Resources */,
+				904016E8298661EA62EE49C9 /* LICENSE in Resources */,
 				14CA52035136A79AD76A593C /* PrivacyInfo.xcprivacy in Resources */,
 				FD9799D42FC0803C1948F168 /* ThirdPartyLicenses in Resources */,
 			);

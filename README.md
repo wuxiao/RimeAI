@@ -163,3 +163,8 @@ PYTHONDONTWRITEBYTECODE=1 python3.11 -m pytest -q -p no:cacheprovider
   模糊音节终门）见
   [docs/superpowers/plans/2026-10-13-pinyin-constrained-decoder.md](docs/superpowers/plans/2026-10-13-pinyin-constrained-decoder.md)。
 - PinyinGPT（拼音辅助 IME 生成模型研究）：LM-002 SFT 蒸馏配方参考。
+
+## 许可证
+
+本项目以 [Apache-2.0](LICENSE) 发布。第三方组件的固定版本、许可证与
+归因见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

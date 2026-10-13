@@ -164,6 +164,7 @@ fi
 codesign "${outer_codesign_arguments[@]}" "${app_bundle}"
 codesign --verify --deep --strict "${app_bundle}"
 for required_resource in \
+  LICENSE \
   THIRD_PARTY_NOTICES.md \
   ATTRIBUTION.md \
   ThirdPartyLicenses/librime-BSD-3-Clause.txt \

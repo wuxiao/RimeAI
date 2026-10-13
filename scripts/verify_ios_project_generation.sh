@@ -46,6 +46,7 @@ mkdir -p \
   "${mirror_ios}/Native/RimeAINative.xcframework"
 
 cp "${project_root}/ios/project.yml" "${mirror_ios}/project.yml"
+cp "${project_root}/LICENSE" "${mirror_root}/LICENSE"
 ios_source_directories=(
   HostApp
   KeyboardExtension

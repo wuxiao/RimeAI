@@ -2,6 +2,7 @@
 name = "rimeai-eval"
 version = "0.1.0"
 description = "Offline evaluation toolkit for RimeAI semantic candidate ranking"
+license = { text = "Apache-2.0" }
 requires-python = ">=3.9"
 dependencies = []
 

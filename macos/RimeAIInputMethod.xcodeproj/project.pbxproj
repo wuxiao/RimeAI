@@ -26,6 +26,7 @@
 		3391ACAEAD45873C0FDC4C7D /* ServiceLifecycleCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 874A3DD4E726FAEE606F0E69 /* ServiceLifecycleCoordinator.swift */; };
 		33E7DAB952C440766B7996B3 /* VoiceDictationXPCTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD234CEFDD5FA9B807E9FB6C /* VoiceDictationXPCTransport.swift */; };
 		37867F5E01F6BB897EC08273 /* PrivacyCenterWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4E932A06228AC16721C6EC9 /* PrivacyCenterWindowController.swift */; };
+		3A2960D3EB0F897A426CCB49 /* LICENSE in Resources */ = {isa = PBXBuildFile; fileRef = B13613AAF975B361BFE2BF3F /* LICENSE */; };
 		3FAB221103EA26163D3CB58B /* AppKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6801A4337F1F00500F50D3E9 /* AppKit.framework */; };
 		4463C801A4450107D442100B /* RimeAIInputController+CompositionIO.swift in Sources */ = {isa = PBXBuildFile; fileRef = 14CC5C1948B067A4B23E749C /* RimeAIInputController+CompositionIO.swift */; };
 		45E313CFAB3A5D76DDB7993E /* VoiceDictationPanelController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5310461FCC412B778653E6EE /* VoiceDictationPanelController.swift */; };
@@ -168,6 +169,7 @@
 		A68167546E5B3EDB4C6DE24F /* MixedCompositionResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MixedCompositionResolver.swift; sourceTree = "<group>"; };
 		A84B8CDEB740E011966B4EA7 /* CloudCredentialStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudCredentialStore.swift; sourceTree = "<group>"; };
 		A894A7809D56255B0BE61F2C /* CompositionState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompositionState.swift; sourceTree = "<group>"; };
+		B13613AAF975B361BFE2BF3F /* LICENSE */ = {isa = PBXFileReference; path = LICENSE; sourceTree = "<group>"; };
 		B1E9654E633AFB80029DE274 /* VoiceHotKeyManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceHotKeyManager.swift; sourceTree = "<group>"; };
 		B26ECA4F5D7758E8799FCACB /* VoiceDictationTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceDictationTransport.swift; sourceTree = "<group>"; };
 		B414312D8A8984B9E159294B /* HistoryStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryStore.swift; sourceTree = "<group>"; };
@@ -355,6 +357,7 @@
 		E0E151AEE7E2F3EC82231AA2 /* RimeAI */ = {
 			isa = PBXGroup;
 			children = (
+				B13613AAF975B361BFE2BF3F /* LICENSE */,
 				8A44619AD1A71BD066460636 /* THIRD_PARTY_NOTICES.md */,
 				68751B804F2D8054BED157D9 /* .rimeai */,
 				9534FE8C5BD310C2CC5F550C /* datasets */,
@@ -542,6 +545,7 @@
 			files = (
 				10B7AAB685823E067883157D /* ATTRIBUTION.md in Resources */,
 				BE867BE096BE9BB41E1EE124 /* InfoPlist.strings in Resources */,
+				3A2960D3EB0F897A426CCB49 /* LICENSE in Resources */,
 				DA99EF8DAC54A7E099D0B213 /* RimeAI.pdf in Resources */,
 				1D8ABE4F27E5D4BE283A28D4 /* RimeAIMenu.pdf in Resources */,
 				087530D11F16D76EF5DC5395 /* THIRD_PARTY_NOTICES.md in Resources */,

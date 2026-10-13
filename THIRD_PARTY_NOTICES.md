@@ -1,5 +1,6 @@
 # Third-Party Notices
 
+RimeAI 本项目以 [Apache-2.0](LICENSE) 发布；本清单只覆盖第三方组件。
 本清单覆盖 RimeAI 当前 macOS/iOS 工程、冻结评测和内部发布制品。构建脚本
 会把适用的许可证文本和数据归因复制进制品；公开预览仍须对最终安装包执行
 依赖扫描和法律审查。

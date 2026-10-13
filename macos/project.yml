@@ -33,6 +33,8 @@ targets:
         buildPhase: resources
       - path: ../THIRD_PARTY_NOTICES.md
         buildPhase: resources
+      - path: ../LICENSE
+        buildPhase: resources
       - path: ../datasets/ATTRIBUTION.md
         buildPhase: resources
       - path: ../ios/ThirdPartyLicenses
