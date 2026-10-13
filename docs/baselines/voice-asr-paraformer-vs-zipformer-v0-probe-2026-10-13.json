@@ -54,7 +54,7 @@
     "process_cold_run_seconds": {
       "zipformer": 30.53,
       "paraformer": 31.87,
-      "note": "eval driver 进程冷启动（真实 native 加载 + 非空热词 probe（zipformer）+ fresh empty probe + 4 段解码）总墙钟；页缓存未清空，非 schema-2 九帧 tracer 冷加载证据。"
+      "note": "eval driver 进程冷启动（真实 native 加载 + 非空热词 probe（zipformer）+ fresh empty probe + 4 段解码）总墙钟；页缓存未清空。九帧 schema-2 tracer 当前无法承载 paraformer：rimeai-performance-control-v2 冻结契约的 engine_contract 将 maximum_hotwords 下限定为 1 且 capabilities 固定含 hotword_snapshot，需协议修订后重跑。"
     }
   },
   "observations_for_decision": [

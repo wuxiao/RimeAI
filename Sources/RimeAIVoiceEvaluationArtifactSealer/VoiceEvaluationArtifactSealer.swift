@@ -28,7 +28,8 @@ public enum VoiceEvaluationArtifactCohort {
 
     /// Frozen from the independently verified archive intake and deterministic
     /// BPE exporter. The production initializer never accepts another cohort.
-    static let frozenPayloads: [VoiceEvaluationArtifactFrozenPayload] = [        .init(
+    static let frozenPayloads: [VoiceEvaluationArtifactFrozenPayload] = [
+        .init(
             path: "licenses/LICENSE.txt",
             bytes: 11_358,
             sha256: "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"

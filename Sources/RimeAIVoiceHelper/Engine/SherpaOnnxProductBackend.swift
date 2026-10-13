@@ -257,10 +257,11 @@ final class SherpaOnnxProductBackendLoader:
                 == .boundedPhraseList
         )
 
-        // Exercise a model-approved non-empty hotword, end-of-input, result
-        // extraction, and a fresh empty stream before this generation is
-        // advertised to the server. The manifest phrase is integrity-bound
-        // metadata, never user text.
+        // For hotword-capable cohorts, exercise a model-approved non-empty
+        // hotword, end-of-input, result extraction, and a fresh empty stream
+        // before this generation is advertised to the server; hotword-less
+        // cohorts run only the fresh empty-stream probe. The manifest phrase
+        // is integrity-bound metadata, never user text.
         do {
             if manifest.capabilities.hotwordMode == .boundedPhraseList {
                 let probeHotwords = Array(
@@ -1957,8 +1958,7 @@ public enum SherpaOnnxAdmittedArtifactVoiceEngineFactory {
                 sourceFactory: sourceFactory,
                 hotwordProvider: hotwordProvider
             )
-        } catch let error as SherpaOnnxProductBackendError {
-            _ = error
+        } catch is SherpaOnnxProductBackendError {
             throw VoiceAdmittedArtifactEngineAssemblyError.backendLoadFailed
         } catch is VoiceProductBackendLoadError {
             throw VoiceAdmittedArtifactEngineAssemblyError.backendLoadFailed
