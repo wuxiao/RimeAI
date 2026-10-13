@@ -472,10 +472,13 @@ final class PrivacyCenterWindowController: NSObject {
         cloudStack.addArrangedSubview(sectionTitle("云端模型增强"))
         cloudStack.addArrangedSubview(
             label(
-                "保存 API Key 即启用：RimeAI 会跨应用、以明文长期保存每次"
-                    + "上屏文本、拼音、应用标识和时间，并把最近文本、检索片段、"
-                    + "当前拼音及候选发送到阿里云。只有 macOS Secure Event Input "
-                    + "会自动阻止记录与上传；本地下方的应用策略不限制云端历史。",
+                "保存 API Key 即启用：RimeAI 会跨应用、以明文在本机长期保存"
+                    + "每次上屏文本、拼音、应用标识和时间；输入时只把当前拼音"
+                    + "和光标前最近文本（最多 120 字）发送到云端模型生成整句"
+                    + "候选，不发送本地候选列表（服务商与端点见下方状态）。"
+                    + "只有 macOS Secure Event Input 会自动阻止记录与上传；"
+                    + "「输入与 AI」中的应用策略仅限制本地功能，不限制云端"
+                    + "记录与上传。",
                 secondary: true
             )
         )
@@ -520,6 +523,14 @@ final class PrivacyCenterWindowController: NSObject {
         apiKeyField.widthAnchor.constraint(
             equalTo: cloudStack.widthAnchor
         ).isActive = true
+        cloudStack.addArrangedSubview(
+            label(
+                "API Key 以明文保存在 ~/.config/rimeai/cloud.env（目录 0700、"
+                    + "文件 0600），不是 Keychain；同账户的其他进程、备份或"
+                    + "同步工具可能读取。",
+                secondary: true
+            )
+        )
         let cloudButtons = NSStackView()
         cloudButtons.orientation = .horizontal
         cloudButtons.spacing = 8
@@ -1820,7 +1831,7 @@ final class PrivacyCenterWindowController: NSObject {
             "cloud_correction_accepted": "云端纠错已采纳",
             "cloud_timeout": "云请求超时",
             "cloud_invalid_result": "云端无效结果已拦截",
-            "cloud_transport_failure": "Qwen 连接失败",
+            "cloud_transport_failure": "云连接失败",
             "continuation_requested": "续写建议已请求",
             "continuation_shown": "续写建议已显示",
             "continuation_accepted": "续写建议已采纳",

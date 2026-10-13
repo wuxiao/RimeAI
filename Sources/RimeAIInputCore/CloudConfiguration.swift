@@ -5,7 +5,7 @@ import Foundation
 /// `CloudCredentialStore.swift` and are never part of settings import/export.
 public enum RimeAICloudConfiguration {
     /// Official Zhipu Coding Plan, direct connection. Must stay byte
-    /// identical to `ENDPOINT` in rimeai_cloud_broker/qwen.py: the broker
+    /// identical to `ENDPOINT` in rimeai_cloud_broker/cloud_model.py: the broker
     /// echoes its endpoint in the hello frame and the client compares
     /// the two strings for handshake compatibility.
     public static let provider = "Zhipu Coding Plan (direct)"

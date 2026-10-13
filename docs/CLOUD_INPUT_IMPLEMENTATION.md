@@ -1,6 +1,6 @@
 # macOS 可选云增强合同
 
-更新日期：2026-10-12
+更新日期：2026-10-13
 状态：`IMPLEMENTED / EXTERNAL VALIDATION PENDING`
 
 本文只维护当前云候选、凭据、历史与隐私合同。全局产品状态见
@@ -8,20 +8,22 @@
 
 ## 1. 产品边界
 
-- 当前上游为本地 Ollama，固定 endpoint `http://localhost:11434`（仅放行
-  loopback http，其余仍强制 https），默认排序模型 `qwen3.5:0.8b`。
-- 文件和类中的 `qwen` 名称是历史遗留，不代表当前模型配置。
-- 云增强默认关闭，只有本机存在有效 API Key 且用户启用后才运行；
-  Ollama 忽略 Bearer 凭据头，凭据合同保持不变。
-- 对话走原生 `/api/chat`：模型每次只返回一个候选，响应顶层直接就是
-  `message.content`（无数组、无 index，截断以 `done_reason` 判定）；
-  请求参数为原生形态（`options` 携带 temperature 与 num_predict，
-  `format: "json"` 约束输出，`think: false` 防止思考型模型把 token
-  预算耗尽在 reasoning 上并返回空 content）。
-- 历史向量检索依赖 OpenAI 兼容层 `/v1/embeddings`
+- 当前上游为智谱官方 Coding Plan 直连，固定 endpoint
+  `https://open.bigmodel.cn/api/coding/paas/v4`（产品决策 2026-10-12，
+  取代此前的本地 Ollama 方案），排序模型 `glm-5.3-flash`。
+- 云增强默认关闭，只有本机存在有效 API Key 且用户启用后才运行；凭据
+  以 Authorization Bearer 头发送给上述 endpoint。
+- 对话走 OpenAI 兼容 `/chat/completions`：单轮交换（system 消息承载
+  不变契约，user 消息承载逐请求数据），响应取 `choices[0].message.content`
+  纯文本；请求带 `temperature: 0`、`max_tokens` 与
+  `thinking: {"type": "disabled"}`（直连 endpoint 不支持
+  reasoning_effort，该开关是唯一有效禁用思考的方式，防止 token 预算
+  耗尽在 reasoning 上返回空 content）；`finish_reason=length` 按本地
+  abstain 处理，不计云错误。
+- 历史向量检索依赖同一 endpoint 的 OpenAI 兼容层 `/v1/embeddings`
   （`text-embedding-v4`，512 维）——embedding 是真批量接口，`index`
-  用于对齐多个输入，保持数组结构。本地 Ollama 未安装 embedding
-  模型时该路径 fail-closed：任务按指数退避重试，检索自动降级为
+  用于对齐多个输入，保持数组结构。后台向量化当前由
+  `EMBEDDING_INDEXING_ENABLED = False` 硬停用，检索自动降级为
   FTS，不影响输入。
 - 云端唯一的推理决策是 generate（整句生成）或 abstain。整句拼音
   约束是单一策略（设计变更 2026-10-13：三档约束移除，仅保留原
@@ -37,11 +39,13 @@
   分隔符按序复现、recent_context 尾部复读检查（与
   continuation 策略镜像）。未协商 `text-generation` 能力的旧客户端
   仍 fail-closed 降级 abstain。
-- generate 路径的 prompt 不携带候选池：模型直接根据拼音、recent
-  context 与历史 snippet 推导整句；生成文本恰与某候选相同视为真实
+- generate 路径的 prompt 不携带候选池：模型直接根据拼音与 recent
+  context 推导整句（segments 时连同各段 separator/committed_text
+  一次往返）；生成文本恰与某候选相同视为真实
   的一致意见，保持 generate 由客户端可见去重。
-- 模型契约是纯内容输出（`{"text": "句子或 null"}`）：text 为空或
-  null 是模型放弃组句 → abstain；结构门（长度、可打印、分隔符、
+- 模型契约是纯文本输出（content 即句子，空/纯空白表示模型放弃组句）：
+  大括号包裹的内容会宽容解包（模型违约回显 JSON 字面量时按 abstain
+  而非上屏 JSON）；结构门（长度、可打印、分隔符、
   复读）失败 → abstain；通过 → generate（confidence 恒为 1.0，
   reason 恒为 typo_match）。
 - Rime 和本地 daemon 不依赖云端；任何云错误都回退既有本地结果。
@@ -66,8 +70,9 @@ generation 和绝对 deadline。输入法构建历史的耗时也计入 30s 墙�
 ## 3. 进程边界
 
 - 输入法通过 owner-only UDS 与 `rimeai-cloud-broker` 通信。
-- broker 是唯一允许访问模型 endpoint 的 RimeAI 进程；本地 Ollama
-  仅放行 `http://localhost:11434/v1`，其他 endpoint 仍强制 https。
+- broker 是唯一允许访问模型 endpoint 的 RimeAI 进程；仅放行固定的
+  https 直连 endpoint，loopback `http://localhost:11434/v1` 为仅有
+  例外。
 - 本地 `rimeai-daemon` 继续拒绝 `AF_INET`/`AF_INET6`。
 - UDS 和 0600 文件只隔离其他本地用户，不抵御 hostile same-UID 进程。
 

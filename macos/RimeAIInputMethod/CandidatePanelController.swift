@@ -132,9 +132,9 @@ final class CandidatePanelController: NSObject {
         if case let .candidate(text, _, _) = semanticPresentation {
             switch suggestionSource {
             case .cloudExact:
-                semanticTitle = "☁︎ Qwen 建议：\(text)"
+                semanticTitle = "☁︎ 云端建议：\(text)"
             case .cloudFuzzy:
-                semanticTitle = "☁︎ Qwen 纠错：\(text)"
+                semanticTitle = "☁︎ 云端纠错：\(text)"
             case .cloudGenerated:
                 semanticTitle = "☁︎ LLM 生成：\(text)"
             case .continuation:
@@ -171,11 +171,11 @@ final class CandidatePanelController: NSObject {
             ? (semanticPresentation.isMixedCompositionCandidate
                 ? "Tab 接受中英混输候选"
                 : suggestionSource == .cloudFuzzy
-                ? "Tab 接受 Qwen 纠错候选"
+                ? "Tab 接受云端纠错候选"
                 : suggestionSource == .cloudGenerated
                     ? "Tab 接受 LLM 生成整句"
                     : suggestionSource == .cloudExact
-                        ? "Tab 接受 Qwen 语义候选"
+                        ? "Tab 接受云端语义候选"
                         : suggestionSource == .phraseBook
                             ? "Tab 接受个人短语候选"
                             : "Tab 接受本地语义候选")

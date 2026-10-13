@@ -1,7 +1,9 @@
 import RimeAIInputCore
 
 /// 默认引擎是诚实的不可用骨架：不访问麦克风、不触发 TCC，也不伪造
-/// 识别能力。每次请求都明确返回 `mic_unavailable`。
+/// 识别能力。引擎被直接启动时明确失败 `mic_unavailable`；经协议
+/// 服务端时其 ready 能力为空，start 会在能力门被 invalid_request
+/// 拒绝，到不了引擎。
 public struct UnavailableVoiceEngine: VoiceDictationEngine {
     public static let adapterDescriptor = VoiceEngineDescriptor.unavailable(
         adapterID: "unavailable-stub",

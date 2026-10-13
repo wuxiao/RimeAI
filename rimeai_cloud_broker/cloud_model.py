@@ -132,7 +132,7 @@ def _debug_enabled() -> bool:
         return False
 
 
-class QwenBrokerError(RuntimeError):
+class CloudBrokerError(RuntimeError):
     pass
 
 
@@ -143,13 +143,13 @@ def _first_json_object(content: str) -> Any:
     the whole decision."""
     start = content.find("{")
     if start < 0:
-        raise QwenBrokerError(
-            "Qwen returned invalid structured output (no JSON object)"
+        raise CloudBrokerError(
+            "cloud returned invalid structured output (no JSON object)"
         )
     try:
         value, _ = json.JSONDecoder().raw_decode(content[start:])
     except json.JSONDecodeError as exc:
-        raise QwenBrokerError("Qwen returned invalid structured output") from exc
+        raise CloudBrokerError("cloud returned invalid structured output") from exc
     return value
 
 
@@ -161,16 +161,16 @@ def _first_choice(response: dict[str, Any]) -> dict[str, Any]:
         or not choices
         or not isinstance(choices[0], dict)
     ):
-        raise QwenBrokerError("Qwen returned invalid structured output")
+        raise CloudBrokerError("cloud returned invalid structured output")
     return choices[0]
 
 
 class _RejectRedirects(request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        raise QwenBrokerError("Qwen endpoint redirect was refused")
+        raise CloudBrokerError("cloud endpoint redirect was refused")
 
 
-class QwenCandidateRanker:
+class CloudModelClient:
     def __init__(
         self,
         *,
@@ -178,7 +178,7 @@ class QwenCandidateRanker:
         endpoint: str = ENDPOINT,
     ) -> None:
         if endpoint.rstrip("/") != ENDPOINT:
-            raise ValueError("the Qwen endpoint is fixed by the product contract")
+            raise ValueError("the cloud endpoint is fixed by the product contract")
         self._api_key_loader = api_key_loader
         self._api_key: str | None = None
         self._api_key_lock = Lock()
@@ -196,7 +196,7 @@ class QwenCandidateRanker:
         started = monotonic()
         model_id = cloud_request["model_id"]
         if model_id not in ALLOWED_MODELS:
-            raise QwenBrokerError("model is not in the frozen allowlist")
+            raise CloudBrokerError("model is not in the frozen allowlist")
         # Generation is the only inference contract: the model composes
         # from pinyin and context, and local synthesis applies structural
         # gates only (product decision 2026-10-12; single-policy follow-up
@@ -306,7 +306,7 @@ class QwenCandidateRanker:
             - 0.025
         )
         if remaining < 0.05:
-            raise QwenBrokerError("cloud deadline expired before network send")
+            raise CloudBrokerError("cloud deadline expired before network send")
         response = self._post_json(
             "/chat/completions",
             payload,
@@ -317,9 +317,9 @@ class QwenCandidateRanker:
         try:
             content = choice["message"]["content"]
         except (KeyError, TypeError) as exc:
-            raise QwenBrokerError("Qwen returned invalid structured output") from exc
+            raise CloudBrokerError("cloud returned invalid structured output") from exc
         if not isinstance(content, str):
-            raise QwenBrokerError("Qwen returned invalid structured output")
+            raise CloudBrokerError("cloud returned invalid structured output")
         if choice.get("finish_reason") == "length":
             # Runaway output truncated at max_tokens: not a service error,
             # just no usable composition. Abstain locally instead of burning
@@ -338,7 +338,7 @@ class QwenCandidateRanker:
             # mangling the output — abstain rather than echo JSON.
             try:
                 unwrapped = _first_json_object(text)
-            except QwenBrokerError:
+            except CloudBrokerError:
                 return _abstain()
             if not (
                 isinstance(unwrapped, dict)
@@ -367,7 +367,7 @@ class QwenCandidateRanker:
         started = monotonic()
         model_id = cloud_request["model_id"]
         if model_id not in CONTINUATION_ALLOWED_MODELS:
-            raise QwenBrokerError(
+            raise CloudBrokerError(
                 "model is not in the continuation allowlist"
             )
         context = cloud_request["recent_context"]
@@ -410,7 +410,7 @@ class QwenCandidateRanker:
             - 0.025
         )
         if remaining < 0.05:
-            raise QwenBrokerError("cloud deadline expired before network send")
+            raise CloudBrokerError("cloud deadline expired before network send")
         response = self._post_json(
             "/chat/completions",
             payload,
@@ -421,10 +421,10 @@ class QwenCandidateRanker:
         try:
             content = choice["message"]["content"]
         except (KeyError, TypeError) as exc:
-            raise QwenBrokerError("Qwen returned invalid structured output") from exc
+            raise CloudBrokerError("cloud returned invalid structured output") from exc
         try:
             decision = _first_json_object(content)
-        except QwenBrokerError:
+        except CloudBrokerError:
             if choice.get("finish_reason") == "length":
                 # Same runaway-output rule as rank(): a truncated echo is
                 # "no suggestion", not a service error.
@@ -438,7 +438,7 @@ class QwenCandidateRanker:
             not isinstance(value, str) or len(value.encode()) > 16_384
             for value in bounded
         ):
-            raise QwenBrokerError("embedding input is invalid")
+            raise CloudBrokerError("embedding input is invalid")
         response = self._post_json(
             "/embeddings",
             {
@@ -454,7 +454,7 @@ class QwenCandidateRanker:
             ordered = sorted(response["data"], key=lambda item: item["index"])
             vectors = [item["embedding"] for item in ordered]
         except (KeyError, TypeError) as exc:
-            raise QwenBrokerError("embedding response is invalid") from exc
+            raise CloudBrokerError("embedding response is invalid") from exc
         if len(vectors) != len(bounded) or any(
             not isinstance(vector, list)
             or len(vector) != 512
@@ -466,7 +466,7 @@ class QwenCandidateRanker:
             )
             for vector in vectors
         ):
-            raise QwenBrokerError("embedding dimensions are invalid")
+            raise CloudBrokerError("embedding dimensions are invalid")
         return [[float(value) for value in vector] for vector in vectors]
 
     def _synthesize_generation(
@@ -490,7 +490,7 @@ class QwenCandidateRanker:
         against verbatim context replays.
         """
         if not isinstance(decision, dict):
-            raise QwenBrokerError("Qwen decision is not an object")
+            raise CloudBrokerError("cloud decision is not an object")
         text = decision.get("text")
         # Empty text is the model declining to compose; the decision
         # dict here is an internal shape (the wire response never
@@ -498,7 +498,7 @@ class QwenCandidateRanker:
         if text is None:
             return _abstain()
         if not isinstance(text, str):
-            raise QwenBrokerError("Qwen generated sentence is invalid")
+            raise CloudBrokerError("cloud generated sentence is invalid")
         text = text.strip()
         if not text:
             return _abstain()
@@ -533,7 +533,7 @@ class QwenCandidateRanker:
         context: str,
     ) -> dict[str, Any]:
         if not isinstance(decision, dict):
-            raise QwenBrokerError("Qwen decision is not an object")
+            raise CloudBrokerError("cloud decision is not an object")
         action = decision.get("decision")
         text = decision.get("generated_text")
         if action is None:
@@ -541,7 +541,7 @@ class QwenCandidateRanker:
             # generated_text alone decides generate vs abstain.
             action = "generate" if isinstance(text, str) and text else "abstain"
         if action not in {"generate", "abstain"}:
-            raise QwenBrokerError("Qwen continuation decision is unsupported")
+            raise CloudBrokerError("cloud continuation decision is unsupported")
         raw_reason = decision.get("reason")
         if isinstance(raw_reason, str) and raw_reason in {
             "context_match",
@@ -566,7 +566,7 @@ class QwenCandidateRanker:
             or not math.isfinite(confidence)
             or not 0 <= confidence <= 1
         ):
-            raise QwenBrokerError("Qwen continuation is invalid")
+            raise CloudBrokerError("cloud continuation is invalid")
         # Validation failures degrade to abstain with a diagnostic reason
         # instead of raising: the client treats abstain as "no suggestion"
         # and a crash would only burn the cooldown counter.
@@ -631,7 +631,7 @@ class QwenCandidateRanker:
         ).encode("utf-8")
         url = self._endpoint + path
         if not url.startswith("https://") and self._endpoint != LOCAL_ENDPOINT:
-            raise QwenBrokerError("cloud requests must stay on https")
+            raise CloudBrokerError("cloud requests must stay on https")
         if _debug_enabled():
             sys.stderr.write(
                 f"[cloud-debug] -> {path} "
@@ -655,15 +655,15 @@ class QwenCandidateRanker:
             with opener.open(cloud_request, timeout=timeout) as response:
                 body = response.read(1_048_577)
         except (error.URLError, TimeoutError, OSError) as exc:
-            raise QwenBrokerError("Qwen request failed") from exc
+            raise CloudBrokerError("cloud request failed") from exc
         if len(body) > 1_048_576:
-            raise QwenBrokerError("Qwen response is too large")
+            raise CloudBrokerError("cloud response is too large")
         try:
             value = json.loads(body)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise QwenBrokerError("Qwen response is not JSON") from exc
+            raise CloudBrokerError("cloud response is not JSON") from exc
         if not isinstance(value, dict):
-            raise QwenBrokerError("Qwen response is not an object")
+            raise CloudBrokerError("cloud response is not an object")
         if _debug_enabled():
             sys.stderr.write(
                 f"[cloud-debug] <- {path} "
@@ -679,7 +679,7 @@ class QwenCandidateRanker:
                 or not supplied
                 or len(supplied.encode()) > 512
             ):
-                raise QwenBrokerError("cloud credential is unavailable")
+                raise CloudBrokerError("cloud credential is unavailable")
             with self._api_key_lock:
                 self._api_key = supplied
             return supplied
@@ -694,5 +694,5 @@ class QwenCandidateRanker:
                 with self._api_key_lock:
                     self._api_key = value
         if not isinstance(value, str) or not value or len(value.encode()) > 512:
-            raise QwenBrokerError("cloud credential is unavailable")
+            raise CloudBrokerError("cloud credential is unavailable")
         return value

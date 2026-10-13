@@ -37,7 +37,7 @@ from .history_index import (
     EMBEDDING_INDEXING_ENABLED,
     HistoryEmbeddingIndexer,
 )
-from .qwen import (
+from .cloud_model import (
     ALLOWED_MODELS,
     CONTINUATION_ALLOWED_MODELS,
     ENDPOINT,

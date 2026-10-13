@@ -446,7 +446,7 @@ class CloudProfileSummarizer:
                 "model": self._model_id,
                 "messages": messages,
                 # OpenAI-compatible /chat/completions shape, same as
-                # qwen.py; thinking.type=disabled keeps GLM 5.3 from
+                # cloud_model.py; thinking.type=disabled keeps GLM 5.3 from
                 # burning the budget on reasoning.
                 "temperature": 0.2,
                 "max_tokens": 800,

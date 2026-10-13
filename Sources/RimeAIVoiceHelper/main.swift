@@ -7,8 +7,10 @@ import RimeAIVoiceHelperEngine
 /// 并显式使用私有 UDS；Release 引擎只由签名 bundle 内的严格 policy
 /// 选择，且只接受固定 launchd Mach service 并进行双向签名与当前用户
 /// 校验，认证或 policy 校验失败时绝不降级：
-/// - unavailable：诚实骨架，任何听写请求显式返回
-///   mic_unavailable，不假装能识别。
+/// - unavailable：诚实骨架，不访问麦克风、不触发 TCC。引擎被直接
+///   启动时显式失败 mic_unavailable；经协议服务端时，ready 能力为空，
+///   兼容客户端不会发送 start，越权 start 在能力门被 invalid_request
+///   拒绝，不假装能识别。
 /// - apple-speech：Apple Speech on-device（SFSpeechRecognizer +
 ///   AVAudioEngine）。识别路径需要语音与麦克风 TCC 授权，授权/设备
 ///   不可用经协议显式报错；识别质量门尚未真机验证，见

@@ -9,10 +9,10 @@ import typing
 
 import pytest
 
-from rimeai_cloud_broker import qwen as qwen_module
-from rimeai_cloud_broker.qwen import (
-    QwenBrokerError,
-    QwenCandidateRanker,
+from rimeai_cloud_broker import cloud_model as cloud_model_module
+from rimeai_cloud_broker.cloud_model import (
+    CloudBrokerError,
+    CloudModelClient,
     continuation_text_allows,
 )
 from rimeai_cloud_broker.server import (
@@ -66,7 +66,7 @@ def _request() -> dict:
     }
 
 
-class StubQwenRanker(QwenCandidateRanker):
+class StubCloudModelClient(CloudModelClient):
     def __init__(self, response: dict):
         super().__init__(api_key_loader=lambda: "secret")
         self.response = response
@@ -95,7 +95,7 @@ def test_lenient_unwrap_still_reads_a_model_that_answers_json():
     # 纯文本输出合同（2026-10-12）：prompt 只要求直接输出句子。若模型
     # 无视指令仍回答 {"text": ...}，宽松解包取出内层 text，而不是把
     # JSON 字面量当成句子上屏；候选池不进 prompt，凭据也不进 prompt。
-    class JsonAnsweringStub(StubQwenRanker):
+    class JsonAnsweringStub(StubCloudModelClient):
         def _post_json(self, path, payload, *, timeout, api_key=None):
             self.payload = payload
             return {
@@ -158,12 +158,12 @@ def test_candidates_and_pool_hash_are_optional_and_ignored():
 
 
 def test_production_ranker_never_falls_back_to_an_interactive_keychain_tool():
-    ranker = QwenCandidateRanker()
-    with pytest.raises(QwenBrokerError, match="credential is unavailable"):
+    ranker = CloudModelClient()
+    with pytest.raises(CloudBrokerError, match="credential is unavailable"):
         ranker.embed_texts(["不应触发钥匙串授权界面"])
 
 
-class _CountingRanker(QwenCandidateRanker):
+class _CountingRanker(CloudModelClient):
     def __init__(self, response: dict):
         super().__init__(api_key_loader=lambda: "secret")
         self.response = response
@@ -357,12 +357,12 @@ def test_slow_keychain_lookup_cannot_start_a_late_network_request():
         time.sleep(0.79)
         return "secret"
 
-    ranker = StubQwenRanker({"text": None})
+    ranker = StubCloudModelClient({"text": None})
     ranker._api_key_loader = slow_key_loader
 
     cloud_request = validate_request(_request())
     cloud_request.pop("api_key")
-    with pytest.raises(QwenBrokerError, match="deadline expired"):
+    with pytest.raises(CloudBrokerError, match="deadline expired"):
         ranker.rank(cloud_request)
     assert ranker.payload is None
 
@@ -428,7 +428,7 @@ def test_cloud_socket_is_private_and_echoes_all_identity_fields():
     asyncio.run(scenario())
 
 
-def test_interactive_qwen_calls_are_serialized_after_cancellation():
+def test_interactive_cloud_calls_are_serialized_after_cancellation():
     class SerialProbeRanker:
         def __init__(self):
             self.lock = threading.Lock()
@@ -501,7 +501,7 @@ def test_interactive_qwen_calls_are_serialized_after_cancellation():
 # --- text generation (LLM-composed sentences) ---
 
 
-class StubGenerateRanker(QwenCandidateRanker):
+class StubGenerateRanker(CloudModelClient):
     def __init__(self, response: dict):
         super().__init__(api_key_loader=lambda: "secret")
         self.response = response
@@ -720,7 +720,7 @@ def test_generate_ignores_an_in_pool_candidate_id_attachment():
 def test_decision_survives_trailing_noise_after_the_json_object():
     # 纯文本合同下的防御：模型无视指令回 JSON 且在对象后追加碎片时，
     # 宽松解包只取第一个对象，后续噪声不进句子。
-    class NoisyStub(StubQwenRanker):
+    class NoisyStub(StubCloudModelClient):
         def _post_json(self, path, payload, *, timeout, api_key=None):
             self.payload = payload
             return {
@@ -751,7 +751,7 @@ def test_debug_flag_logs_request_and_response_without_credentials(
     # 显式诊断开关：标记文件存在时把完整 prompt/响应写入 broker 日志，
     # 凭据（Authorization 头）永不落盘；标记移除后恢复静默。
     flag = tmp_path / "cloud-debug"
-    monkeypatch.setattr(qwen_module, "DEBUG_FLAG", flag)
+    monkeypatch.setattr(cloud_model_module, "DEBUG_FLAG", flag)
 
     class FakeResponse:
         def read(self, limit=-1):
@@ -768,10 +768,10 @@ def test_debug_flag_logs_request_and_response_without_credentials(
             return FakeResponse()
 
     monkeypatch.setattr(
-        qwen_module.request, "build_opener", lambda *a, **k: FakeOpener()
+        cloud_model_module.request, "build_opener", lambda *a, **k: FakeOpener()
     )
 
-    ranker = QwenCandidateRanker(api_key_loader=lambda: "secret")
+    ranker = CloudModelClient(api_key_loader=lambda: "secret")
 
     flag.touch()
     ranker._post_json(
@@ -836,7 +836,7 @@ def test_generation_matching_the_top_pool_candidate_stays_generate():
 def test_generation_with_non_string_text_is_rejected():
     ranker = StubGenerateRanker({"text": 42})
 
-    with pytest.raises(QwenBrokerError, match="invalid"):
+    with pytest.raises(CloudBrokerError, match="invalid"):
         ranker.rank(validate_request(_generate_request()))
 
 
@@ -1350,7 +1350,7 @@ def test_continuation_capability_absent_abstains():
 
 
 def test_continuation_generates_passage_continuation():
-    ranker = StubQwenRanker(
+    ranker = StubCloudModelClient(
         {
             "decision": "generate",
             "generated_text": "疑是地上霜",
@@ -1382,7 +1382,7 @@ def test_continuation_generates_passage_continuation():
 def test_continuation_decisionless_contract_accepted():
     # 输出契约下模型只回 {"generated_text": ..., "confidence": ...}，
     # 不带 decision 字段：validator 按 generated_text 推断。
-    ranker = StubQwenRanker(
+    ranker = StubCloudModelClient(
         {"generated_text": "疑是地上霜", "confidence": 0.95}
     )
     result = ranker.rank_continuation(
@@ -1395,7 +1395,7 @@ def test_continuation_decisionless_contract_accepted():
         "reason": "context_match",
     }
 
-    declining = StubQwenRanker({"generated_text": None, "confidence": None})
+    declining = StubCloudModelClient({"generated_text": None, "confidence": None})
     result = declining.rank_continuation(
         validate_continuation_request(_continuation_request())
     )
@@ -1403,7 +1403,7 @@ def test_continuation_decisionless_contract_accepted():
 
 
 def test_continuation_rejects_non_han_text():
-    ranker = StubQwenRanker(
+    ranker = StubCloudModelClient(
         {
             "decision": "generate",
             "generated_text": "疑是地上霜。",
@@ -1425,7 +1425,7 @@ def test_continuation_rejects_non_han_text():
 
 
 def test_continuation_rejects_low_confidence():
-    ranker = StubQwenRanker(
+    ranker = StubCloudModelClient(
         {
             "decision": "generate",
             "generated_text": "疑是地上霜",
@@ -1448,7 +1448,7 @@ def test_continuation_rejects_low_confidence():
 
 def test_continuation_rejects_context_echo():
     # 生成文本 == context 尾部：复读不是续写。
-    ranker = StubQwenRanker(
+    ranker = StubCloudModelClient(
         {
             "decision": "generate",
             "generated_text": "床前明月光",
@@ -1592,7 +1592,7 @@ def test_semantic_consolidator_skipped_when_credentials_unusable(
     credential.parent.mkdir(parents=True)
     profile_directory = tmp_path / "language_profile"
     monkeypatch.setenv("HOME", str(tmp_path))
-    ranker = QwenCandidateRanker(
+    ranker = CloudModelClient(
         api_key_loader=lambda: ""
     )
 

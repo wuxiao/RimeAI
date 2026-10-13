@@ -20,7 +20,7 @@ from .profile import (
     ProfileStore,
     make_semantic_consolidator,
 )
-from .qwen import QwenCandidateRanker
+from .cloud_model import CloudModelClient
 from .server import CloudBrokerServer
 
 CREDENTIAL_KEY = "RIMEAI_CLOUD_API_KEY"
@@ -118,7 +118,7 @@ def _usable_cloud_api_key() -> str:
 
 
 def _semantic_consolidator(
-    ranker: QwenCandidateRanker,
+    ranker: CloudModelClient,
     *,
     enabled: bool,
     profile_directory: Path,
@@ -142,7 +142,7 @@ def _semantic_consolidator(
 
 
 def _maybe_start_consolidation(
-    ranker: QwenCandidateRanker,
+    ranker: CloudModelClient,
     *,
     enabled: bool,
 ) -> IdleConsolidationScheduler | None:
@@ -183,7 +183,7 @@ async def _run(
         / "RimeAI"
         / "History"
     )
-    ranker = QwenCandidateRanker(api_key_loader=_cloud_env_loader)
+    ranker = CloudModelClient(api_key_loader=_cloud_env_loader)
     # The scheduler owns the idle gate for consolidation; creating it
     # before the server lets every accepted inference/continuation
     # request refresh the idle deadline, so rounds never fire mid-typing.

@@ -32,7 +32,7 @@ if [[ ! -f "${template}" ]]; then
   exit 2
 fi
 if ! PYTHONPATH="${project_root}" "${python_path}" -c \
-  'from rimeai_cloud_broker import CloudBrokerServer, QwenCandidateRanker; from rimeai_daemon.consolidation import ConsolidationPipeline' \
+  'from rimeai_cloud_broker import CloudBrokerServer, CloudModelClient; from rimeai_daemon.consolidation import ConsolidationPipeline' \
   >/dev/null 2>&1; then
   print -u2 "error: cloud broker source is incompatible with ${python_path}"
   exit 2

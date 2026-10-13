@@ -440,7 +440,8 @@ public struct CloudInferenceResponse: Codable, Equatable, Sendable {
 /// Request for an open-ended post-commit continuation suggestion: the
 /// broker generates the next phrase purely from already-committed context —
 /// no pinyin, no candidate pool. Mirrored in rimeai_cloud_broker/server.py
-/// (`_validate_continuation_request`) and qwen.py (`continuation_text_allows`).
+/// (`_validate_continuation_request`) and cloud_model.py
+/// (`continuation_text_allows`).
 public struct CloudContinuationRequest: Codable, Sendable {
     public let schemaVersion = 1
     public let type = "continuation"

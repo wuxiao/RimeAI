@@ -1,6 +1,6 @@
-"""Network-capable, candidate-constrained Qwen broker for RimeAI."""
+"""Network-capable cloud model broker for RimeAI."""
 
-from .qwen import QwenCandidateRanker
+from .cloud_model import CloudModelClient
 from .server import CloudBrokerServer
 
-__all__ = ["CloudBrokerServer", "QwenCandidateRanker"]
+__all__ = ["CloudBrokerServer", "CloudModelClient"]

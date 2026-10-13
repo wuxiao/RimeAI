@@ -136,21 +136,22 @@ Release INT8 曾有冻结质量与延迟证据；本次 clean baseline 未执行
 
 ### 5.1 固定合同
 
-- provider：`wwcn New API Gateway`
-- endpoint：`https://newapi.wwcn.fun/v1`
-- ranking model：`glm-5.3`
-- embedding：`text-embedding-v4`，512 维
-- 总候选池：最多 50
-- 总 deadline：800ms
+- provider：`Zhipu Coding Plan (direct)`
+- endpoint：`https://open.bigmodel.cn/api/coding/paas/v4`
+- model：`glm-5.3-flash`（单一冻结白名单）
+- embedding：`text-embedding-v4`，512 维（后台向量化当前硬停用，检索降级 FTS）
+- 请求不携带候选池；云端唯一推理决策是 generate（≤128 字符整句）或 abstain
+- 总 deadline：30s 墙钟（协议上限 30000ms，本地开发调试口径；正式发布口径 8s）
 
-代码中的 `qwen.py` 等名称是历史遗留，不代表当前 provider/model。
+broker 模块为 `rimeai_cloud_broker/cloud_model.py`（中性云增强命名，
+provider 固定为智谱 Coding Plan 直连）。
 
 ### 5.2 数据流与接纳
 
-输入法构建精确候选和有界模糊候选，绑定 pool hash、composition、revision、
-session、history generation 和 deadline，经同 UID UDS 发给 broker。broker
-可以访问固定 HTTPS endpoint，但只能返回 `keep`、`abstain` 或池内 candidate
-ID。客户端再次验证全部绑定后才允许展示。
+输入法绑定 composition、revision、session、history generation 和 deadline，
+经同 UID UDS 发给 broker（不携带候选池）。broker 只能访问固定 HTTPS
+endpoint，只返回 `generate` 或 `abstain`。客户端再次验证全部绑定并过
+结构门后才允许展示，采纳需用户显式确认。
 
 ### 5.3 凭据与历史
 
