@@ -26,7 +26,7 @@ def _sample(
     }
 
 
-def _static() -> StaticCharLM:
+def _model():
     samples = [
         _sample(
             "train-1",
@@ -51,7 +51,11 @@ def _static() -> StaticCharLM:
         ),
     ]
     model, _ = train_ngram_model(samples, dataset_sha256="d" * 64)
-    return StaticCharLM(model)
+    return model
+
+
+def _static() -> StaticCharLM:
+    return StaticCharLM(_model())
 
 
 CONTEXTS = [
@@ -103,44 +107,6 @@ def test_fused_handles_blank_domain():
             ) == via_none.next_char_log_prob(context, character)
 
 
-def test_fused_caching_preserves_outputs():
-    base = _static()
-    user_lm = UserLanguageModel()
-    user_lm.update("chat", ["明令禁止"] * 200)
-    fused = FusedCharLM(base, user_lm, "chat")
-    uncached = FusedCharLM(base, user_lm, "chat")
-
-    for context in CONTEXTS:
-        for character in CHARACTERS:
-            first = fused.next_char_log_prob(context, character)
-            second = fused.next_char_log_prob(context, character)
-            assert first == second
-            assert first == uncached.next_char_log_prob(context, character)
-
-    assert fused.cache_hits > 0
-    assert uncached.cache_hits == 0
-
-
-def test_fused_cache_survives_long_contexts_beyond_the_window():
-    # Two contexts sharing the last `max_context_characters` characters
-    # must still hit the same cache entry: every backoff gram ends at the
-    # scored position, so characters beyond the window cannot affect the
-    # value of either layer.
-    base = _static()
-    user_lm = UserLanguageModel()
-    user_lm.update("chat", ["明令禁止"] * 200)
-    fused = FusedCharLM(base, user_lm, "chat")
-
-    window = "请执行这条明令" * 6
-    for prefix in ("甲", "乙乙"):
-        context = prefix + window
-        for character in CHARACTERS:
-            first = fused.next_char_log_prob(context, character)
-            again = fused.next_char_log_prob(context, character)
-            assert first == again
-    assert fused.cache_hits > 0
-
-
 def test_fused_weights_computed_once(monkeypatch):
     base = _static()
     user_lm = UserLanguageModel()
@@ -162,3 +128,51 @@ def test_fused_weights_computed_once(monkeypatch):
             fused.next_char_log_prob(context, character)
 
     assert calls == ["chat"]
+
+
+def test_fused_cold_start_keeps_beam_margins_bit_for_bit(tmp_path):
+    # Review Focus 1（整句路径）：空用户 LM 下，融合 scorer 参与最终路径
+    # 裁决后 margin/confidence/reason 仍与纯静态逐位一致。
+    from rimeai_runtime.beam_decoder import (
+        BeamDecoderConfig,
+        BeamSentenceDecoder,
+    )
+    from rimeai_runtime.pinyin_guard import PinyinGuard
+
+    model = _model()
+    dictionary = tmp_path / "fixture.dict.yaml"
+    dictionary.write_text(
+        "---\nname: fixture\n...\n"
+        "命\tming\n明\tming\n令\tling\n是\tshi\n时\tshi\n",
+        encoding="utf-8",
+    )
+    decoder = BeamSentenceDecoder(
+        model,
+        PinyinGuard.from_rime_dictionary(dictionary),
+        BeamDecoderConfig(
+            threshold=0.0,
+            beam_width=16,
+            characters_per_syllable=20,
+            language_model_sha256="a" * 64,
+            dictionary_sha256="b" * 64,
+            dataset_sha256="c" * 64,
+        ),
+    )
+    fused = FusedCharLM(StaticCharLM(model), UserLanguageModel(), "chat")
+
+    static_suggestion = decoder.suggest(
+        context="请执行这条",
+        pinyin="mingling",
+        candidates=["明令", "命令"],
+    )
+    fused_suggestion = decoder.suggest(
+        context="请执行这条",
+        pinyin="mingling",
+        candidates=["明令", "命令"],
+        scorer=fused,
+    )
+
+    assert fused_suggestion == static_suggestion
+    assert static_suggestion.text == "命令"
+    assert static_suggestion.margin != 0.0
+

@@ -5,6 +5,10 @@ Interpolates per-character probabilities as
 user LM's shrinkage-capped `user_weights`. Cold-start safe: when no user
 layer carries evidence, scoring delegates to the base scorer exactly, so
 an empty user LM keeps the static beam output bit-for-bit.
+
+Used for final-path adjudication in beam decoding (Ruling 10): a request
+makes only ~2×sentence-length calls, so the scorer stays allocation-free
+and without memoization.
 """
 
 from __future__ import annotations
@@ -14,14 +18,6 @@ import math
 from rimeai_runtime.lm_fusion import CharLMScorer
 
 from .user_lm import DomainCounts, UserLanguageModel
-
-# Per-instance memo bound. One worst-case decode touches at most
-# beam_width(16) × positions(30) × characters_per_syllable(20) ≈ 9600
-# distinct (context, character) keys plus ≤30 baseline-rescore keys, so
-# 16384 (>1.7× that bound) can never fill in a request's lifetime; the
-# cap exists only to bound memory if a scorer is ever reused beyond one
-# request. Entries past the cap are simply not inserted.
-_CACHE_CAP = 16384
 
 
 def _resolve_domain(
@@ -38,15 +34,9 @@ class FusedCharLM:
     Construction is O(1): it wraps the base scorer and the user LM by
     reference and never copies count tables. The interpolation weights
     and the per-domain count stores are resolved once at construction
-    (the domain is fixed per instance); scoring is memoized per
-    (context window, character) because beam search revisits the same
-    prefix/character pairs. The memo is per instance — an instance lives
-    one request, so there is no cross-request staleness — and never
-    changes results: every backoff gram of both layers ends at the
-    scored position, so the value depends only on the last
-    `max_context_characters` context characters, which is exactly the
-    memo key. Candidate character ordering (`max_context_characters`,
-    `character_frequency`) stays static by delegating to the base."""
+    (the domain is fixed per instance). Candidate character ordering
+    (`max_context_characters`, `character_frequency`) stays static by
+    delegating to the base."""
 
     def __init__(
         self,
@@ -72,8 +62,6 @@ class FusedCharLM:
             if domain_weight > 0 and self._domain != user_lm.GLOBAL_DOMAIN
             else None
         )
-        self._cache: dict[tuple[str, str], float] = {}
-        self.cache_hits = 0
 
     @property
     def max_context_characters(self) -> int:
@@ -83,20 +71,6 @@ class FusedCharLM:
         return self._base.character_frequency(character)
 
     def next_char_log_prob(self, context: str, character: str) -> float:
-        key = (
-            context[-self._base.max_context_characters :],
-            character,
-        )
-        cached = self._cache.get(key)
-        if cached is not None:
-            self.cache_hits += 1
-            return cached
-        value = self._score(key[0], character)
-        if len(self._cache) < _CACHE_CAP:
-            self._cache[key] = value
-        return value
-
-    def _score(self, context: str, character: str) -> float:
         global_counts = self._global_counts
         domain_counts = self._domain_counts
         if global_counts is None and domain_counts is None:

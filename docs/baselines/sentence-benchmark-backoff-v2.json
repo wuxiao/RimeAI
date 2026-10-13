@@ -21,17 +21,17 @@
     "baseline_char_accuracy": 0.808179,
     "baseline_sentence_accuracy": 0.726899,
     "decoder_char_accuracy": 0.853268,
-    "decoder_latency_ms": {"p50": 1.298834, "p95": 2.774334},
+    "decoder_latency_ms": {"p50": 0.936542, "p95": 1.710166},
     "decoder_sentence_accuracy": 0.790554,
-    "fused_char_accuracy": 0.840691,
-    "fused_decoder_latency_ms": {"p50": 2.913834, "p95": 5.32925},
-    "fused_sentence_accuracy": 0.774127,
+    "fused_char_accuracy": 0.844541,
+    "fused_decoder_latency_ms": {"p50": 0.961792, "p95": 1.728208},
+    "fused_sentence_accuracy": 0.777207,
     "gold_in_top10_coverage": 0.810062,
     "mean_edit_distance": 0.309035
   },
   "decision_counts": {
     "decoder": {"below_threshold": 157, "no_change": 649, "suggestion": 168},
-    "fused": {"below_threshold": 165, "no_change": 682, "suggestion": 127}
+    "fused": {"below_threshold": 200, "no_change": 649, "suggestion": 125}
   },
   "hyperparameters": {"min_confidence": 0.0},
   "gates": {
@@ -41,16 +41,16 @@
       "char_accuracy": 0.045089
     },
     "fused_minus_decoder": {
-      "sentence_accuracy": -0.016427,
-      "char_accuracy": -0.012577
+      "sentence_accuracy": -0.013347,
+      "char_accuracy": -0.008727
     },
     "latency_budget": {
       "budget_ms": 1.0,
-      "decoder_latency_ms_p95": 2.774334,
-      "fused_decoder_latency_ms_p95": 5.32925,
-      "delta_ms": 2.554916,
-      "verdict": "FAIL",
-      "note": "fused (user-LM CharLMScorer) p95 exceeds decoder-only p95 by 2.554916 ms, over the +1 ms budget; the fused arm also loses accuracy on this frozen corpus, so the user-LM beam fusion arm is not deployable as-is on held-out corpus data"
+      "decoder_latency_ms_p95": 1.710166,
+      "fused_decoder_latency_ms_p95": 1.728208,
+      "delta_ms": 0.018042,
+      "verdict": "PASS",
+      "note": "final-path adjudication (Ruling 10, see fused_final_path_adjudication): beam expansion scores statically and the fused user-LM scorer only adjudicates the final margin, so the fused arm adds 0.018042 ms p95 over decoder-only — inside the +1 ms budget. Earlier FAIL measurements are preserved verbatim in fused_latency_cache and fused_final_path_adjudication.supersedes"
     }
   },
   "fusion_recalibration": {
@@ -107,5 +107,29 @@
       "rate": 0.005,
       "finding": "instrumented re-decode of the same 974 test samples: beam search produces ~99.5% unique (context, character) keys per request (repeats come almost only from the baseline _sequence_score overlap), so memoization alone cannot meet the +1 ms budget; the residual cost is the inherent second backoff walk (user global layer) plus exp/log per scored position. Escalated for an architecture ruling; no beam-width or partial-fusion changes made here."
     }
+  },
+  "fused_final_path_adjudication": {
+    "date": "2026-10-13",
+    "change": "Controller Ruling 10: beam expansion in BeamSentenceDecoder.raw_decode now always scores with the default static scorer; the scorer argument is used only for final-path adjudication — margin = sequence score of the statically-decoded winning path minus the baseline's, both under the provided scorer (scorer=None keeps the static path byte-identical). FusedCharLM's per-instance memo cache was removed: final-path scoring makes only ~2×sentence-length mostly-unique calls per request, and the cache had measured a 0.5% hit rate even on the far denser expansion-time call pattern. The construction-time weight/count hoist stays.",
+    "command": ".venv/bin/python -m rimeai_eval sentence-benchmark .rimeai/datasets/p0-librime-1.17.0-luna-simp.jsonl --language-model .rimeai/models/p0-char-ngram-v2.json.gz --decoder-config .rimeai/models/p0-beam-sentence-v3.json --rime-dictionary .rimeai/rime/shared/luna_pinyin.dict.yaml --user-lm \"$HOME/Library/Application Support/RimeAI/language_profile/user-lm.json.gz\"",
+    "metrics": {
+      "decoder_latency_ms": {"p50": 0.936542, "p95": 1.710166},
+      "fused_decoder_latency_ms": {"p50": 0.961792, "p95": 1.728208},
+      "fused_sentence_accuracy": 0.777207,
+      "fused_char_accuracy": 0.844541,
+      "fused_decision_counts": {"below_threshold": 200, "no_change": 649, "suggestion": 125}
+    },
+    "latency_budget": {
+      "budget_ms": 1.0,
+      "decoder_latency_ms_p95": 1.710166,
+      "fused_decoder_latency_ms_p95": 1.728208,
+      "delta_ms": 0.018042,
+      "verdict": "PASS"
+    },
+    "accuracy_note": "fused_sentence_accuracy 0.777207 vs decoder 0.790554 (−1.335 pt; −1.643 pt with expansion-time fusion, superseded): fusion now shifts only margins/gating, never the decoded path. The residual gap is fused margins pushing 43 static suggestions below the frozen threshold (below_threshold 200 vs 157; suggestion 125 vs 168) — a threshold recalibration question, not a path-quality question. no_change counts are identical (649), confirming the decoded texts are exactly the static arm's.",
+    "supersedes": [
+      {"stage": "expansion-time fusion, uncached (original measurement)", "fused_decoder_latency_ms_p95": 5.32925, "delta_ms": 2.554916, "fused_sentence_accuracy": 0.774127, "verdict": "FAIL"},
+      {"stage": "expansion-time fusion + weight hoist + memo cache (fused_latency_cache)", "fused_decoder_latency_ms_p95": 3.15675, "delta_ms": 1.472459, "fused_sentence_accuracy": 0.774127, "verdict": "FAIL"}
+    ]
   }
 }

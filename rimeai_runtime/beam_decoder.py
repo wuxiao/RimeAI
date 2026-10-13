@@ -147,8 +147,6 @@ class BeamSentenceDecoder:
         candidates: Sequence[str],
         scorer: CharLMScorer | None = None,
     ) -> Tuple[str, float]:
-        if scorer is None:
-            scorer = self._default_scorer
         if not candidates:
             return "", 0.0
         complete = self._first_complete_candidate(
@@ -167,8 +165,12 @@ class BeamSentenceDecoder:
             )
             for candidate in candidates[:10]
         ]
+        # Beam expansion always scores statically; a custom scorer only
+        # adjudicates the final margin (final path vs baseline), never the
+        # beam search itself.
+        static_scorer = self._default_scorer
         beam: List[Tuple[str, float]] = [("", 0.0)]
-        context_suffix = context[-scorer.max_context_characters :]
+        context_suffix = context[-static_scorer.max_context_characters :]
         for position, syllable in enumerate(syllables):
             characters = set(
                 self._characters_by_syllable.get(syllable, [])[
@@ -190,7 +192,7 @@ class BeamSentenceDecoder:
                     prefix + character,
                     score
                     + self._next_score(
-                        scorer,
+                        static_scorer,
                         context_suffix + prefix,
                         character,
                     ),
@@ -201,8 +203,16 @@ class BeamSentenceDecoder:
             expanded.sort(key=lambda item: (-item[1], item[0]))
             beam = expanded[: self.config.beam_width]
         best_text, best_score = beam[0]
+        if scorer is None:
+            baseline_score = self._sequence_score(
+                static_scorer,
+                context,
+                baseline,
+            )
+            return best_text, best_score - baseline_score
+        final_score = self._sequence_score(scorer, context, best_text)
         baseline_score = self._sequence_score(scorer, context, baseline)
-        return best_text, best_score - baseline_score
+        return best_text, final_score - baseline_score
 
     def suggest(
         self,
