@@ -23,6 +23,9 @@ from typing import Any
 ORDERS = (2, 3, 4, 5)
 SMOOTHING_NUMERATOR = 0.1
 SMOOTHING_DENOMINATOR = 1000.0
+# Stupid-backoff discount per order of retreat, mirroring the frozen
+# baseline n-gram ranker so both scorers agree character-for-character.
+BACKOFF_ALPHA = 0.4
 # Bayesian-shrinkage prior in characters: a domain needs roughly this many
 # committed characters before its own weight approaches its cap.
 PRIOR_CHARACTERS = 5000.0
@@ -68,33 +71,54 @@ class DomainCounts:
             self.prefix_counts[order][gram[:-1]] += capped
         self.characters += len(clipped)
 
+    def conditional_prob(
+        self, history: str, character: str
+    ) -> float | None:
+        """Backoff probability of `character` following `history` under
+        this domain's counts; None when the domain has no evidence at
+        all (`characters <= 0`). Applies the same stupid backoff as the
+        frozen baseline ranker: the highest order whose gram and prefix
+        were both observed, discounted by `BACKOFF_ALPHA ** (5 - order)`,
+        else the terminal add-k bigram, which is always finite and
+        positive so scoring never divides by zero."""
+        if self.characters <= 0:
+            return None
+        text = "^" + history + character
+        position = len(text) - 1
+        for order in reversed(ORDERS):
+            start = position - order + 1
+            if start < 0:
+                continue
+            gram = text[start : position + 1]
+            count = self.ngram_counts[order].get(gram, 0)
+            prefix = self.prefix_counts[order].get(gram[:-1], 0)
+            if count > 0 and prefix > 0:
+                return (count / prefix) * BACKOFF_ALPHA ** (5 - order)
+        gram = text[position - 1 : position + 1]
+        count = self.ngram_counts[2].get(gram, 0)
+        prefix = self.prefix_counts[2].get(gram[:-1], 0)
+        return (
+            (count + SMOOTHING_NUMERATOR)
+            / (prefix + SMOOTHING_DENOMINATOR)
+        ) * BACKOFF_ALPHA**3
+
     def mean_log_prob(
         self, context: str, candidate: str
     ) -> float | None:
         """Mean log-probability of `candidate` after `context` under this
-        domain's counts; None when the domain has no evidence at all."""
-        if self.characters <= 0:
+        domain's counts; None when the domain has no evidence at all or
+        the candidate is empty."""
+        if self.characters <= 0 or not candidate:
             return None
-        text = "^" + context + candidate
-        candidate_start = len(text) - len(candidate)
         total = 0.0
-        terms = 0
-        for position in range(candidate_start, len(text)):
-            for order in ORDERS:
-                start = position - order + 1
-                if start < 0:
-                    continue
-                gram = text[start : position + 1]
-                count = self.ngram_counts[order].get(gram, 0)
-                prefix = self.prefix_counts[order].get(gram[:-1], 0)
-                total += math.log(
-                    (count + SMOOTHING_NUMERATOR)
-                    / (prefix + SMOOTHING_DENOMINATOR)
-                )
-                terms += 1
-        if terms == 0:
-            return None
-        return total / terms
+        for index, character in enumerate(candidate):
+            probability = self.conditional_prob(
+                context + candidate[:index], character
+            )
+            if probability is None:
+                return None
+            total += math.log(probability)
+        return total / len(candidate)
 
     def to_payload(self) -> dict[str, Any]:
         return {

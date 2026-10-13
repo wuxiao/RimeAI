@@ -1,12 +1,17 @@
 """Tests for the L2 user character n-gram language model (LP-003)."""
 
+import math
 from pathlib import Path
 
 import pytest
 
 from rimeai_daemon.user_lm import (
+    BACKOFF_ALPHA,
     MAX_USER_WEIGHT,
     PRIOR_CHARACTERS,
+    SMOOTHING_DENOMINATOR,
+    SMOOTHING_NUMERATOR,
+    DomainCounts,
     UserLanguageModel,
     UserLMError,
 )
@@ -114,6 +119,47 @@ def test_load_rejects_foreign_artifacts(tmp_path: Path):
     path.write_bytes(b"not json at all")
     with pytest.raises(UserLMError):
         UserLanguageModel.load(path)
+
+
+def test_conditional_prob_uses_backoff():
+    counts = DomainCounts()
+    counts.observe("世界")
+    # High-order grams bridging the unseen context are absent, so the
+    # seen bigram backs off: MLE_2 * alpha ** (5 - 2).
+    assert counts.conditional_prob("天气好世", "界") == pytest.approx(
+        (1 / 1) * BACKOFF_ALPHA**3
+    )
+    # A fully unseen bigram falls to the terminal add-k branch, which is
+    # always finite and positive.
+    assert counts.conditional_prob("零零", "七") == pytest.approx(
+        SMOOTHING_NUMERATOR / SMOOTHING_DENOMINATOR * BACKOFF_ALPHA**3
+    )
+
+
+def test_conditional_prob_none_when_domain_empty():
+    counts = DomainCounts()
+    assert counts.conditional_prob("上下", "文") is None
+
+
+def test_mean_log_prob_unchanged_semantics():
+    counts = DomainCounts()
+    counts.observe("接口设计文档")
+    context, candidate = "接口", "接口设计"
+    per_position = [
+        counts.conditional_prob(context + candidate[:index], character)
+        for index, character in enumerate(candidate)
+    ]
+    assert all(prob is not None for prob in per_position)
+    expected = sum(math.log(prob) for prob in per_position) / len(candidate)
+    assert counts.mean_log_prob(context, candidate) == pytest.approx(expected)
+
+    # A trained domain with zero relevant counts still yields a finite
+    # smoothed score rather than None.
+    unrelated = counts.mean_log_prob("完全无关", "别的文本")
+    assert unrelated is not None and math.isfinite(unrelated)
+
+    # An empty candidate has no positions to average over.
+    assert counts.mean_log_prob("接口", "") is None
 
 
 def test_mean_log_prob_public_scorer_prefers_domain_then_global():
