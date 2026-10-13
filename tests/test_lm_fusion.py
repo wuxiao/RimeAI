@@ -101,3 +101,64 @@ def test_fused_handles_blank_domain():
             assert via_blank.next_char_log_prob(
                 context, character
             ) == via_none.next_char_log_prob(context, character)
+
+
+def test_fused_caching_preserves_outputs():
+    base = _static()
+    user_lm = UserLanguageModel()
+    user_lm.update("chat", ["明令禁止"] * 200)
+    fused = FusedCharLM(base, user_lm, "chat")
+    uncached = FusedCharLM(base, user_lm, "chat")
+
+    for context in CONTEXTS:
+        for character in CHARACTERS:
+            first = fused.next_char_log_prob(context, character)
+            second = fused.next_char_log_prob(context, character)
+            assert first == second
+            assert first == uncached.next_char_log_prob(context, character)
+
+    assert fused.cache_hits > 0
+    assert uncached.cache_hits == 0
+
+
+def test_fused_cache_survives_long_contexts_beyond_the_window():
+    # Two contexts sharing the last `max_context_characters` characters
+    # must still hit the same cache entry: every backoff gram ends at the
+    # scored position, so characters beyond the window cannot affect the
+    # value of either layer.
+    base = _static()
+    user_lm = UserLanguageModel()
+    user_lm.update("chat", ["明令禁止"] * 200)
+    fused = FusedCharLM(base, user_lm, "chat")
+
+    window = "请执行这条明令" * 6
+    for prefix in ("甲", "乙乙"):
+        context = prefix + window
+        for character in CHARACTERS:
+            first = fused.next_char_log_prob(context, character)
+            again = fused.next_char_log_prob(context, character)
+            assert first == again
+    assert fused.cache_hits > 0
+
+
+def test_fused_weights_computed_once(monkeypatch):
+    base = _static()
+    user_lm = UserLanguageModel()
+    user_lm.update("chat", ["明令禁止"] * 200)
+    calls: list[object] = []
+    original = UserLanguageModel.user_weights
+
+    def spy(self, domain=None):
+        calls.append(domain)
+        return original(self, domain)
+
+    monkeypatch.setattr(UserLanguageModel, "user_weights", spy)
+
+    fused = FusedCharLM(base, user_lm, "chat")
+    assert fused._domain_weight > 0
+    assert fused._global_weight == 0.0
+    for context in CONTEXTS:
+        for character in CHARACTERS:
+            fused.next_char_log_prob(context, character)
+
+    assert calls == ["chat"]

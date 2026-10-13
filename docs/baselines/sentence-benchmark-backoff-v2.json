@@ -82,5 +82,30 @@
   "reproduce": {
     "benchmark": ".venv/bin/python -m rimeai_eval sentence-benchmark .rimeai/datasets/p0-librime-1.17.0-luna-simp.jsonl --language-model .rimeai/models/p0-char-ngram-v2.json.gz --decoder-config .rimeai/models/p0-beam-sentence-v3.json --rime-dictionary .rimeai/rime/shared/luna_pinyin.dict.yaml --user-lm \"$HOME/Library/Application Support/RimeAI/language_profile/user-lm.json.gz\"",
     "fusion": ".venv/bin/python -m rimeai_eval train-neural-fusion .rimeai/datasets/p0-librime-1.17.0-luna-simp.jsonl --neural-model .rimeai/models/rimeai-ranker-s-24m-v1 --language-model .rimeai/models/p0-char-ngram-v2.json.gz --rime-dictionary .rimeai/rime/shared/luna_pinyin.dict.yaml --output .rimeai/models/rimeai-ranker-s-24m-fusion-v2.json"
+  },
+  "fused_latency_cache": {
+    "date": "2026-10-13",
+    "command": ".venv/bin/python -m rimeai_eval sentence-benchmark .rimeai/datasets/p0-librime-1.17.0-luna-simp.jsonl --language-model .rimeai/models/p0-char-ngram-v2.json.gz --decoder-config .rimeai/models/p0-beam-sentence-v3.json --rime-dictionary .rimeai/rime/shared/luna_pinyin.dict.yaml --user-lm \"$HOME/Library/Application Support/RimeAI/language_profile/user-lm.json.gz\"",
+    "change": "rimeai_daemon/fused_lm.py: interpolation weights and per-domain count stores resolved once per FusedCharLM instance (was per scoring call); per-instance memo of next_char_log_prob keyed by (context[-max_context_characters:], character), capped at 16384 entries (>1.7x the worst-case unique keys of one max-length decode); result-preserving because every backoff gram of both layers ends at the scored position. No module-level caches; one instance lives one request.",
+    "metrics": {
+      "decoder_latency_ms": {"p50": 0.937708, "p95": 1.684291},
+      "fused_decoder_latency_ms": {"p50": 1.744667, "p95": 3.15675},
+      "fused_sentence_accuracy": 0.774127,
+      "fused_char_accuracy": 0.840691
+    },
+    "latency_budget": {
+      "budget_ms": 1.0,
+      "decoder_latency_ms_p95": 1.684291,
+      "fused_decoder_latency_ms_p95": 3.15675,
+      "delta_ms": 1.472459,
+      "verdict": "FAIL",
+      "note": "after weight hoisting + memoization the fused arm still exceeds decoder-only p95 by 1.472459 ms (was 2.554916 ms); absolute latencies of both arms dropped versus the first measurement (machine load differs), so the delta is the comparable figure. Fused accuracy and decision counts are identical to the uncached run, confirming the cache is result-preserving."
+    },
+    "cache_hit_rate": {
+      "hits": 1996,
+      "unique_keys": 366805,
+      "rate": 0.005,
+      "finding": "instrumented re-decode of the same 974 test samples: beam search produces ~99.5% unique (context, character) keys per request (repeats come almost only from the baseline _sequence_score overlap), so memoization alone cannot meet the +1 ms budget; the residual cost is the inherent second backoff walk (user global layer) plus exp/log per scored position. Escalated for an architecture ruling; no beam-width or partial-fusion changes made here."
+    }
   }
 }
