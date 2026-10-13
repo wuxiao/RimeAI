@@ -19,6 +19,7 @@ TOP_K = 10
 _RANK_WEIGHTS = (0.1, 0.25, 0.5, 1.0, 2.0)
 _FREQUENCY_WEIGHTS = (0.0, 0.25, 0.5, 1.0, 2.0)
 _LANGUAGE_WEIGHTS = (0.0, 0.25, 0.5, 1.0, 2.0)
+_BACKOFF_ALPHAS = (0.2, 0.4, 0.6, 0.8)
 
 
 class NGramModelError(ValueError):
@@ -37,6 +38,7 @@ class NGramRankerModel:
     prefix_counts: Dict[int, Dict[str, int]]
     max_context_characters: int = 40
     top_k: int = TOP_K
+    backoff_alpha: float = 0.4
 
     def language_score(self, context: str, candidate: str) -> float:
         """Mean log-probability per character of `candidate` after
@@ -50,16 +52,28 @@ class NGramRankerModel:
         total = 0.0
         terms = 0
         for position in range(candidate_start, len(text)):
-            for order in ORDERS:
+            probability = None
+            for order in reversed(ORDERS):
                 start = position - order + 1
                 if start < 0:
                     continue
                 gram = text[start : position + 1]
-                prefix = gram[:-1]
                 count = self.ngram_counts[order].get(gram, 0)
-                prefix_count = self.prefix_counts[order].get(prefix, 0)
-                total += math.log((count + 0.1) / (prefix_count + 1000.0))
-                terms += 1
+                prefix_count = self.prefix_counts[order].get(gram[:-1], 0)
+                if count > 0 and prefix_count > 0:
+                    probability = (count / prefix_count) * self.backoff_alpha ** (
+                        5 - order
+                    )
+                    break
+            if probability is None:
+                gram = text[position - 1 : position + 1]
+                count = self.ngram_counts[2].get(gram, 0)
+                prefix_count = self.prefix_counts[2].get(gram[:-1], 0)
+                probability = (
+                    (count + 0.1) / (prefix_count + 1000.0)
+                ) * self.backoff_alpha ** 3
+            total += math.log(probability)
+            terms += 1
         return total / max(1, terms)
 
     def _candidate_score(
@@ -111,7 +125,7 @@ class NGramRankerModel:
 
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "model_type": "char-ngram-ranker",
             "dataset_sha256": self.dataset_sha256,
             "split_counts": self.split_counts,
@@ -123,8 +137,10 @@ class NGramRankerModel:
                 "max_context_characters": self.max_context_characters,
                 "top_k": self.top_k,
                 "smoothing": {
-                    "numerator": 0.1,
-                    "denominator": 1000.0,
+                    "method": "stupid-backoff",
+                    "alpha": self.backoff_alpha,
+                    "terminal_numerator": 0.1,
+                    "terminal_denominator": 1000.0,
                 },
             },
             "candidate_frequencies": self.candidate_frequencies,
@@ -210,34 +226,37 @@ def train_ngram_model(
     }
 
     best: Optional[
-        Tuple[float, float, float, float, float, NGramRankerModel]
+        Tuple[float, float, float, float, float, float, NGramRankerModel]
     ] = None
-    for rank_weight in _RANK_WEIGHTS:
-        for frequency_weight in _FREQUENCY_WEIGHTS:
-            for language_weight in _LANGUAGE_WEIGHTS:
-                model = NGramRankerModel(
-                    dataset_sha256=dataset_sha256,
-                    split_counts=split_counts,
-                    rank_weight=rank_weight,
-                    frequency_weight=frequency_weight,
-                    language_weight=language_weight,
-                    candidate_frequencies=frequencies,
-                    ngram_counts=ngram_counts,
-                    prefix_counts=prefix_counts,
-                )
-                accuracy, mrr, covered = _validation_metrics(
-                    model, validation_samples
-                )
-                selection = (
-                    accuracy,
-                    mrr,
-                    -frequency_weight - language_weight,
-                    rank_weight,
-                    -language_weight,
-                    model,
-                )
-                if best is None or selection[:-1] > best[:-1]:
-                    best = selection
+    for backoff_alpha in _BACKOFF_ALPHAS:
+        for rank_weight in _RANK_WEIGHTS:
+            for frequency_weight in _FREQUENCY_WEIGHTS:
+                for language_weight in _LANGUAGE_WEIGHTS:
+                    model = NGramRankerModel(
+                        dataset_sha256=dataset_sha256,
+                        split_counts=split_counts,
+                        rank_weight=rank_weight,
+                        frequency_weight=frequency_weight,
+                        language_weight=language_weight,
+                        backoff_alpha=backoff_alpha,
+                        candidate_frequencies=frequencies,
+                        ngram_counts=ngram_counts,
+                        prefix_counts=prefix_counts,
+                    )
+                    accuracy, mrr, covered = _validation_metrics(
+                        model, validation_samples
+                    )
+                    selection = (
+                        accuracy,
+                        mrr,
+                        -frequency_weight - language_weight,
+                        rank_weight,
+                        -language_weight,
+                        -backoff_alpha,
+                        model,
+                    )
+                    if best is None or selection[:-1] > best[:-1]:
+                        best = selection
     assert best is not None
     selected_model = best[-1]
     validation_accuracy, validation_mrr, covered = _validation_metrics(
@@ -259,6 +278,7 @@ def train_ngram_model(
             "rank_weight": selected_model.rank_weight,
             "frequency_weight": selected_model.frequency_weight,
             "language_weight": selected_model.language_weight,
+            "backoff_alpha": selected_model.backoff_alpha,
         },
     }
     return selected_model, report
@@ -306,15 +326,21 @@ def load_ngram_model(path: Path) -> NGramRankerModel:
         raise NGramModelError(f"cannot read model artifact '{path}'") from error
     if (
         not isinstance(payload, dict)
-        or payload.get("schema_version") != 1
+        or payload.get("schema_version") != 2
         or payload.get("model_type") != "char-ngram-ranker"
     ):
-        raise NGramModelError("unsupported n-gram model artifact")
+        raise NGramModelError(
+            "unsupported n-gram model artifact; retrain the model to "
+            "produce a schema v2 artifact"
+        )
     hyperparameters = payload.get("hyperparameters")
     if not isinstance(hyperparameters, dict):
         raise NGramModelError("model hyperparameters are missing")
     if hyperparameters.get("orders") != list(ORDERS):
         raise NGramModelError("model n-gram orders are incompatible")
+    smoothing = hyperparameters.get("smoothing")
+    if not isinstance(smoothing, dict):
+        raise NGramModelError("model smoothing hyperparameters are missing")
     try:
         return NGramRankerModel(
             dataset_sha256=payload["dataset_sha256"],
@@ -325,6 +351,7 @@ def load_ngram_model(path: Path) -> NGramRankerModel:
             rank_weight=float(hyperparameters["rank_weight"]),
             frequency_weight=float(hyperparameters["frequency_weight"]),
             language_weight=float(hyperparameters["language_weight"]),
+            backoff_alpha=float(smoothing["alpha"]),
             candidate_frequencies={
                 str(key): int(value)
                 for key, value in payload["candidate_frequencies"].items()
