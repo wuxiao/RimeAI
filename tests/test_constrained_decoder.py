@@ -8,6 +8,8 @@ from rimeai_runtime.constrained_decoder import (
     ConstrainedGreedyDecoder,
     DecodeResult,
     PinyinTokenIndex,
+    fuzzy_equal,
+    fuzzy_segment_ok,
 )
 from rimeai_runtime.pinyin_guard import PinyinGuard
 
@@ -156,3 +158,41 @@ def test_exceeding_max_characters_abstains_with_empty_text():
     assert result.text == ""
     assert result.confidence == 0.0
     assert result.consumed_syllables == 2
+
+
+def test_fuzzy_equal_covers_frozen_pairs_both_directions():
+    assert fuzzy_equal("an", "ang")
+    assert fuzzy_equal("ang", "an")
+    assert fuzzy_equal("en", "eng")
+    assert fuzzy_equal("in", "ing")
+    assert fuzzy_equal("z", "zh")
+    assert fuzzy_equal("zh", "z")
+    assert fuzzy_equal("c", "ch")
+    assert fuzzy_equal("s", "sh")
+    assert fuzzy_equal("an", "an")
+    assert not fuzzy_equal("an", "en")
+    assert not fuzzy_equal("shi", "xi")
+
+
+def test_fuzzy_candidates_match_mistyped_initials():
+    exact = _index().candidates(("si", "ji"), fuzzy=True)
+    assert exact[9] == ("si", "ji")
+    mistyped = _index().candidates(("si", "jie"), fuzzy=True)
+    assert mistyped[2] == ("shi", "jie")  # shi ~ si via s/sh, jie exact
+
+
+def test_fuzzy_decode_recovers_intended_word():
+    scorer = _FixedScorer({(): {9: 0.8}})
+    result = ConstrainedGreedyDecoder.decode(
+        scorer, ("si", "ji"), _index(), fuzzy=True
+    )
+    assert result.text == "四季"
+    assert result.consumed_syllables == 2
+
+
+def test_fuzzy_segment_ok_accepts_exact_and_fuzzy():
+    guard = _guard()
+    assert fuzzy_segment_ok(guard, "四季", ("si", "ji"))
+    assert fuzzy_segment_ok(guard, "世界", ("si", "jie"))
+    assert not fuzzy_segment_ok(guard, "世界", ("wu", "jie"))
+    assert not fuzzy_segment_ok(guard, "世界", ("si",))

@@ -10,6 +10,51 @@ from .pinyin_guard import PinyinGuard
 
 Syllables = Tuple[str, ...]
 
+# Frozen both-direction pinyin confusion pairs (cloud_model.py rules):
+# finals swap directly; initials swap as zh/z, ch/c, sh/s prefixes.
+_FUZZY_FINAL_PAIRS = frozenset(
+    {
+        ("an", "ang"),
+        ("ang", "an"),
+        ("en", "eng"),
+        ("eng", "en"),
+        ("in", "ing"),
+        ("ing", "in"),
+    }
+)
+_FUZZY_INITIAL_PREFIXES = (("zh", "z"), ("ch", "c"), ("sh", "s"))
+
+
+def fuzzy_equal(a: str, b: str) -> bool:
+    """Syllable-level pinyin equivalence for the frozen confusion pairs."""
+    if a == b:
+        return True
+    if (a, b) in _FUZZY_FINAL_PAIRS:
+        return True
+    for thick, thin in _FUZZY_INITIAL_PREFIXES:
+        for x, y in ((a, b), (b, a)):
+            if x.startswith(thick) and y == thin + x[len(thick):]:
+                return True
+    return False
+
+
+def fuzzy_segment_ok(
+    guard: PinyinGuard,
+    text: str,
+    typed_syllables: Sequence[str],
+) -> bool:
+    """True when every character reading of ``text`` fuzzy-matches the
+    typed syllables position for position."""
+    if not text or len(text) != len(typed_syllables):
+        return False
+    readings = PinyinTokenIndex._readings(text, guard)
+    typed = tuple(typed_syllables)
+    return any(
+        len(reading) == len(typed)
+        and all(fuzzy_equal(actual, expected) for actual, expected in zip(reading, typed))
+        for reading in readings
+    )
+
 
 class PinyinTokenIndex:
     """Maps vocabulary tokens to their pinyin syllable readings.
@@ -71,12 +116,29 @@ class PinyinTokenIndex:
         *,
         fuzzy: bool = False,
     ) -> Dict[int, Syllables]:
-        """Tokens whose reading is a prefix of ``prefix`` (fuzzy=False)."""
-        if fuzzy:
-            raise NotImplementedError("fuzzy matching arrives with the fuzzy gate")
+        """Tokens whose reading is a prefix of ``prefix``; ``fuzzy``
+        accepts the frozen pinyin confusion pairs at every position."""
         if not prefix:
             return {}
         result: Dict[int, Syllables] = {}
+        if fuzzy:
+            first_keys = {
+                syllable
+                for syllable in self.first_syllable_tokens
+                if fuzzy_equal(syllable, prefix[0])
+            }
+            token_ids: Set[int] = set()
+            for syllable in first_keys:
+                token_ids.update(self.first_syllable_tokens[syllable])
+            for token_id in sorted(token_ids):
+                for reading in sorted(self.token_syllables.get(token_id, ())):
+                    if len(reading) <= len(prefix) and all(
+                        fuzzy_equal(actual, expected)
+                        for actual, expected in zip(reading, prefix)
+                    ):
+                        result[token_id] = reading
+                        break
+            return result
         for token_id in sorted(self.first_syllable_tokens.get(prefix[0], ())):
             for reading in sorted(self.token_syllables.get(token_id, ())):
                 if reading == tuple(prefix[: len(reading)]):
