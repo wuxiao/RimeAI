@@ -188,11 +188,19 @@ fi
 
 stable_release="${current_link}"
 daemon_executable="${stable_release}/runtime/rimeai-daemon/rimeai-daemon"
-language_model="${stable_release}/models/p0-char-ngram-v2.json.gz"
-beam_config="${stable_release}/models/p0-beam-sentence-v3.json"
+language_models=("${stable_release}/models"/p0-char-ngram-*.json.gz(N))
+beam_configs=("${stable_release}/models"/p0-beam-sentence-*.json(N))
+neural_models=("${stable_release}/models"/rimeai-ranker-s-24m-v*(N))
+fusion_configs=("${stable_release}/models"/rimeai-ranker-s-24m-fusion-*.json(N))
+if (( ${#language_models} != 1 || ${#beam_configs} != 1 || ${#neural_models} != 1 || ${#fusion_configs} != 1 )); then
+  print -u2 "error: release must contain exactly one of each model artifact (char-ngram, beam-sentence, 24m ranker, fusion config)"
+  exit 1
+fi
+language_model="${language_models[1]}"
+beam_config="${beam_configs[1]}"
 rime_dictionary="${stable_release}/models/luna_pinyin.dict.yaml"
-neural_model="${stable_release}/models/rimeai-ranker-s-24m-v1"
-fusion_config="${stable_release}/models/rimeai-ranker-s-24m-fusion-v1.json"
+neural_model="${neural_models[1]}"
+fusion_config="${fusion_configs[1]}"
 
 cp "${template}" "${staged_plist}"
 /usr/libexec/PlistBuddy -c \
@@ -267,10 +275,18 @@ if (( ! bootstrap_succeeded )); then
 fi
 if (( ai_enabled )); then
   launchctl kickstart -k "${domain}/${label}"
-  fusion_artifact_id=$(plutil -extract artifact_id raw -o - \
-    "${target_release}/models/rimeai-ranker-s-24m-fusion-v1.json")
-  beam_sha=$(shasum -a 256 \
-    "${target_release}/models/p0-beam-sentence-v3.json" | awk '{ print $1 }')
+  fusion_configs=("${target_release}/models"/rimeai-ranker-s-24m-fusion-*.json(N))
+  if (( ${#fusion_configs} != 1 )); then
+    print -u2 "error: release must contain exactly one rimeai-ranker-s-24m-fusion-*.json config"
+    exit 1
+  fi
+  fusion_artifact_id=$(plutil -extract artifact_id raw -o - "${fusion_configs[1]}")
+  beam_configs=("${target_release}/models"/p0-beam-sentence-*.json(N))
+  if (( ${#beam_configs} != 1 )); then
+    print -u2 "error: release must contain exactly one p0-beam-sentence-*.json model"
+    exit 1
+  fi
+  beam_sha=$(shasum -a 256 "${beam_configs[1]}" | awk '{ print $1 }')
   expected_model_artifact="${fusion_artifact_id}:beam-${beam_sha[1,12]}"
   daemon_ready=0
   for _ in {1..240}; do

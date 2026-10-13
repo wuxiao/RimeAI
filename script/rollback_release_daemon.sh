@@ -83,8 +83,12 @@ launchctl kickstart -k "${domain}/${label}"
 
 release_root="${releases_root}/${previous_name}"
 daemon_executable="${current_link}/runtime/rimeai-daemon/rimeai-daemon"
-fusion_id=$(plutil -extract artifact_id raw -o - \
-  "${release_root}/models/rimeai-ranker-s-24m-fusion-v1.json")
+fusion_configs=("${release_root}/models"/rimeai-ranker-s-24m-fusion-*.json(N))
+if (( ${#fusion_configs} != 1 )); then
+  print -u2 "error: rollback release must contain exactly one rimeai-ranker-s-24m-fusion-*.json config"
+  exit 1
+fi
+fusion_id=$(plutil -extract artifact_id raw -o - "${fusion_configs[1]}")
 beam_configs=("${release_root}/models"/p0-beam-sentence-*.json(N))
 if (( ${#beam_configs} != 1 )); then
   print -u2 "error: rollback release must contain exactly one p0-beam-sentence-*.json model"
