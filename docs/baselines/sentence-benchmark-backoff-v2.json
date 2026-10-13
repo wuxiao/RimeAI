@@ -73,11 +73,27 @@
     "rerun_2026_10_13": {"baseline": "p0-char-ngram-v2", "learning_gain_nats": 2.270836, "phrase_hit_rate": 0.501548, "history_total_commits": 3229, "frozen_samples": 10000, "covered_samples": 8307, "report": ".rimeai/reports/language-profile-backoff-v2-eval.json"},
     "caveat": "learning_gain is not comparable across the two runs: the baseline changed (v1 backoff-scoring v2, alpha=0.2) and raw log-prob scales differ (baseline_mean_log_prob_test -7.074577 vs -10.652365); history_total_commits also decreased (4356 to 3229), so the history DB state differs from the first evaluation"
   },
+  "neural_arm": {
+    "date": "2026-10-13",
+    "config": "examples/constrained_qwen_decoder.json",
+    "config_name": "constrained-qwen-v2",
+    "model": ".rimeai/models/qwen2.5-0.5b-base-060db64 (Qwen2.5-0.5B base, MPS fp16, constrained greedy + beam histories)",
+    "command": "PATH=\"$PWD/.venv/bin:$PATH\" .venv/bin/python -m rimeai_eval sentence-benchmark .rimeai/datasets/p0-librime-1.17.0-luna-simp.jsonl --language-model .rimeai/models/p0-char-ngram-v2.json.gz --decoder-config .rimeai/models/p0-beam-sentence-v3.json --rime-dictionary .rimeai/rime/shared/luna_pinyin.dict.yaml --user-lm \"$HOME/Library/Application Support/RimeAI/language_profile/user-lm.json.gz\" --command-decoder-config examples/constrained_qwen_decoder.json",
+    "metrics": {
+      "neural_sentence_accuracy": 0.911704,
+      "neural_abstain_rate": 0.0
+    },
+    "deltas": {
+      "neural_minus_decoder_sentence_accuracy": 0.12115,
+      "neural_minus_baseline_sentence_accuracy": 0.184805
+    },
+    "notes": "Scored raw suggestions (empty = abstain, no baseline fallback, min_confidence 0.0). Same run's static/fused arms reproduced identical accuracy (decoder 0.790554, fused 0.777207); absolute latencies drift with machine load and are not restated. The neural route decodes from the model + vocabulary under pinyin constraints, so it is NOT bounded by gold_in_top10_coverage (0.810062) — it bypasses the frozen Rime Top-10 ceiling entirely. ~286s wall time for 974 samples (~0.29s/sample, model loaded once): eval-grade latency, not yet interactive (Phase 2 需要 4-bit 引擎)."
+  },
   "notes": [
-    "Neural (constrained-qwen) benchmark arm skipped: RIMEAI_QWEN_MODEL_DIR is unset, so no Qwen worker model weights could be located; 待 constrained-qwen-v1 bake-off.",
+    "Neural arm completed on 2026-10-13 (see neural_arm): constrained-qwen-v2 达到 0.911704 句正确率、0 弃权，领先 n-gram beam +12.12pt —— C3 octagram 双轨的启动条件之二（神经路线精度不达标）不成立，路线决策证据已就位（等待用户对照 constrained-qwen bake-off 报告最终拍板）。",
     "ONNX fusion config (.rimeai/models/rimeai-ranker-s-24m-int8-onnx-fusion-v1.json) could not be recalibrated: train-neural-fusion requires the torch scorer; its calibration (margin_threshold 0.3896937286754103) was fitted against the v1 n-gram scoring distribution and now silently mis-fits the v2 distribution. Follow-up: recalibrate via the ONNX path or gate it before the next release build.",
     "Deployment entry points (rimeai_daemon/__main__.py, start_daemon.sh, ngram_ranker_service.sh, beam_sentence_service.sh, install_daemon_launch_agent.sh, build_daemon_release.sh, install_release_daemon.sh, rollback_release_daemon.sh) now reference p0-char-ngram-v2.json.gz / p0-beam-sentence-v3.json; the torch daemon path also carries the recalibrated rimeai-ranker-s-24m-fusion-v2.json. The release bundle keeps the stable fusion alias name rimeai-ranker-s-24m-fusion-v1.json (ONNX content, see note above).",
-    "rollback_release_daemon.sh now expects p0-beam-sentence-v3.json inside the previous release layout; rolling back to a pre-v3 release archive requires the archive's own names."
+    "rollback/install scripts now glob versioned artifact names (p0-beam-sentence-*.json, p0-char-ngram-*.json.gz, rimeai-ranker-s-24m-v*, rimeai-ranker-s-24m-fusion-*.json) with exactly-one guards (commit 44a7287), so future artifact renames no longer break install/rollback."
   ],
   "reproduce": {
     "benchmark": ".venv/bin/python -m rimeai_eval sentence-benchmark .rimeai/datasets/p0-librime-1.17.0-luna-simp.jsonl --language-model .rimeai/models/p0-char-ngram-v2.json.gz --decoder-config .rimeai/models/p0-beam-sentence-v3.json --rime-dictionary .rimeai/rime/shared/luna_pinyin.dict.yaml --user-lm \"$HOME/Library/Application Support/RimeAI/language_profile/user-lm.json.gz\"",
