@@ -177,7 +177,9 @@ clone/copy 创建 exclusive 名字时立即建立失败清理责任，并在 pat
 绑定 dev/inode；此后只清理匹配 identity 的条目。reopen 注入 `EMFILE` 时必须
 fail-closed；snapshot directory-open 与 materialized file-reopen 两类回归均为零残留，
 且 source bytes/link count 不变。包含祖先、ACL、
-namespace 与 `EMFILE` 场景的回归仍须在恢复 clean build 后重跑。
+namespace 与 `EMFILE` 场景的回归已随统一 clean baseline 运行（XCFramework
+headers 缺口已于 2026-08-24 修复，见 [`TASKS.md`](../TASKS.md)
+BUILD-001/VERIFY-001）。
 
 这个设计可在 native 调用后检测篡改，但无法阻止 hostile same-UID 进程在
 “前验完成→ORT open pathname”间 rename/替换 snapshot 后让替换字节先进入 native

@@ -1,7 +1,7 @@
 # 产品管理语音模型制品合同
 
-> 本文是专项合同，不维护全局构建或发布状态。当前工作树 clean build 阻塞及
-> 任务状态见 [`TASKS.md`](../TASKS.md)。
+> 本文是专项合同，不维护全局构建或发布状态。任务状态见
+> [`TASKS.md`](../TASKS.md)。
 
 本文记录 RimeAI 在 macOS 14/15 上接入产品管理本地 ASR 时已经实现的制品
 边界。它是一层完整性、目录与切换基础设施；仓库不嵌入模型权重，已封印的
@@ -323,7 +323,9 @@ manifest、policy 或 result。
 清理。reopen 注入 `EMFILE` 的永久回归证明失败路径不留下 snapshot 目录/文件，
 其中分别覆盖 snapshot directory-open 与 materialized file-reopen；source files
 保持原内容与单链接状态。含这些 P1/P2 场景的
-`SherpaOnnxProductBackendTests` 须在恢复 clean build 后重跑。
+`SherpaOnnxProductBackendTests` 已随统一 clean baseline 运行（XCFramework
+headers 缺口已于 2026-08-24 修复，见 [`TASKS.md`](../TASKS.md)
+BUILD-001/VERIFY-001）。
 
 这个 snapshot 设计修复了 `/dev/fd` 重复 open 共享 EOF offset 的问题，并能在
 native 调用后检测篡改，但不是 hostile same-UID 对手的密码学 sandbox。拥有者

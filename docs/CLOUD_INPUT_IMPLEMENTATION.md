@@ -25,7 +25,9 @@
   用于对齐多个输入，保持数组结构。后台向量化当前由
   `EMBEDDING_INDEXING_ENABLED = False` 硬停用，检索自动降级为
   FTS，不影响输入。
-- 云端唯一的推理决策是 generate（整句生成）或 abstain。整句拼音
+- 云端推理决策只有 generate/abstain，共两条路由：拼音约束整句生成，以及
+  上屏后续写联想（continuation，默认关闭，经 Tab/点击显式接受，见
+  [TASKS.md](../TASKS.md) KBD-003）。整句拼音
   约束是单一策略（设计变更 2026-10-13：三档约束移除，仅保留原
   loose 行为，无用户设置、无请求字段）：prompt 允许模型修正任意
   错别输入（前后鼻音/平翘舌/错别字母），输出为 ≤128 字符文本、
@@ -38,7 +40,7 @@
   于本地路径）。统一的结构门：非空、≤128 字符无控制字符、segments
   分隔符按序复现、recent_context 尾部复读检查（与
   continuation 策略镜像）。未协商 `text-generation` 能力的旧客户端
-  仍 fail-closed 降级 abstain。
+  不获得生成结果：broker 过渡期返回 `keep` 决策（reason `rime_rank`）。
 - generate 路径的 prompt 不携带候选池：模型直接根据拼音与 recent
   context 推导整句（segments 时连同各段 separator/committed_text
   一次往返）；生成文本恰与某候选相同视为真实
@@ -60,7 +62,7 @@
 | 拼音约束 | 单一策略（无请求字段）：输入 `[A-Za-z']` ≤256 字节；组句纠错与混排由模型负责，本地只做结构门 |
 | embedding | `text-embedding-v4`，512 维 |
 | 总时限 | 从候选/历史构建开始 30s 墙钟（协议上限 30000ms；本地开发调试临时放宽，正式口径 8s/8000ms） |
-| 云输出 | `generate`（含 text）或 `abstain` |
+| 云输出 | `generate`（含 text）或 `abstain`；未协商能力的旧客户端过渡期 `keep` |
 
 请求绑定 request/composition/session/revision、model、history
 generation 和绝对 deadline。输入法构建历史的耗时也计入 30s 墙钟，只把
@@ -92,12 +94,17 @@ API Key 只保存在 `~/.config/rimeai/cloud.env`：
 ## 5. 历史与隐私
 
 云端配置后，成功上屏记录写入本机明文 SQLite WAL，用于 recent、FTS 和向量
-检索。记录包含宿主标识、时间、来源、拼音与提交文本，并跨应用长期保留。
+检索。记录包含宿主标识、时间、来源、拼音与提交文本。原文只在滚动窗口
+（默认 7 天）内保留；窗口外批次由 broker 空闲固化循环（默认启用，
+`--no-consolidation` 关闭）提炼为语言画像三层产物后按合同淘汰，
+详见 [LANGUAGE_PROFILE_DESIGN.md](LANGUAGE_PROFILE_DESIGN.md)。
 
 - 移除 API Key 只停用云增强，不自动删除历史。
 - 完整 prompt/响应默认不落日志。显式诊断开关：存在
   `~/.config/rimeai/cloud-debug` 标记文件时，broker 把请求/响应全文
-  写入 `runtime/rimeai-cloud-broker.log`（prompt 含用户键入的拼音与
+  写入 stderr（LaunchAgent 安装时重定向到
+  `runtime/rimeai-cloud-broker.log`，手动运行 broker 不产生该文件；
+  prompt 含用户键入的拼音与
   上下文，Authorization 头永不记录）；删除标记立即恢复静默。
 - 永久清除会删除历史、提升 generation，并阻止旧索引或在途结果复活。
 - 导出使用 JSONL；凭据不进入导出。

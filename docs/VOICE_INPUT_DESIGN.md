@@ -1,6 +1,6 @@
 # 语音听写交互与 V2 协议
 
-更新日期：2026-08-24
+更新日期：2026-10-13
 状态：`INTERNAL PROBE / NOT RELEASED`
 
 本文是语音用户行为和 wire contract 的权威定义。总体产品与技术边界见
@@ -162,8 +162,9 @@ Release 只允许：
 ### 4.2 V1 交互探针
 
 快捷键、流式浮层、确认/取消、设置、UDS/XPC 代码和 helper 生命周期已经存在于
-当前工作树，但 clean build 被 XCFramework headers 阻塞。即使恢复构建，它仍是
-默认关闭的内部探针，不会因代码完成自动获得产品资格。
+当前工作树并纳入内部 clean baseline（XCFramework headers 缺口已于
+2026-08-24 修复，见 [`TASKS.md`](../TASKS.md) BUILD-001/VERIFY-001）。它
+仍是默认关闭的内部探针，不会因代码完成自动获得产品资格。
 
 ### 4.3 产品管理引擎
 

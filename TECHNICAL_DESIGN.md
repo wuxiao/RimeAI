@@ -3,9 +3,9 @@
 | 项目 | 当前值 |
 |---|---|
 | 版本 | 1.0 |
-| 更新日期 | 2026-08-24 |
+| 更新日期 | 2026-10-13 |
 | 状态 | 当前唯一总体技术设计 |
-| 当前工作树 | 内部 clean baseline 已通过；工作树未收口且不可发布 |
+| 当前工作树 | 内部 clean baseline 已通过；功能边界按可审查提交收口，不可发布 |
 
 本文件描述现行架构、数据流、信任边界和验证事实。产品需求与交互分别见
 [PRD.md](PRD.md) 和 [PRODUCT_DESIGN.md](PRODUCT_DESIGN.md)；开发状态只在
@@ -13,8 +13,8 @@
 
 ## 1. 当前事实基线
 
-当前工作树包含大量未提交的键盘、设置、iOS 和语音实现。以下基线证明同一工作树
-快照可从全新构建目录完成内部验证，但不把“内部可构建”解释为“可发布”。
+当前工作树已按功能边界拆分为可审查提交。以下基线证明同一工作树快照可从全新
+构建目录完成内部验证，但不把“内部可构建”解释为“可发布”。
 
 ### 1.1 当前边界
 
@@ -25,17 +25,17 @@
    安装、发布策略和二进制隔离 contract tests 通过。
 3. `ios/project.yml` 改用跨平台显式源文件清单；独立 regeneration verifier 在
    临时镜像中生成工程并精确比较 pbxproj、scheme 与 workspace。
-4. 工作树仍有大量未提交/未跟踪改动；真实签名、公证、清洁机、真机、目标网络、
-   正式语料、许可证和用户效果矩阵尚未关闭。
+4. 真实签名、公证、清洁机、真机、目标网络、正式语料、许可证和用户效果矩阵
+   尚未关闭。
 
 ### 1.2 验证分层
 
 | 层级 | 同一工作树快照的 clean 命令族 | 结果 |
 |---|---|---|
-| SwiftPM | 清除 header 环境变量，使用全新 scratch，warnings-as-errors | 907 tests / 63 suites 通过 |
-| Python | 禁止 bytecode/cache，warnings-as-errors | 456 tests 通过，无遗留测试进程 |
-| macOS | 全新 DerivedData，arm64，Swift/C/C++ warnings-as-errors | 31 tests 通过 |
-| iOS | 全新 DerivedData，Simulator unit + system-keyboard UI | 11 tests 通过 |
+| SwiftPM | 清除 header 环境变量，使用全新 scratch，warnings-as-errors | 全量基线 907 tests / 63 suites（2026-08-24）；2026-10-13 时点 InputCore 子集 449 通过 |
+| Python | 禁止 bytecode/cache，warnings-as-errors | 574 tests 通过（2026-10-13），无遗留测试进程 |
+| macOS | 全新 DerivedData，arm64，Swift/C/C++ warnings-as-errors | 40 tests 通过（2026-10-13） |
+| iOS | 全新 DerivedData，Simulator unit + system-keyboard UI | 11 tests 通过（2026-08-24 基线） |
 | Native / shell / generation | XCFramework contract、部分候选 C++ 集成、脚本直接调用、XcodeGen 精确再生成 | 全部通过 |
 
 SwiftPM 与 macOS 构建均显式移除 `CPATH`、`C_INCLUDE_PATH` 和
@@ -140,7 +140,8 @@ Release INT8 曾有冻结质量与延迟证据；本次 clean baseline 未执行
 - endpoint：`https://open.bigmodel.cn/api/coding/paas/v4`
 - model：`glm-5.3-flash`（单一冻结白名单）
 - embedding：`text-embedding-v4`，512 维（后台向量化当前硬停用，检索降级 FTS）
-- 请求不携带候选池；云端唯一推理决策是 generate（≤128 字符整句）或 abstain
+- 请求不携带候选池；云端推理决策只有 generate/abstain，含整句生成
+  （≤128 字符）与上屏后续写联想（continuation）两条路由
 - 总 deadline：30s 墙钟（协议上限 30000ms，本地开发调试口径；正式发布口径 8s）
 
 broker 模块为 `rimeai_cloud_broker/cloud_model.py`（中性云增强命名，
@@ -159,7 +160,9 @@ endpoint，只返回 `generate` 或 `abstain`。客户端再次验证全部绑�
   Keychain，也不抵御 hostile same-UID 进程。
 - 凭据不进入设置导出、prompt、历史、日志或诊断。
 - 云端配置后，成功上屏记录写入跨应用明文 SQLite，并建立 recent、FTS 和向量
-  检索。当前合同最多发送 600 字 recent 和 8 条 snippet。
+  检索。当前合同最多发送 600 字 recent 和 8 条 snippet。原文只在 7 天滚动
+  窗口内保留，窗口外批次固化后按语言画像合同淘汰（详见
+  [docs/LANGUAGE_PROFILE_DESIGN.md](docs/LANGUAGE_PROFILE_DESIGN.md)）。
 - 移除 Key 只停用云端；历史由独立永久清除操作删除并提升 generation。
 - Secure Event Input 阻断请求、历史写入和在途接纳。
 
@@ -168,7 +171,8 @@ endpoint，只返回 `generate` 或 `abstain`。客户端再次验证全部绑�
 
 ## 6. 设置与运行态收敛
 
-- `RimeAISettingsStore` 当前导出 schema 6，并兼容 schema 5 默认快捷键迁移。
+- `RimeAISettingsStore` 当前导出 schema 8；导入兼容 schema 5–8（5 为默认
+  快捷键迁移，7 为续写联想，8 为语言画像）。
 - 语音快捷键可在设置中录制、清除和恢复默认；只接受带修饰键的非系统保留组合，
   冲突或无效输入 fail-closed，运行态变更立即重注册。
 - 导入上限 128 KiB；固定 cloud provider/endpoint/model、Offline Lock、凭据、
@@ -272,7 +276,7 @@ tracer 也都是独立工具，不向 helper argv 增加策略面。
 | TD-001 | Rime 是同步主引擎；AI 永远是可失败的增强层 |
 | TD-002 | AI 使用单一独立建议位；有 Rime 候选时 Space=Rime、Tab=AI |
 | TD-003 | 本地推理放在独立 daemon，输入法不在按键线程运行模型 |
-| TD-004 | 云端是独立 opt-in broker，且只能选择 candidate ID |
+| TD-004 | 云端是独立 opt-in broker；不携带候选池，只返回 generate/abstain（含续写联想）决策 |
 | TD-005 | Secure Input、composition/session/generation/deadline 全部 fail-closed |
 | TD-006 | Voice Debug 使用私有 UDS；Release 只使用双向认证 XPC，不降级 |
 | TD-007 | ASR 内容完整性与产品 Release 资格分离，production catalog 是唯一审批源 |

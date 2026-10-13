@@ -372,7 +372,8 @@ policy, hotword_snapshot, samples, output_path
   managed artifact root/source tree、snapshot parent/directory/files 与 recognizer 前后
   rebind 则始终严格 no-ACL。clone/copy 创建名在 reopen 前即承担清理责任并绑定
   dev/inode；snapshot directory-open 与 file-reopen 注入 `EMFILE` 均不留 residue。
-  这些回归仍须在恢复 clean build 后重新纳入统一基线。
+  这些回归已纳入统一 clean 基线（XCFramework headers 缺口已于 2026-08-24
+  修复，见 [`TASKS.md`](../TASKS.md) BUILD-001/VERIFY-001）。
 - descriptor、`voice_ready` 或 final 只要出现 `polish` / `polish_applied:true` 就拒绝，
   不能在 `postprocessor_id:none` 名义下混入后处理文本。
 - WAV 先转换为 16 kHz mono Float32，按实际音频时长以 session 起点的绝对 deadline

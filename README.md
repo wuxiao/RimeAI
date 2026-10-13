@@ -2,13 +2,14 @@
 
 RimeAI 是面向 Apple Silicon Mac 的 Rime 本地优先语义输入引擎。Rime 始终
 负责同步拼音解析与候选兜底；本地模型在独立建议位提供上下文重排、受拼音
-约束的整句建议和无空格中英混输建议。可选云增强只能从客户端候选池中选择，
-不能自由生成或自动上屏。
+约束的整句建议和无空格中英混输建议。可选云增强只做受结构门校验的整句
+生成与上屏后续写联想（generate/abstain），采纳必须用户显式确认，不会
+自动上屏。
 
-> 当前状态（2026-08-24）：`NOT RELEASED / INTERNAL BASELINE VERIFIED`。
+> 当前状态（2026-10-13）：`NOT RELEASED / INTERNAL BASELINE VERIFIED`。
 > 同一工作树快照已通过全新 SwiftPM、macOS、iOS、Python、原生与 shell
-> 严格验证，但仍有大量未收口变更，也尚未通过签名、公证、真机、真实数据和
-> 用户效果等发布门，详见 [TASKS.md](TASKS.md)。
+> 严格验证，功能边界已按可审查提交收口；尚未通过签名、公证、真机、真实
+> 数据和用户效果等发布门，详见 [TASKS.md](TASKS.md)。
 
 ## 权威文档
 
@@ -24,12 +25,13 @@ RimeAI 是面向 Apple Silicon Mac 的 Rime 本地优先语义输入引擎。Rim
 
 | 范围 | 最新状态 |
 |---|---|
-| macOS 键盘主线 | 内部实现已覆盖受控 librime、稳定候选、语义建议、整句、无空格混输、设置与安全输入保护；fresh 严格构建与测试已通过 |
+| macOS 键盘主线 | 内部实现已覆盖受控 librime、稳定候选、语义建议、整句、无空格混输、设置与安全输入保护和语言画像短语建议；fresh 严格构建与测试已通过 |
 | 本地语义模型 | macOS daemon 已有 24M 神经排序器、n-gram 融合与 beam decoder；Debug/本机安装路径仍使用浮点 24M，Release 制品使用 INT8 ONNX，尚待统一 |
-| 可选云增强 | 智谱官方 Coding Plan 直连（`glm-5.3-flash`）、不携带候选池的整句生成（generate/abstain，结构门校验）已实现并经真实端点冒烟；上屏后续写联想（continuation，默认关闭，Tab/点击接受）已实现，直连端点上的冒烟复测待重跑；真实冻结集、目标网络、费用与发布验收未完成 |
+| 语言画像学习 | L1 短语库、L2 用户 LM 融合、L3 风格画像与 broker 空闲固化循环已收口；真实历史首评通过（学习增益 +0.299 nats/字、短语命中率 52.3%）；真机冻结集复评计入 KBD-001 |
+| 可选云增强 | 智谱官方 Coding Plan 直连（`glm-5.3-flash`）、不携带候选池的整句生成（generate/abstain，结构门校验）已实现并经真实端点冒烟；上屏后续写联想（continuation，默认关闭，Tab/点击接受）已完成真实键盘验收，模型随直连切换锁定后待在直连端点重跑冒烟；真实冻结集、目标网络、费用与发布验收未完成 |
 | 语音听写 | 默认关闭的内部技术探针；协议、UI、helper、评测 backend 和诊断 tracer 已实现，但没有获批产品模型、正式语料、TCC/设备与发布证据 |
 | iOS | 离线 librime + 紧凑 n-gram 可行性工程；fresh Simulator unit/UI 已通过，24M 模型与最新真机验收未完成 |
-| 公开分发 | 未放行；仍需工作树收口、公证、清洁机、宿主/安全输入、网络、许可证和真实用户指标 |
+| 公开分发 | 未放行；仍需公证、清洁机、宿主/安全输入、网络、许可证和真实用户指标 |
 
 ## 核心交互
 
@@ -56,7 +58,7 @@ RimeAI 是面向 Apple Silicon Mac 的 Rime 本地优先语义输入引擎。Rim
 macOS InputMethodKit
   ├─ librime ───────────────> 同步候选与上屏兜底
   ├─ local daemon (UDS) ────> 24M + n-gram + beam
-  ├─ cloud broker (UDS) ────> 固定 HTTPS 网关 / 候选 ID 选择
+  ├─ cloud broker (UDS) ────> 固定 HTTPS 网关 / generate·abstain
   └─ voice runtime
        ├─ Debug: private UDS
        └─ Release: authenticated NSXPC Mach service -> voice helper
@@ -71,6 +73,8 @@ macOS InputMethodKit
 - `macos/`：InputMethodKit 输入法、设置中心和发布工程。
 - `ios/`：iOS 宿主与键盘扩展可行性工程。
 - `rimeai_daemon/`：本地语义 daemon。
+- `rimeai_runtime/`：daemon 与评测共享的本地运行时包（排序、beam
+  decoder、拼音守卫、候选策略与 IPC）。
 - `rimeai_cloud_broker/`：可选云候选 broker。
 - `rimeai_eval/`、`tools/`：冻结数据、训练、评测和质量门。
 - `script/`、`scripts/`：开发、安装、构建、验证与发布脚本。
@@ -101,6 +105,8 @@ PYTHONDONTWRITEBYTECODE=1 python3.11 -m pytest -q -p no:cacheprovider
 - [docs/P0_FORMATS.md](docs/P0_FORMATS.md)：键盘候选与整句协议。
 - [docs/CLOUD_INPUT_IMPLEMENTATION.md](docs/CLOUD_INPUT_IMPLEMENTATION.md)：
   云候选、凭据、历史与隐私合同。
+- [docs/LANGUAGE_PROFILE_DESIGN.md](docs/LANGUAGE_PROFILE_DESIGN.md)：
+  语言画像学习、固化循环与历史淘汰合同。
 - [docs/VOICE_INPUT_DESIGN.md](docs/VOICE_INPUT_DESIGN.md)：语音交互与 V2 协议。
 - [docs/VOICE_IPC_SECURITY.md](docs/VOICE_IPC_SECURITY.md)：语音 IPC 威胁模型。
 - [docs/VOICE_ASR_ARTIFACT.md](docs/VOICE_ASR_ARTIFACT.md)：语音模型制品合同。
