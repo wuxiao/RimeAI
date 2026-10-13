@@ -42,6 +42,8 @@ scratch/Xcode DerivedData 且启用 warnings-as-errors 的条件下保持内部�
 | KBD-002 | `TODO` | 统一 Debug 与 Release 模型制品 | 明确只保留一种产品运行目标，或证明浮点 Debug 与 INT8 Release 等价；安装、诊断和文档显示实际 artifact |
 | KBD-003 | `DONE-INTERNAL` | 上屏后智能续句联想（post-commit continuation） | 2026-10-12 完成：默认关闭 opt-in；broker continuation 路由与校验梯 + 真实 qwen3.5:0.8b few-shot 冒烟 10/10 GO（无白名单变更）；协调器/面板/接线完成；真实键盘验收通过（chip 显示、Tab 接受、链式续写、8s 自动隐藏、击键/切会话撤销、开关关闭零请求、历史库 source='continuation' 落库）；修复 broker history_index 无 pinyin 键 KeyError 与 selectMainCandidate 绕过 commitText 两个真实缺陷；review 修复迟到续写帧拆连接/失活后仍 arm/Shift+Tab 误接受；续写 prompt 升级为"逐字紧接/没把握弃权"；已知边界：0.8b 对名句逐字接续会串句，按 Ruling 不做确定性索引补丁，等引入更大模型解决；回归 448 InputCore + 40 macOS + 560 pytest 全绿 |
 | KBD-004 | `DONE-INTERNAL` | 整句拼音约束（单一 loose 策略） | 设计变更 2026-10-13：三档约束（exact/fuzzy/loose）移除，仅保留 loose 行为，无用户设置、无 `pinyin_alignment` 请求字段；模型可纠前后鼻音/平翘舌/错别输入，≤128 字符（broker 拒控制字符，>0x20 标量与分段非空段由 Swift 客户端最终把关）、中英混排、segments 分隔符按序复现、anti-echo 用 recent_context 尾部重叠检查；pinyin 输入无条件 `[A-Za-z']` ≤256 字节；broker（cloud_model.py/server.py 单一提词与校验梯）+ 客户端（PinyinAlignmentMode 删除、CloudGeneratedSentencePolicy 单一策略）全链路 |
+| LM-001 | `TODO` | 整句解码切换为零 prompt 拼音约束路线（部署化） | MLX/llama.cpp 4-bit 引擎替换 transformers（p50 进交互预算）、beam KV 前缀共享、接入 rimeai_daemon 整句链；冻结对照基线 `docs/baselines/constrained-qwen-v2.json`（92.2% 句准确率 vs 词典基线 72.7%；prompt 路线同集 72.6%，910/974 空建议，已证伪） |
+| LM-002 | `TODO` | 约束解码 SFT | 按 cloud decision cache 蒸馏 LoRA（PinyinGPT 配方），基座对照 Qwen 0.5B/2B/4B；作用靶为错误归类的 `model_path_miss` 桶（61/76 真实错误，词典召回与拼音对齐零损失） |
 | CLOUD-001 | `BLOCKED` | 放行固定云候选链路 | 使用真实凭据、冻结语料和目标网络通过覆盖增益、98% 纠错 precision、800ms、stale/SEI、费用/限流/代理/撤权矩阵 |
 | CLOUD-002 | `DONE-INTERNAL` | 清理旧 Qwen/阿里云/wwcn 口径 | 2026-10-13 完成：`rimeai_cloud_broker/qwen.py` 更名 `cloud_model.py`，`QwenCandidateRanker`/`QwenBrokerError` 更名 `CloudModelClient`/`CloudBrokerError`，全部 "Qwen ..." 错误文案改中性 cloud 口径；隐私中心用户文案（云端数据流、明文 Key 存储位置）与 candidate panel 无障碍标题/tooltip 改中性云端建议/纠错；PRD/PRODUCT_DESIGN/TECHNICAL_DESIGN/README/CLOUD_INPUT_IMPLEMENTATION 统一为智谱 Coding Plan 直连 + generate/abstain 无候选池合同；LaunchAgent 安装脚本导入检查同步更新。`fun.wwcn.*` 为代码签名 bundle ID 事实标识、`tools/qwen_sentence_worker.py` 与 `models/qwen2.5-0.5b` 为真实 Qwen 离线实验工件，均非误导声明、保持不变。全量 grep 复核无残留误导 provider 声明；pytest 574、InputCore 449、macOS 40 全绿 |
 | RELEASE-001 | `BLOCKED` | 放行 macOS 公开预览 | 公证/Gatekeeper、清洁机安装升级回滚、代表宿主与 Secure Input、系统级抓包/日志、最低硬件、许可证和用户指标全部通过 |
@@ -83,6 +85,7 @@ scratch/Xcode DerivedData 且启用 warnings-as-errors 的条件下保持内部�
 |---|---|---|
 | Rime 同步主链、稳定候选与独立语义位 | `DONE-INTERNAL` | 同一工作树快照的 SwiftPM、macOS 与 iOS 严格基线已通过 |
 | 24M + n-gram 候选排序与拼音约束 beam | `DONE-INTERNAL` | Debug/Release artifact 尚待统一 |
+| 零 prompt 拼音约束 LM 整句解码对照 | `DONE-INTERNAL` | Qwen2.5-0.5B base 仅做 next-token 打分、合法性由冻结词典拼音掩码强制（beam width 4，无提示工程、无 thinking、无 chat template）：冻结集 92.2% 句准确率 vs 词典基线 72.7%（t2s 校正繁简标签伪影后等效 95.6%）；prompt 生成路线同集 72.6%（910/974 空建议）证伪；错误归类显示词典召回与拼音对齐零损失，剩余真实错误为模型路径选择（LM-002 SFT 靶）；评测阶段产物，未接入产品链（LM-001） |
 | 真实键盘交互冻结集 v1 | `DONE-INTERNAL` | 七类真实键盘场景、实际候选面板读取、接受/撤销/退格报告器与 0.60 复评入口已建立；Secure Input、stale result 与完整 KBD-001 数据集仍未关闭 |
 | 无空格混输、个人英文词和部分候选后缀 | `DONE-INTERNAL` | 部分候选只提交确认前缀，严格验证后的原始拼音后缀继续组合；原生与跨平台回归已纳入 clean baseline |
 | IMK 强制提交原样上屏 | `DONE-INTERNAL` | 切换输入法/宿主终止会话时活跃拼音原样上屏、定稿前缀按定稿文本上屏，不再上屏高亮候选（与 squirrel 一致）；deactivateServer 兼作兜底；xcodebuild build/test 与 `swift test --filter RimeAIInputCoreTests`（406 项）通过，真实键盘 ⌃Space 切换实测通过 |

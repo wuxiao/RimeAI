@@ -131,6 +131,13 @@ Release INT8 曾有冻结质量与延迟证据；本次 clean baseline 未执行
 - beam decoder 只生成可由冻结 Rime 词典证明的整句，最长 30 个汉字。
 - 当前外层整句展示门为 0.60，内层 beam margin 保持冻结 validation 选择值。
 - 阈值质量数字只对其冻结数据和 artifact 有效，不能外推到真实接受率。
+- 整句解码的既定演进方向是零 prompt 的 LM 拼音约束解码：base LM 只做
+  next-token 打分，候选合法性由冻结词典拼音掩码强制（无提示工程、无
+  thinking、无 chat template）。prompt 生成路线在 0.5B 冻结集上证伪
+  （910/974 空建议，准确率等于词典兜底）；对照基线与错误归类冻结于
+  [docs/baselines/constrained-qwen-v2.json](docs/baselines/constrained-qwen-v2.json)。
+  该路线当前为评测产物，尚未接入 daemon 产品链；部署化与 SFT 见
+  [TASKS.md](TASKS.md) 的 LM-001/LM-002。
 
 ## 5. 可选云增强
 
@@ -281,6 +288,7 @@ tracer 也都是独立工具，不向 helper argv 增加策略面。
 | TD-006 | Voice Debug 使用私有 UDS；Release 只使用双向认证 XPC，不降级 |
 | TD-007 | ASR 内容完整性与产品 Release 资格分离，production catalog 是唯一审批源 |
 | TD-008 | 当前不声称抵御任意 hostile same-UID；相关例外必须保留为显式任务 |
+| TD-009 | 整句解码演进走零 prompt 拼音约束解码：LM 只打分，拼音掩码保证合法；prompt 生成路线在 0.5B 冻结集上证伪，不再投入 |
 
 ## 11. 维护规则
 

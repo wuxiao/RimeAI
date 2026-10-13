@@ -26,7 +26,7 @@ RimeAI 是面向 Apple Silicon Mac 的 Rime 本地优先语义输入引擎。Rim
 | 范围 | 最新状态 |
 |---|---|
 | macOS 键盘主线 | 内部实现已覆盖受控 librime、稳定候选、语义建议、整句、无空格混输、设置与安全输入保护和语言画像短语建议；fresh 严格构建与测试已通过 |
-| 本地语义模型 | macOS daemon 已有 24M 神经排序器、n-gram 融合与 beam decoder；Debug/本机安装路径仍使用浮点 24M，Release 制品使用 INT8 ONNX，尚待统一 |
+| 本地语义模型 | macOS daemon 已有 24M 神经排序器、n-gram 融合与 beam decoder；Debug/本机安装路径仍使用浮点 24M，Release 制品使用 INT8 ONNX，尚待统一。整句解码已冻结零 prompt 拼音约束解码对照基线（92.2% 句准确率，prompt 生成路线证伪），daemon 部署化未开始 |
 | 语言画像学习 | L1 短语库、L2 用户 LM 融合、L3 风格画像与 broker 空闲固化循环已收口；真实历史首评通过（学习增益 +0.299 nats/字、短语命中率 52.3%）；真机冻结集复评计入 KBD-001 |
 | 可选云增强 | 智谱官方 Coding Plan 直连（`glm-5.3-flash`）、不携带候选池的整句生成（generate/abstain，结构门校验）已实现并经真实端点冒烟；上屏后续写联想（continuation，默认关闭，Tab/点击接受）已完成真实键盘验收，模型随直连切换锁定后待在直连端点重跑冒烟；真实冻结集、目标网络、费用与发布验收未完成 |
 | 语音听写 | 默认关闭的内部技术探针；协议、UI、helper、评测 backend 和诊断 tracer 已实现，但没有获批产品模型、正式语料、TCC/设备与发布证据 |
@@ -74,7 +74,7 @@ macOS InputMethodKit
 - `ios/`：iOS 宿主与键盘扩展可行性工程。
 - `rimeai_daemon/`：本地语义 daemon。
 - `rimeai_runtime/`：daemon 与评测共享的本地运行时包（排序、beam
-  decoder、拼音守卫、候选策略与 IPC）。
+  decoder、拼音守卫、拼音约束解码器、候选策略与 IPC）。
 - `rimeai_cloud_broker/`：可选云候选 broker。
 - `rimeai_eval/`、`tools/`：冻结数据、训练、评测和质量门。
 - `script/`、`scripts/`：开发、安装、构建、验证与发布脚本。
