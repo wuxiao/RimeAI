@@ -2,6 +2,8 @@
 
 import math
 
+from pathlib import Path
+
 import pytest
 
 from rimeai_runtime.constrained_decoder import (
@@ -12,7 +14,6 @@ from rimeai_runtime.constrained_decoder import (
     fuzzy_segment_ok,
 )
 from rimeai_runtime.pinyin_guard import PinyinGuard
-
 
 class _StubTokenizer:
     """Duck-typed stand-in for a transformers tokenizer."""
@@ -260,3 +261,35 @@ def test_constrained_qwen_decoder_config_is_loadable():
     except SentenceDecoderConfigurationError as error:
         pytest.fail(f"decoder config rejected: {error}")
     assert decoder.name == "constrained-qwen-v1"
+
+
+_REAL_DICTIONARY = Path(".rimeai/rime/shared/luna_pinyin.dict.yaml")
+
+
+class _TextTokenizer:
+    """Minimal tokenizer whose vocab is exactly the given texts."""
+
+    def __init__(self, texts):
+        self.vocab_size = len(texts)
+        self._texts = list(texts)
+
+    def decode(self, ids):
+        return self._texts[ids[0]]
+
+
+@pytest.mark.skipif(
+    not _REAL_DICTIONARY.is_file(), reason="real Rime dictionary not bootstrapped"
+)
+def test_real_dictionary_indexes_multi_char_tokens():
+    # Pins the Task-1 ruling against real data: pronunciation values are
+    # concatenated (spaces stripped by PinyinGuard), so multi-char
+    # syllables must come from per-character readings, never from
+    # splitting the word-level value on spaces.
+    guard = PinyinGuard.from_rime_dictionary(_REAL_DICTIONARY)
+    index = PinyinTokenIndex.build(
+        _TextTokenizer(["世界", "今天", "你", "<pad>"]), guard
+    )
+    assert index.token_syllables[0] == frozenset({("shi", "jie")})
+    assert index.token_syllables[1] == frozenset({("jin", "tian")})
+    assert 0 in index.candidates(("shi", "jie", "hao"))
+    assert 1 in index.candidates(("jin", "tian"))

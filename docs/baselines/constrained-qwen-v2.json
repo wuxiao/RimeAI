@@ -14,6 +14,7 @@
       "model_artifact_id": "qwen2.5-0.5b@060db649:sha256-88c142557820:mps:fp16:constrained-v2",
       "lock": "models/qwen2.5-0.5b.lock.json",
       "decoding": "pinyin-constrained beam (width 4, per-path KV history, fuzzy pairs an/ang en/eng in/ing z/zh c/ch s/sh at syllable level), invariant seed context '。', no prompt, no chat template",
+      "confidence_semantics": "geometric mean of raw (not mask-renormalized) next-token softmax probabilities; small absolute values that decay with length — comparable only within this route, never against prompt-route confidences",
       "sentence_accuracy": 0.921971,
       "baseline_sentence_accuracy": 0.726899,
       "relative_lift": 0.268362,

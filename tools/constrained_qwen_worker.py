@@ -278,10 +278,12 @@ def main() -> int:
         fail(str(error))
     started = monotonic()
     index = PinyinTokenIndex.build(runtime.tokenizer, guard)
+    vocab_size = runtime.tokenizer.vocab_size
     print(
         f"constrained-qwen: pinyin token index built in "
         f"{monotonic() - started:.1f}s "
-        f"({len(index.token_syllables)} tokens indexed)",
+        f"({len(index.token_syllables)}/{vocab_size} tokens indexed, "
+        f"{100.0 * len(index.token_syllables) / vocab_size:.1f}% of vocab)",
         file=sys.stderr,
         flush=True,
     )

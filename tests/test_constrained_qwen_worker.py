@@ -1,5 +1,7 @@
 """Constrained qwen worker: protocol handling with injected fakes."""
 
+from pathlib import Path
+
 import pytest
 import torch
 
@@ -210,3 +212,37 @@ def test_beam_abstains_when_all_complete_paths_exceed_max_characters():
     )
     assert response["suggestion"] == ""
     assert response["confidence"] == 0.0
+
+
+_REAL_DICTIONARY = Path(".rimeai/rime/shared/luna_pinyin.dict.yaml")
+_REAL_MODEL_DIR = Path(".rimeai/models/qwen2.5-0.5b-base-060db64")
+
+
+@pytest.mark.skipif(
+    not (_REAL_DICTIONARY.is_file() and _REAL_MODEL_DIR.is_dir()),
+    reason="real dictionary and base model not bootstrapped",
+)
+def test_real_model_index_covers_multi_char_tokens():
+    # End-to-end guard for the B1 class of regression: against the real
+    # Qwen vocab and real dictionary, multi-char word tokens must be
+    # indexed and reachable, and coverage must stay in a sane band so a
+    # silent index collapse is caught.
+    from transformers import AutoTokenizer
+
+    from rimeai_runtime.pinyin_guard import PinyinGuard
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        _REAL_MODEL_DIR, local_files_only=True
+    )
+    guard = PinyinGuard.from_rime_dictionary(_REAL_DICTIONARY)
+    index = PinyinTokenIndex.build(tokenizer, guard)
+    assert tokenizer.vocab_size > 100_000
+    assert len(index.token_syllables) > 10_000
+    multi_char = [
+        token_id
+        for token_id, text in index.token_texts.items()
+        if len(text) > 1
+    ]
+    assert len(multi_char) > 10_000
+    hits = index.candidates(("shi", "jie"))
+    assert any(index.token_texts[token_id] == "世界" for token_id in hits)

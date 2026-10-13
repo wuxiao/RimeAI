@@ -154,6 +154,10 @@ class PinyinTokenIndex:
 @dataclass(frozen=True)
 class DecodeResult:
     text: str
+    # Geometric mean of RAW next-token softmax probabilities (NOT
+    # renormalized within the pinyin mask): absolute values are small and
+    # decay with sentence length. Comparable only within this route —
+    # never against prompt-route confidences or beam margins.
     confidence: float
     consumed_syllables: int
 
