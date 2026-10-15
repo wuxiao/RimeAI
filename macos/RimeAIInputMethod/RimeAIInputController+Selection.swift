@@ -70,12 +70,30 @@ extension RimeAIInputController {
         } else {
             appliedTransition = transition
         }
+        // KBD-006：焦点在中间段时，数字选词只确认焦点段（Rime 学习
+        // 照常），焦点自动右移到下一拼音段；后缀保持可编辑，历史留
+        // 待最终整句提交时一次落库。
+        if composition.canMoveFocusRight {
+            composition.moveFocusRight(
+                finalizedText: appliedTransition.committedText
+            )
+            invalidateInference(clearPresentation: true)
+            compositionInput(composition.pinyin, client: client)
+            scheduleSuffixRefinement(client: client)
+            if acceptedViaSemanticCandidate {
+                recordSemanticAcceptance(decision: semanticDecision)
+            } else {
+                settings.record(.mainAccepted)
+            }
+            return
+        }
         let historySource = acceptedViaSemanticCandidate
             ? pipeline.historySource
             : .rimeMain
-        // 整段提交（无剩余拼音）时，上屏文本 = 已定稿前缀 + 本次提交；
-        // 在 apply 清空前快照，供续写协调器的汉字数门槛使用。
-        let fullCommittedText = composition.committedPrefixText
+        // 整段提交（无剩余拼音）时，上屏文本 = 全部定稿外层（前缀 +
+        // 焦点字面量 + 后缀）+ 本次提交；在 apply 清空前快照，供续写
+        // 协调器的汉字数门槛使用。
+        let fullCommittedText = composition.committedOuterText
             + appliedTransition.committedText
         let isFullCommit = appliedTransition.remainingInput == nil
         guard applyCandidateSelection(
@@ -238,8 +256,9 @@ extension RimeAIInputController {
                 enterSecureInput(client: client)
             },
             insertConfirmedPrefix: { [self] text, pinyin in
-                let fullText = composition.committedPrefixText + text
+                let fullText = composition.committedOuterText + text
                 let fullPinyin = composition.prefixHistoryPinyin + pinyin
+                    + composition.suffixHistoryPinyin
                 let inserted = insertCommittedText(
                     fullText,
                     pinyin: fullPinyin,

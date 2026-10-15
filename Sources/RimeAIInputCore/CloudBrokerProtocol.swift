@@ -206,6 +206,39 @@ public enum CloudGeneratedSentencePolicy {
     /// then bounded by the single-segment structural rules. Each part
     /// is not required to be pure Han or to fit its segment's pinyin
     /// letter count.
+    /// 按段拆分整句建议（KBD-007 按段接受的基础）：依据各段分隔
+    /// 符按序切割，返回与段一一对应的文本切片；分隔符缺失或任何
+    /// 切片为空时返回 nil。与 `allows(text:pinyinSegments:confidence:)`
+    /// 的结构校验同口径。
+    public static func segmentTexts(
+        text: String,
+        pinyinSegments: [PinyinSegment]
+    ) -> [String]? {
+        guard let lastSegment = pinyinSegments.last,
+              PinyinSegmentPolicy.isValid(
+                  pinyinSegments,
+                  activePinyin: lastSegment.pinyin
+              )
+        else {
+            return nil
+        }
+        var remainder = Substring(text)
+        var parts: [String] = []
+        for segment in pinyinSegments.dropLast() {
+            guard let separatorRange = remainder.range(of: segment.separator)
+            else {
+                return nil
+            }
+            parts.append(String(remainder[..<separatorRange.lowerBound]))
+            remainder = remainder[separatorRange.upperBound...]
+        }
+        parts.append(String(remainder))
+        guard parts.allSatisfy({ !$0.isEmpty }) else {
+            return nil
+        }
+        return parts
+    }
+
     public static func allows(
         text: String,
         pinyinSegments: [PinyinSegment],
@@ -213,26 +246,7 @@ public enum CloudGeneratedSentencePolicy {
     ) -> Bool {
         guard confidence.isFinite,
               confidence >= minimumConfidence,
-              let lastSegment = pinyinSegments.last,
-              PinyinSegmentPolicy.isValid(
-                  pinyinSegments,
-                  activePinyin: lastSegment.pinyin
-              )
-        else {
-            return false
-        }
-        var remainder = text
-        var parts: [String] = []
-        for segment in pinyinSegments.dropLast() {
-            guard let separatorRange = remainder.range(of: segment.separator)
-            else {
-                return false
-            }
-            parts.append(String(remainder[..<separatorRange.lowerBound]))
-            remainder = String(remainder[separatorRange.upperBound...])
-        }
-        parts.append(remainder)
-        guard parts.allSatisfy({ !$0.isEmpty })
+              segmentTexts(text: text, pinyinSegments: pinyinSegments) != nil
         else {
             return false
         }
@@ -577,18 +591,19 @@ public enum ContinuationTextPolicy {
         return tailOverlap(context: context, text: text) <= maximumTailOverlap
     }
 
-    /// Longest k such that `context`'s k-character suffix equals `text`'s
-    /// k-character prefix (the model repeating the tail of what it saw).
+    /// Longest overlap length such that `context`'s suffix equals `text`'s
+    /// prefix of the same length (the model repeating the tail of what it
+    /// saw).
     static func tailOverlap(context: String, text: String) -> Int {
         let contextCharacters = Array(context)
         let textCharacters = Array(text)
         let bound = min(contextCharacters.count, textCharacters.count)
         var overlap = 0
-        for k in 1 ... bound where
-            String(contextCharacters.suffix(k))
-                == String(textCharacters.prefix(k))
+        for overlapLength in 1 ... bound where
+            String(contextCharacters.suffix(overlapLength))
+                == String(textCharacters.prefix(overlapLength))
         {
-            overlap = k
+            overlap = overlapLength
         }
         return overlap
     }

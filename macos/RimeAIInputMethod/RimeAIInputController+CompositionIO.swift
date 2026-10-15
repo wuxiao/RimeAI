@@ -99,6 +99,102 @@ extension RimeAIInputController {
         renderCandidatePanel(client: client)
     }
 
+    /// KBD-006：焦点段定稿/移动后重推后缀段定稿文本（daemon 本地
+    /// 排序融合，批内防抖 + 串行）。仅在焦点不在末段时有实际工作。
+    func scheduleSuffixRefinement(client: any IMKTextInput) {
+        pipeline.scheduleSuffixRefinement(
+            token: composition.token,
+            bundleIdentifier: currentBundleIdentifier,
+            contextProvider: { [weak self] policy in
+                self?.inferenceContext(policy: policy, client: client)
+                    ?? ""
+            },
+            applyRefinedText: { [weak self] suffixIndex, text, token in
+                self?.applyRefinedSuffixText(
+                    suffixIndex,
+                    text,
+                    token,
+                    client: client
+                ) ?? false
+            }
+        )
+    }
+
+    /// 应用单段重推文本并刷新 marked text；token 失效（用户编辑
+    /// 抢先）时拒绝，批由管线侧作废。
+    func applyRefinedSuffixText(
+        _ suffixIndex: Int,
+        _ text: String,
+        _ token: CompositionToken,
+        client: any IMKTextInput
+    ) -> Bool {
+        guard composition.updateSuffixCommittedText(
+            atSuffixIndex: suffixIndex,
+            committedText: text,
+            token: token
+        ) else {
+            return false
+        }
+        client.setMarkedText(
+            composition.displayString,
+            selectionRange: NSRange(
+                location: composition.displayString.utf16.count,
+                length: 0
+            ),
+            replacementRange: notFoundRange
+        )
+        return true
+    }
+
+    /// KBD-007：云端整句按段应用（不提交）。仅当建议覆盖全部段、
+    /// 段数 ≥ 2 且每段均可转换到用户字形时生效；返回 false 时调用
+    /// 方回退既有整句提交路径。
+    func applySegmentedSuggestionIfEligible(
+        _ candidate: String,
+        client: any IMKTextInput
+    ) -> Bool {
+        guard composition.semanticCandidateCoversPrefix,
+              let segments = composition.semanticCandidateSegments,
+              segments.count >= 2,
+              let texts = CloudGeneratedSentencePolicy.segmentTexts(
+                  text: candidate,
+                  pinyinSegments: segments
+              )
+        else {
+            return false
+        }
+        let sanitizedTexts = texts.map {
+            SemanticCandidateScriptPolicy.sanitized(
+                text: $0,
+                characterSet: settings.characterSet
+            )
+        }
+        guard sanitizedTexts.allSatisfy({ $0 != nil }) else {
+            return false
+        }
+        let token = composition.token
+        guard composition.applySegmentedSuggestion(
+            sanitizedTexts.map { $0! },
+            token: token
+        ) else {
+            return false
+        }
+        settings.record(.semanticAccepted)
+        settings.record(.semanticSentenceAccepted)
+        invalidateInference(clearPresentation: true)
+        client.setMarkedText(
+            composition.displayString,
+            selectionRange: NSRange(
+                location: composition.displayString.utf16.count,
+                length: 0
+            ),
+            replacementRange: notFoundRange
+        )
+        candidatePanel.hide()
+        configureVoiceHotKey()
+        return true
+    }
+
     func resolveMixedComposition(
         rawInput: String
     ) -> MixedCompositionSuggestion? {

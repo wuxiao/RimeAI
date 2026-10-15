@@ -127,6 +127,10 @@ public struct SemanticSuggestionDependencies: Sendable {
         _ completion: @escaping @Sendable (SemanticInferenceResult?) -> Void
     ) -> Void
     public var cancelLocalInference: @Sendable (_ requestID: String) -> Void
+    /// Rime 候选查询（分段向后重推 KBD-006）：控制器桥接进程内
+    /// RimeEngine；默认空实现（单测与不启用时零开销）。
+    public var rimeCandidates: @Sendable (_ pinyin: String) -> [String] =
+        { _ in [] }
 
     // Cloud transport and request assembly.
     public var clientSessionID: String
@@ -175,6 +179,7 @@ public struct SemanticSuggestionDependencies: Sendable {
             @escaping @Sendable (SemanticInferenceResult?) -> Void
         ) -> Void,
         cancelLocalInference: @escaping @Sendable (String) -> Void,
+        rimeCandidates: @escaping @Sendable (String) -> [String] = { _ in [] },
         clientSessionID: String,
         loadCloudAPIKey: @escaping @Sendable () -> String?,
         cloudHistorySnapshot: @escaping @Sendable (String) -> HistoryContextSnapshot?,
@@ -209,6 +214,7 @@ public struct SemanticSuggestionDependencies: Sendable {
         self.characterSet = characterSet
         self.sendLocalInference = sendLocalInference
         self.cancelLocalInference = cancelLocalInference
+        self.rimeCandidates = rimeCandidates
         self.clientSessionID = clientSessionID
         self.loadCloudAPIKey = loadCloudAPIKey
         self.cloudHistorySnapshot = cloudHistorySnapshot
@@ -240,42 +246,45 @@ public final class SemanticSuggestionPipeline: @unchecked Sendable {
     public static let localDeadlineMilliseconds = 400
     public static let cloudWallClockDeadline: TimeInterval = 30.0
 
-    private let dependencies: SemanticSuggestionDependencies
+    let dependencies: SemanticSuggestionDependencies
 
     // Orchestration state (was: RimeAIInputController fields).
-    private var localDebounceTask: (any SemanticSuggestionTask)?
-    private var cloudDebounceTask: (any SemanticSuggestionTask)?
-    private var pendingRequestID: String?
-    private var pendingRequestStartedAt: TimeInterval?
+    var localDebounceTask: (any SemanticSuggestionTask)?
+    var cloudDebounceTask: (any SemanticSuggestionTask)?
+    var pendingRequestID: String?
+    var pendingRequestStartedAt: TimeInterval?
     // Segment layout of the in-flight local request, consumed by
     // `applyLocalResult` for cross-punctuation sentence validation.
-    private var pendingRequestSegments: [PinyinSegment]?
-    private var pendingCloudRequestID: String?
+    var pendingRequestSegments: [PinyinSegment]?
+    var pendingCloudRequestID: String?
+    /// 分段向后重推（KBD-006）：防抖任务与在途请求 ID 集合。
+    var suffixRefinementTask: (any SemanticSuggestionTask)?
+    var pendingSuffixRefinementRequestIDs: Set<String> = []
 
     // L1 phrasebook fallback (LP-006): the composition context the fill
     // is anchored to, plus whether the cloud channel for this cycle may
     // still claim the slot.
-    private struct PhraseBookSlotContext {
+    struct PhraseBookSlotContext {
         let pinyin: String
         let bundleIdentifier: String
         let token: CompositionToken
     }
 
-    private var phraseContext: PhraseBookSlotContext?
-    private var cloudCyclePending = false
+    var phraseContext: PhraseBookSlotContext?
+    var cloudCyclePending = false
 
     // The visible suggestion slot, read by the controller for rendering
     // and commit attribution.
-    public private(set) var presentation: SemanticCandidatePresentation =
+    public internal(set) var presentation: SemanticCandidatePresentation =
         .idle
-    public private(set) var historySource: HistoryCommitSource =
+    public internal(set) var historySource: HistoryCommitSource =
         .localSemantic
-    public private(set) var cloudCandidate: CloudCandidate?
-    public private(set) var mixedCompositionSuggestion:
+    public internal(set) var cloudCandidate: CloudCandidate?
+    public internal(set) var mixedCompositionSuggestion:
         MixedCompositionSuggestion?
-    public private(set) var cloudSuggestionApplied = false
-    public private(set) var contextCharacterCount = 0
-    public private(set) var cloudInFlight = false
+    public internal(set) var cloudSuggestionApplied = false
+    public internal(set) var contextCharacterCount = 0
+    public internal(set) var cloudInFlight = false
 
     public var hasPendingCloudRequest: Bool {
         pendingCloudRequestID != nil
@@ -285,11 +294,11 @@ public final class SemanticSuggestionPipeline: @unchecked Sendable {
         self.dependencies = dependencies
     }
 
-    private var composition: CompositionState {
+    var composition: CompositionState {
         dependencies.compositionSnapshot()
     }
 
-    private func emit(_ event: SemanticSuggestionPipelineEvent) {
+    func emit(_ event: SemanticSuggestionPipelineEvent) {
         dependencies.onEvent?(event)
     }
 
@@ -367,734 +376,12 @@ public final class SemanticSuggestionPipeline: @unchecked Sendable {
         return true
     }
 
-    // MARK: Scheduling
-
-    /// Entry point after a composition edit produced fresh candidates.
-    /// `contextProvider` supplies the inference context for the given
-    /// policy (the controller reads its session store / cursor text).
-    public func scheduleInference(
-        token: CompositionToken,
-        bundleIdentifier: String?,
-        contextProvider: (ContextPolicy) -> String
-    ) {
-        presentation = .analyzing
-        guard let bundleIdentifier,
-              !composition.isSecureInput,
-              !dependencies.isSecureEventInputEnabled()
-        else {
-            presentation = .unavailable
-            emit(.diagnostic(.privacyBlocked))
-            return
-        }
-        guard composition.pinyin.count <= 256 else {
-            presentation = .inputTooLong
-            contextCharacterCount = 0
-            return
-        }
-        let localAllowed = dependencies.isLocalInferenceAllowed(
-            bundleIdentifier
-        )
-        let cloudAllowed = dependencies.isCloudConfigured()
-        guard localAllowed || cloudAllowed else {
-            presentation = .unavailable
-            return
-        }
-        if !localAllowed, cloudAllowed {
-            presentation = .cloudAnalyzing
-        }
-        let pinyin = composition.pinyin.lowercased()
-        // 跨标点段布局随本地请求发送；allowSentence 以各段字母总数
-        // 判定，使跨标点整句建议不因活跃段偏短而被闸掉。
-        let segments = composition.inferenceSegments
-        let sentenceScopePinyin = segments.map { $0.map(\.pinyin).joined() }
-            ?? pinyin
-        phraseContext = PhraseBookSlotContext(
-            pinyin: pinyin,
-            bundleIdentifier: bundleIdentifier,
-            token: token
-        )
-        cloudCyclePending = cloudAllowed
-        let localRequest: SemanticInferenceRequest?
-        if localAllowed {
-            let requestID = UUID().uuidString
-            let contextPolicy = dependencies.contextPolicy(
-                bundleIdentifier
-            )
-            let context = contextProvider(contextPolicy)
-            contextCharacterCount = context.count
-            localRequest = SemanticInferenceRequest(
-                requestID: requestID,
-                token: token,
-                contextPolicy: contextPolicy,
-                context: context,
-                pinyin: pinyin,
-                candidates: composition.mainCandidates,
-                deadlineMilliseconds: Self.localDeadlineMilliseconds,
-                allowSentence: LocalSentenceSuggestionPolicy.allows(
-                    pinyin: sentenceScopePinyin,
-                    characterSet: dependencies.characterSet()
-                ),
-                segments: segments
-            )
-        } else {
-            localRequest = nil
-            contextCharacterCount = 0
-        }
-        // Local debounce replaces without cancelling: superseded timers
-        // self-reject on the live token guard inside, exactly like the
-        // controller's DispatchWorkItem did.
-        localDebounceTask = dependencies.scheduling.scheduleOnMain(
-            after: Self.localDebounceInterval
-        ) { [weak self] in
-            guard let self,
-                  self.composition.token == token,
-                  !self.composition.isSelecting,
-                  !self.composition.isSecureInput,
-                  !self.dependencies.isSecureEventInputEnabled()
-            else {
-                return
-            }
-            if let localRequest {
-                self.sendInference(localRequest, token: token)
-            }
-        }
-        if cloudAllowed {
-            scheduleCloudInference(
-                pinyin: pinyin,
-                bundleIdentifier: bundleIdentifier,
-                token: token,
-                localRequestWasScheduled: localRequest != nil
-            )
-        }
-    }
-
-    /// 击键停顿 1000 ms 后才发云端请求：latest-request-wins 下连续击键
-    /// 期间发出的云端请求必然被下一次击键取消，只会白白消耗一次 LLM
-    /// 往返；等停顿再发，大模型结果才有机会真正到达候选面板。
-    private func scheduleCloudInference(
-        pinyin: String,
-        bundleIdentifier: String,
-        token: CompositionToken,
-        localRequestWasScheduled: Bool
-    ) {
-        cloudDebounceTask?.cancel()
-        cloudDebounceTask = dependencies.scheduling.scheduleOnMain(
-            after: Self.cloudDebounceInterval
-        ) { [weak self] in
-            guard let self,
-                  self.composition.token == token,
-                  !self.composition.isSelecting,
-                  !self.composition.isSecureInput,
-                  !self.dependencies.isSecureEventInputEnabled()
-            else {
-                return
-            }
-            self.buildAndSendCloudInference(
-                pinyin: pinyin,
-                bundleIdentifier: bundleIdentifier,
-                token: token,
-                localRequestWasScheduled: localRequestWasScheduled
-            )
-        }
-    }
-
-    private func sendInference(
-        _ request: SemanticInferenceRequest,
-        token: CompositionToken
-    ) {
-        let requestID = request.requestID
-        pendingRequestID = requestID
-        pendingRequestSegments = request.segments
-        pendingRequestStartedAt = dependencies.now()
-        emit(.diagnostic(.requestStarted))
-        dependencies.sendLocalInference(request) { [weak self] result in
-            Task { @MainActor [weak self] in
-                self?.applyInferenceResult(
-                    result,
-                    requestID: requestID,
-                    token: token
-                )
-            }
-        }
-    }
-
-    private func buildAndSendCloudInference(
-        pinyin: String,
-        bundleIdentifier: String,
-        token: CompositionToken,
-        localRequestWasScheduled: Bool
-    ) {
-        let dependencies = dependencies
-        let requestID = UUID().uuidString
-        let startedAt = dependencies.now()
-        let deadlineAt = startedAt + Self.cloudWallClockDeadline
-        let modelID = dependencies.cloudModelID()
-        let clientSessionID = dependencies.clientSessionID
-        // 构造请求前从组合状态再取一次段布局：调度与击键之间的
-        // 竞态由这里的最新快照与主线程 guard 共同兜住。
-        let segments = composition.inferenceSegments
-        pendingCloudRequestID = requestID
-        dependencies.scheduling.dispatchOffMain { [weak self] in
-            let apiKey = dependencies.loadCloudAPIKey()
-            guard let apiKey,
-                  !apiKey.isEmpty,
-                  apiKey.utf8.count <= 512
-            else {
-                dependencies.scheduling.dispatchOnMain {
-                    guard let self,
-                          self.pendingCloudRequestID == requestID
-                    else {
-                        return
-                    }
-                    self.pendingCloudRequestID = nil
-                    self.emit(.diagnostic(.cloudTransportFailure))
-                    self.applyCloudFallback(
-                        localRequestWasScheduled: localRequestWasScheduled,
-                        decision: nil
-                    )
-                    dependencies.disconnectCloud()
-                }
-                return
-            }
-            let historySnapshot = dependencies.cloudHistorySnapshot(pinyin)
-            // 网络层不再设软上限：拼音拼出有把握的中文通常几秒完成，
-            // 长拼音/复杂整句建议需要更久。协议 clamp（30000ms，本地
-            // 开发调试放宽）仍保留着作最后保险，墙钟 deadlineAt 与之
-            // 对齐，只在 envelope 接近超时后才截断（broker/客户端共
-            // 享同一 deadline）。
-            let remainingMilliseconds = max(
-                1,
-                Int(
-                    (
-                        deadlineAt
-                            - dependencies.now()
-                    ) * 1_000
-                )
-            )
-            let request = CloudInferenceRequest(
-                requestID: requestID,
-                token: token,
-                bundleIdentifier: bundleIdentifier,
-                clientSessionID: clientSessionID,
-                modelID: modelID,
-                deadlineMilliseconds: remainingMilliseconds,
-                pinyin: pinyin,
-                recentContext: historySnapshot?.recentText ?? "",
-                historySnippets: historySnapshot?.relevantSnippets ?? [],
-                historyGeneration: historySnapshot?.generation ?? 0,
-                segments: segments
-            )
-            dependencies.scheduling.dispatchOnMain {
-                guard let self,
-                      self.pendingCloudRequestID == requestID
-                else {
-                    return
-                }
-                let compositionStillCurrent = self.composition.token == token
-                    && !self.composition.isSelecting
-                    && !self.composition.isSecureInput
-                    && !dependencies.isSecureEventInputEnabled()
-                guard compositionStillCurrent,
-                      dependencies.now() <= deadlineAt,
-                      request.isValid
-                else {
-                    self.pendingCloudRequestID = nil
-                    // Withdrawal reason must match reality: a superseded
-                    // composition is stale, a missed deadline is a
-                    // timeout, a request that fails client-side
-                    // structural validation was never sendable.
-                    if !compositionStillCurrent {
-                        self.emit(.diagnostic(.staleResult))
-                    } else if dependencies.now() > deadlineAt {
-                        self.emit(.diagnostic(.cloudTimeout))
-                    } else {
-                        self.emit(.diagnostic(.cloudInvalidRequest))
-                    }
-                    if compositionStillCurrent {
-                        self.applyCloudFallback(
-                            localRequestWasScheduled:
-                                localRequestWasScheduled,
-                            decision: nil
-                        )
-                    }
-                    return
-                }
-                self.emit(.diagnostic(.cloudRequestStarted))
-                self.cloudInFlight = true
-                self.emit(.suggestionSlotChanged)
-                dependencies.sendCloudInference(
-                    request,
-                    apiKey
-                ) { [weak self] result in
-                    Task { @MainActor [weak self] in
-                        self?.applyCloudInferenceResult(
-                            result,
-                            request: request,
-                            token: token,
-                            deadlineAt: deadlineAt,
-                            localRequestWasScheduled:
-                                localRequestWasScheduled
-                        )
-                    }
-                }
-            }
-        }
-    }
-
-    // MARK: Result application
-
-    /// Apply a local daemon result. Guard ladder: pending request id →
-    /// secure input → cloud ownership → status/token/structure. After the
-    /// ladder resolves, an empty slot may still be filled by the L1
-    /// phrasebook fallback.
-    public func applyInferenceResult(
-        _ result: SemanticInferenceResult?,
-        requestID: String,
-        token: CompositionToken
-    ) {
-        applyLocalResult(result, requestID: requestID, token: token)
-        tryPhraseBookFill()
-    }
-
-    private func applyLocalResult(
-        _ result: SemanticInferenceResult?,
-        requestID: String,
-        token: CompositionToken
-    ) {
-        guard pendingRequestID == requestID else {
-            emit(.diagnostic(.staleResult))
-            return
-        }
-        pendingRequestID = nil
-        let requestSegments = pendingRequestSegments
-        pendingRequestSegments = nil
-        if let pendingRequestStartedAt {
-            emit(.latency(milliseconds: max(
-                0,
-                (
-                    dependencies.now()
-                        - pendingRequestStartedAt
-                ) * 1_000
-            )))
-        }
-        pendingRequestStartedAt = nil
-        guard !dependencies.isSecureEventInputEnabled() else {
-            emit(.secureInputDetected)
-            return
-        }
-        if cloudSuggestionApplied {
-            // A valid cloud decision owns the single explicit suggestion
-            // slot.
-            return
-        }
-        guard let result else {
-            emit(.diagnostic(.daemonFailure))
-            presentation = .failure
-            emit(.suggestionSlotChanged)
-            return
-        }
-        guard result.status == "ok" else {
-            if result.status == "timeout" {
-                emit(.diagnostic(.timeout))
-            } else if result.status == "circuit_open" {
-                emit(.diagnostic(.circuitOpen))
-            } else {
-                emit(.diagnostic(.daemonFailure))
-            }
-            presentation = .failure
-            emit(.suggestionSlotChanged)
-            return
-        }
-        guard result.matches(token) else {
-            emit(.diagnostic(.staleResult))
-            presentation = .idle
-            emit(.suggestionSlotChanged)
-            return
-        }
-        guard result.isValid(
-            for: token,
-            candidates: composition.mainCandidates,
-            segments: requestSegments
-        ) else {
-            emit(.diagnostic(.invalidResult))
-            presentation = .failure
-            emit(.suggestionSlotChanged)
-            return
-        }
-        let candidatePresentation = result.candidatePresentation(
-            characterSet: dependencies.characterSet()
-        )
-        presentation = candidatePresentation
-        switch candidatePresentation {
-        case .sameTopCandidate:
-            emit(.diagnostic(.sameTopCandidate))
-            emit(.suggestionSlotChanged)
-            return
-        case .insufficientCandidates:
-            emit(.diagnostic(.insufficientCandidates))
-            emit(.suggestionSlotChanged)
-            return
-        case .belowConfidence:
-            emit(.diagnostic(.belowConfidence))
-            emit(.suggestionSlotChanged)
-            return
-        case .noCandidate:
-            emit(.diagnostic(.noCandidate))
-            emit(.suggestionSlotChanged)
-            return
-        case .sentenceTooLong:
-            emit(.diagnostic(.sentenceTooLong))
-            emit(.suggestionSlotChanged)
-            return
-        case .sentenceIncomplete:
-            emit(.diagnostic(.sentenceIncomplete))
-            emit(.suggestionSlotChanged)
-            return
-        case .scriptMismatch:
-            // 字形不符不再静默丢弃：就地转换为用户设置的字形后照常
-            // 展示（繁体整句转简体），仅无法转换时才拒绝。
-            if let decision = result.resolvedDecision,
-               let sanitized = SemanticCandidateScriptPolicy.sanitized(
-                   text: result.displayCandidate,
-                   characterSet: dependencies.characterSet()
-               ),
-               dependencies.applySemanticCandidate(
-                   sanitized,
-                   token,
-                   decision,
-                   requestSegments
-               )
-            {
-                presentation = .candidate(
-                    text: sanitized,
-                    decision: decision,
-                    confidence: result.confidence ?? 0
-                )
-                historySource = .localSemantic
-                cloudCandidate = nil
-                emit(.diagnostic(.resultShown))
-                emit(.suggestionSlotChanged)
-                return
-            }
-            emit(.diagnostic(.sentenceScriptMismatch))
-            emit(.suggestionSlotChanged)
-            return
-        case .idle,
-             .analyzing,
-             .cloudAnalyzing,
-             .cloudSameTopCandidate,
-             .cloudBelowConfidence,
-             .cloudFailure,
-             .continuation,
-             .unavailable,
-             .failure:
-            emit(.diagnostic(.invalidResult))
-            presentation = .failure
-            emit(.suggestionSlotChanged)
-            return
-        case .candidate:
-            break
-        case .inputTooLong:
-            emit(.diagnostic(.inputTooLong))
-            emit(.suggestionSlotChanged)
-            return
-        }
-        let candidate = result.displayCandidate
-        guard let decision = result.resolvedDecision else {
-            emit(.diagnostic(.invalidResult))
-            presentation = .failure
-            emit(.suggestionSlotChanged)
-            return
-        }
-        guard !candidate.isEmpty,
-              !candidate.contains("\n"),
-              dependencies.applySemanticCandidate(
-                  candidate,
-                  token,
-                  decision,
-                  requestSegments
-              )
-        else {
-            emit(.diagnostic(.invalidResult))
-            presentation = .failure
-            emit(.suggestionSlotChanged)
-            return
-        }
-        historySource = .localSemantic
-        cloudCandidate = nil
-        emit(.diagnostic(.resultShown))
-        if decision == .sentenceSuggestion {
-            emit(.diagnostic(.sentenceSuggestionShown))
-        } else {
-            emit(.diagnostic(.rankedCandidateShown))
-        }
-        emit(.suggestionSlotChanged)
-    }
-
-    /// Apply a cloud result. The guard ladder is frozen (arbitration
-    /// decision 2026-08-16): request id → secure input → composition
-    /// token/isSelecting/isSecureInput → history generation → deadline →
-    /// structural validation.
-    public func applyCloudInferenceResult(
-        _ result: CloudInferenceResponse?,
-        request: CloudInferenceRequest,
-        token: CompositionToken,
-        deadlineAt: TimeInterval,
-        localRequestWasScheduled: Bool
-    ) {
-        guard pendingCloudRequestID == request.requestID else {
-            // 迟到/被替换的响应：计入 stale 而不是无声丢弃。
-            emit(.diagnostic(.staleResult))
-            return
-        }
-        pendingCloudRequestID = nil
-        cloudInFlight = false
-        emit(.suggestionSlotChanged)
-        guard !dependencies.isSecureEventInputEnabled() else {
-            emit(.secureInputDetected)
-            return
-        }
-        guard composition.token == token,
-              !composition.isSelecting,
-              !composition.isSecureInput
-        else {
-            emit(.diagnostic(.staleResult))
-            return
-        }
-        guard dependencies.currentHistoryGeneration()
-            == request.historyGeneration
-        else {
-            emit(.diagnostic(.staleResult))
-            return
-        }
-        guard dependencies.now() <= deadlineAt else {
-            emit(.diagnostic(.cloudTimeout))
-            applyCloudFallback(
-                localRequestWasScheduled: localRequestWasScheduled,
-                decision: nil
-            )
-            return
-        }
-        guard let result else {
-            emit(.diagnostic(.cloudTransportFailure))
-            applyCloudFallback(
-                localRequestWasScheduled: localRequestWasScheduled,
-                decision: nil
-            )
-            return
-        }
-        guard result.isValid(for: request) else {
-            emit(.diagnostic(.cloudInvalidResult))
-            applyCloudFallback(
-                localRequestWasScheduled: localRequestWasScheduled,
-                decision: nil
-            )
-            return
-        }
-        if result.decision == .generate {
-            // 响应确实回来了：无论后续展示与否都留下痕迹，避免
-            // 生成链路出现无法诊断的静默。
-            emit(.diagnostic(.cloudGenerateReceived))
-            applyCloudGeneratedResult(
-                result,
-                request: request,
-                token: token,
-                localRequestWasScheduled: localRequestWasScheduled
-            )
-            return
-        }
-        // 云端仅剩 abstain：无候选建议可上屏，交由兜底展示策略。
-        applyCloudFallback(
-            localRequestWasScheduled: localRequestWasScheduled,
-            decision: result.decision
-        )
-    }
-
-    /// 云端生成式整句：生成文本已通过客户端结构校验（拼音对齐校验已
-    /// 按产品决策移除，文本可超出拼音覆盖并含标点），这里先转换字形
-    /// 再处理与首选的重复——重复不再静默，而是明示云端表态，让 AI
-    /// 参与始终可见。
-    private func applyCloudGeneratedResult(
-        _ result: CloudInferenceResponse,
-        request: CloudInferenceRequest,
-        token: CompositionToken,
-        localRequestWasScheduled: Bool
-    ) {
-        guard let text = result.generatedText,
-              let confidence = result.confidence
-        else {
-            applyCloudFallback(
-                localRequestWasScheduled: localRequestWasScheduled,
-                decision: .abstain
-            )
-            return
-        }
-        // 生成整句可能含繁体字：就地转换到用户字形后再比较与展示。
-        guard let renderedText = SemanticCandidateScriptPolicy.sanitized(
-            text: text,
-            characterSet: dependencies.characterSet()
-        ) else {
-            emit(.diagnostic(.sentenceScriptMismatch))
-            applyCloudFallback(
-                localRequestWasScheduled: localRequestWasScheduled,
-                decision: .abstain
-            )
-            return
-        }
-        // 与 Rime 首选相同：明示"云端与首选一致"而不是静默 keep，
-        // 用户在本地无法重排的场景（如完整候选不足）也能看到 AI 表态。
-        if renderedText == composition.mainCandidates.first {
-            presentation = .cloudSameTopCandidate
-            emit(.suggestionSlotChanged)
-            return
-        }
-        // 本地已展示相同文本（典型为本地整句建议先到）：不覆盖。
-        if cloudSuggestionApplied,
-           case let .candidate(displayed, _, _) = presentation,
-           displayed == renderedText
-        {
-            return
-        }
-        guard dependencies.applySemanticCandidate(
-            renderedText,
-            token,
-            .sentenceSuggestion,
-            request.segments
-        ) else {
-            emit(.diagnostic(.cloudInvalidResult))
-            return
-        }
-        let candidate = CloudCandidate(
-            text: renderedText,
-            rimeIndex: nil,
-            consumedLength: request.segments?.reduce(0) {
-                    $0 + $1.pinyin.unicodeScalars.filter { $0.value != 39 }.count
-                }
-                // Letter count (apostrophes excluded) keeps the
-                // segmented and unsegmented paths consistent.
-                ?? request.pinyin.unicodeScalars.filter { $0.value != 39 }
-                    .count,
-            alignedPinyin: result.generatedPinyin ?? request.pinyin
-        )
-        historySource = .cloudGenerated
-        cloudCandidate = candidate
-        cloudSuggestionApplied = true
-        presentation = .candidate(
-            text: renderedText,
-            decision: .sentenceSuggestion,
-            confidence: confidence
-        )
-        contextCharacterCount = request.recentContext.count
-            + request.historySnippets.reduce(0) { $0 + $1.text.count }
-        emit(.diagnostic(.cloudSuggestionShown))
-        emit(.diagnostic(.cloudGeneratedShown))
-        emit(.suggestionSlotChanged)
-    }
-
-    /// Cloud failure/abstain resolution. A cloud failure must never
-    /// overwrite a local success, and an applied cloud decision owns the
-    /// slot outright.
-    private func applyCloudFallback(
-        localRequestWasScheduled: Bool,
-        decision: CloudInferenceDecision?
-    ) {
-        cloudCyclePending = false
-        guard !cloudSuggestionApplied else {
-            return
-        }
-        let resolved = CloudSemanticPresentationResolver.resolveFallback(
-            current: presentation,
-            localRequestWasScheduled: localRequestWasScheduled,
-            cloudDecision: decision
-        )
-        if resolved != presentation {
-            presentation = resolved
-            emit(.suggestionSlotChanged)
-        }
-        // 本地与云都未给出建议：尝试用 L1 短语兜底填充建议位。
-        tryPhraseBookFill()
-    }
-
-    // MARK: L1 phrasebook fallback (LP-006)
-
-    /// 仅在本地与云都无建议（且云对本轮已无主张权）时，用拼音匹配的
-    /// L1 短语填充独立建议位。只写语义建议槽，数字候选不可移动
-    /// （REQ-KBD-02）。
-    private func tryPhraseBookFill() {
-        guard let phraseContext,
-              !cloudSuggestionApplied,
-              !cloudCyclePending,
-              pendingRequestID == nil,
-              pendingCloudRequestID == nil,
-              composition.token == phraseContext.token,
-              !composition.isSelecting,
-              !composition.isSecureInput,
-              !dependencies.isSecureEventInputEnabled(),
-              isPhraseBookEligiblePresentation
-        else {
-            return
-        }
-        guard let phrase = dependencies.phraseBookPhrases(
-            phraseContext.pinyin,
-            phraseContext.bundleIdentifier
-        ).first,
-              !phrase.text.isEmpty,
-              !phrase.text.contains("\n"),
-              dependencies.applySemanticCandidate(
-                  phrase.text,
-                  phraseContext.token,
-                  .phraseBook,
-                  nil
-              )
-        else {
-            return
-        }
-        historySource = .phraseBook
-        cloudCandidate = nil
-        presentation = .candidate(
-            text: phrase.text,
-            decision: .phraseBook,
-            confidence: min(0.95, 0.6 + Double(min(phrase.count, 7)) * 0.05)
-        )
-        contextCharacterCount = 0
-        emit(.diagnostic(.resultShown))
-        emit(.diagnostic(.phraseBookSuggestionShown))
-        emit(.suggestionSlotChanged)
-    }
-
-    /// Slot states that carry no visible suggestion from either channel
-    /// and may therefore be filled by a phrasebook hit. Agreement
-    /// statements (sameTopCandidate/cloudSameTopCandidate) keep their
-    /// explicit AI stance instead.
-    private var isPhraseBookEligiblePresentation: Bool {
-        switch presentation {
-        case .noCandidate,
-             .belowConfidence,
-             .insufficientCandidates,
-             .sentenceTooLong,
-             .sentenceIncomplete,
-             .scriptMismatch,
-             .failure,
-             .cloudFailure,
-             .cloudBelowConfidence:
-            return true
-        case .idle,
-             .analyzing,
-             .candidate,
-             .sameTopCandidate,
-             .inputTooLong,
-             .cloudAnalyzing,
-             .cloudSameTopCandidate,
-             .continuation,
-             .unavailable:
-            return false
-        }
-    }
 
     // MARK: Invalidation
 
     /// Cancel everything in flight: both debounces, the pending local
-    /// request, and the pending cloud request.
+    /// request, the pending cloud request, and the suffix refinement
+    /// batch.
     /// `clearPresentation == true` additionally resets the slot to idle
     /// (used on reset / secure input / session switch).
     public func invalidate(clearPresentation: Bool = false) {
@@ -1102,6 +389,12 @@ public final class SemanticSuggestionPipeline: @unchecked Sendable {
         localDebounceTask = nil
         cloudDebounceTask?.cancel()
         cloudDebounceTask = nil
+        suffixRefinementTask?.cancel()
+        suffixRefinementTask = nil
+        for requestID in pendingSuffixRefinementRequestIDs {
+            dependencies.cancelLocalInference(requestID)
+        }
+        pendingSuffixRefinementRequestIDs.removeAll()
         cloudInFlight = false
         if let pendingRequestID {
             dependencies.cancelLocalInference(pendingRequestID)

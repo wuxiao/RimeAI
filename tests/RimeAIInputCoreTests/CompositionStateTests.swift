@@ -265,7 +265,7 @@ func appendLiteralFinalizesActiveSegmentWithTopCandidate() {
         .literal("，"),
     ])
     #expect(state.mainCandidates.isEmpty)
-    #expect(state.displayString == "nihao，")
+    #expect(state.displayString == "你好，")
     #expect(state.committedPrefixText == "你好，")
     #expect(state.rawPrefixString == "nihao，")
     #expect(state.hasComposition)
@@ -317,7 +317,7 @@ func appendLiteralOnPrefixOnlyAppendsConsecutivePunctuation() {
         .literal("，"),
         .literal("。"),
     ])
-    #expect(state.displayString == "hao，。")
+    #expect(state.displayString == "好，。")
 }
 
 @Test
@@ -328,7 +328,7 @@ func lettersAfterPunctuationStartNewActiveSegment() {
 
     _ = state.replaceInput(pinyin: "shijie", candidates: ["世界"])
 
-    #expect(state.displayString == "nihao，shijie")
+    #expect(state.displayString == "你好，shijie")
     #expect(state.committedPrefixText == "你好，")
     #expect(state.historyPinyin == "nihaoshijie")
     #expect(state.mainCandidates == ["世界"])
@@ -355,28 +355,27 @@ func popTrailingLiteralOnlyRemovesLiterals() {
 }
 
 @Test
-func reviveLastPinyinSegmentRestoresEditableActiveSegment() {
+func moveFocusLeftWithEmptyActivePinyinRevivesWithoutSuffix() {
     var state = CompositionState(appSessionID: "app-1")
     _ = state.replaceInput(pinyin: "nihao", candidates: ["你好"])
     state.appendLiteral("，")
     _ = state.replaceInput(pinyin: "shijie", candidates: ["世界"])
     state.appendLiteral("。")
 
-    // 末段是标点时退格先弹出标点，拼音段不可复活
-    #expect(state.reviveLastPinyinSegment() == nil)
+    // 末段是标点时退格先弹出标点，拼音段不可直接复活
+    #expect(state.popTrailingLiteral() == "。")
+    #expect(state.pinyin.isEmpty)
 
-    let popped = state.popTrailingLiteral()
-    #expect(popped == "。")
-    let revived = state.reviveLastPinyinSegment()
-
-    #expect(revived == "shijie")
+    // ← 复活前一个拼音段；空焦点段不向后缀贡献内容
+    #expect(state.moveFocusLeft() == true)
     #expect(state.pinyin == "shijie")
     #expect(state.prefixSegments == [
         .committedPinyin(pinyin: "nihao", committedText: "你好"),
         .literal("，"),
     ])
-    #expect(state.displayString == "nihao，shijie")
-    // 复活后的旧 token 不得复活语义结果
+    #expect(state.suffixSegments.isEmpty)
+    #expect(state.displayString == "你好，shijie")
+    // 复活后的旧 token 不得复活语义结果（compositionID 已重建）
     let staleAccepted = state.applySemanticCandidate(
         "世界",
         token: CompositionToken(
@@ -402,7 +401,7 @@ func clearActivePinyinKeepsPrefixAlive() {
         .committedPinyin(pinyin: "nihao", committedText: "你好"),
         .literal("，"),
     ])
-    #expect(state.displayString == "nihao，")
+    #expect(state.displayString == "你好，")
     #expect(state.hasComposition)
 }
 
@@ -416,9 +415,12 @@ func flushPrefixClearsSegmentsForPartialCommit() {
     state.flushPrefix()
 
     #expect(state.prefixSegments.isEmpty)
+    #expect(state.focusedSeparatorLiterals.isEmpty)
+    #expect(state.suffixSegments.isEmpty)
     #expect(state.pinyin == "shijie")
     #expect(state.displayString == "shijie")
     #expect(state.committedPrefixText.isEmpty)
+    #expect(state.committedSuffixText.isEmpty)
     #expect(state.prefixHistoryPinyin.isEmpty)
 }
 
@@ -547,7 +549,7 @@ func test_inferenceSegmentsDegradeToNilBeyondPolicyBounds() {
 }
 
 @Test
-func test_reviveLastPinyinSegmentClearsSemanticCandidateSegments() {
+func test_moveFocusLeftClearsSemanticCandidateSegments() {
     var state = CompositionState(appSessionID: "app-1")
     _ = state.replaceInput(pinyin: "nihao", candidates: ["你好"])
     state.appendLiteral("，")
@@ -565,8 +567,8 @@ func test_reviveLastPinyinSegmentClearsSemanticCandidateSegments() {
     #expect(accepted)
     #expect(state.semanticCandidateSegments == segments)
 
-    _ = state.popTrailingLiteral()
-    _ = state.reviveLastPinyinSegment()
+    // 焦点移动与拼音清空同步清空 segments
+    _ = state.moveFocusLeft(finalizedText: "真好")
 
     #expect(state.semanticCandidate == nil)
     #expect(state.semanticCandidateSegments == nil)
@@ -783,5 +785,167 @@ func appendLiteralFinalizedTextFollowsCommitBaselineAndOverride() {
     #expect(
         fallback.prefixSegments.first
             == .committedPinyin(pinyin: "api", committedText: "api")
+    )
+}
+
+// MARK: - Segment focus (←/→)
+
+@Test
+func moveFocusRoundTripPreservesTextOrder() {
+    var state = CompositionState(appSessionID: "app-1")
+    _ = state.replaceInput(pinyin: "nihao", candidates: ["你好"])
+    state.appendLiteral("，")
+    _ = state.replaceInput(pinyin: "shijie", candidates: ["世界"])
+    state.appendLiteral("。")
+    _ = state.replaceInput(pinyin: "zhenhao", candidates: ["真好"])
+
+    // ← 焦点移到 shijie：zhenhao 定稿入后缀，它与焦点段之间的
+    // “。”成为焦点字面量运行
+    #expect(state.moveFocusLeft(finalizedText: "真好") == true)
+    #expect(state.pinyin == "shijie")
+    #expect(state.prefixSegments == [
+        .committedPinyin(pinyin: "nihao", committedText: "你好"),
+        .literal("，"),
+    ])
+    #expect(state.focusedSeparatorLiterals == ["。"])
+    #expect(state.suffixSegments == [
+        .committedPinyin(pinyin: "zhenhao", committedText: "真好"),
+    ])
+    #expect(state.displayString == "你好，shijie。真好")
+    #expect(state.rawCompositionString == "nihao，shijie。zhenhao")
+
+    let tokenBeforeRoundTrip = state.token
+
+    // ← 焦点移到 nihao：与旧焦点之间的“，”成为焦点字面量运行，
+    // 后缀保留 shijie 与其尾随“。”
+    #expect(state.moveFocusLeft(finalizedText: "世界") == true)
+    #expect(state.pinyin == "nihao")
+    #expect(state.focusedSeparatorLiterals == ["，"])
+    #expect(state.suffixSegments == [
+        .committedPinyin(pinyin: "shijie", committedText: "世界"),
+        .literal("。"),
+        .committedPinyin(pinyin: "zhenhao", committedText: "真好"),
+    ])
+    #expect(state.displayString == "nihao，世界。真好")
+
+    // → 回到 shijie：焦点字面量并入前缀，文本顺序不变
+    #expect(state.moveFocusRight(finalizedText: "你好") == true)
+    #expect(state.pinyin == "shijie")
+    #expect(state.prefixSegments == [
+        .committedPinyin(pinyin: "nihao", committedText: "你好"),
+        .literal("，"),
+    ])
+    #expect(state.focusedSeparatorLiterals.isEmpty)
+    #expect(state.displayString == "你好，shijie。真好")
+    #expect(state.rawCompositionString == "nihao，shijie。zhenhao")
+    #expect(state.historyPinyin == "nihaoshijiezhenhao")
+
+    // → 回到 zhenhao：中段定稿并入前缀，尾随“。”成为焦点字面量运行
+    #expect(state.moveFocusRight(finalizedText: "世界") == true)
+    #expect(state.pinyin == "zhenhao")
+    #expect(state.prefixSegments == [
+        .committedPinyin(pinyin: "nihao", committedText: "你好"),
+        .literal("，"),
+        .committedPinyin(pinyin: "shijie", committedText: "世界"),
+    ])
+    #expect(state.focusedSeparatorLiterals == ["。"])
+    #expect(state.displayString == "你好，世界zhenhao。")
+
+    // 已在最后一个拼音段：→ 无处可移，状态不变
+    let beforeToken = state.token
+    #expect(state.moveFocusRight(finalizedText: "真好") == false)
+    #expect(state.token == beforeToken)
+
+    // 焦点移动每次都重建 compositionID：往返前的旧 token 不得应用
+    let staleAfterRoundTrip = state.applySemanticCandidate(
+        "真好",
+        token: tokenBeforeRoundTrip,
+        decision: .rankedCandidate
+    )
+    #expect(!staleAfterRoundTrip)
+}
+
+@Test
+func moveFocusBoundariesReturnFalseWithoutStateChange() {
+    var state = CompositionState(appSessionID: "app-1")
+    // 前缀没有拼音段（前导字面量）：← 不可用
+    state.appendLiteral("，")
+    _ = state.replaceInput(pinyin: "nihao", candidates: ["你好"])
+    let token = state.token
+    #expect(state.moveFocusLeft() == false)
+    #expect(state.token == token)
+
+    // 后缀没有拼音段：→ 不可用
+    #expect(state.moveFocusRight() == false)
+    #expect(state.token == token)
+}
+
+@Test
+func appendLiteralBetweenFocusedSegmentAndSuffixGoesToFocusRun() {
+    var state = CompositionState(appSessionID: "app-1")
+    _ = state.replaceInput(pinyin: "nihao", candidates: ["你好"])
+    state.appendLiteral("，")
+    _ = state.replaceInput(pinyin: "shijie", candidates: ["世界"])
+    #expect(state.moveFocusLeft(finalizedText: "世界") == true)
+
+    // 焦点之后仍有内容：新字面量插入焦点字面量运行最前（编辑点
+    // 紧跟拼音），既有段间标点保持在其后
+    state.appendLiteral("！", finalizedText: "你好")
+    #expect(state.focusedSeparatorLiterals == ["！", "，"])
+    #expect(state.suffixSegments == [
+        .committedPinyin(pinyin: "shijie", committedText: "世界"),
+    ])
+    #expect(state.displayString == "你好！，世界")
+
+    // 连续键入标点同样插入运行最前（最新紧贴拼音）；退格从运行
+    // 头部逐个弹出最新字面量，运行空后弹前缀末尾字面量，前缀无
+    // 字面量时返回 nil
+    state.appendLiteral("？")
+    #expect(state.focusedSeparatorLiterals == ["？", "！", "，"])
+    #expect(state.popTrailingLiteral() == "？")
+    #expect(state.popTrailingLiteral() == "！")
+    #expect(state.popTrailingLiteral() == "，")
+    #expect(state.popTrailingLiteral() == nil)
+}
+
+@Test
+func inferenceSegmentsRequireFocusOnLastSegment() {
+    var state = CompositionState(appSessionID: "app-1")
+    _ = state.replaceInput(pinyin: "nihao", candidates: ["你好"])
+    state.appendLiteral("，")
+    _ = state.replaceInput(pinyin: "shijie", candidates: ["世界"])
+
+    // 焦点在末段：布局可用
+    #expect(state.inferenceSegments != nil)
+
+    // 焦点移到中间段：退回单段协议
+    #expect(state.moveFocusLeft(finalizedText: "世界") == true)
+    #expect(state.inferenceSegments == nil)
+
+    // 焦点字面量运行非空：同样退回单段协议
+    _ = state.moveFocusRight(finalizedText: "你好")
+    state.appendLiteral("！", finalizedText: "世界")
+    #expect(state.inferenceSegments == nil)
+}
+
+@Test
+func plainCommitTextPrependsOuterCommittedTextIncludingSuffix() {
+    var state = CompositionState(appSessionID: "app-1")
+    _ = state.replaceInput(pinyin: "nihao", candidates: ["你好"])
+    state.appendLiteral("，")
+    _ = state.replaceInput(pinyin: "shijie", candidates: ["世界"])
+    #expect(state.moveFocusLeft(finalizedText: "世界") == true)
+
+    let accepted = state.applySemanticCandidate(
+        "你好",
+        token: state.token,
+        decision: .rankedCandidate
+    )
+    #expect(accepted)
+
+    // 无段布局（焦点在中间必然无布局）：提交前置全部定稿文本
+    // （焦点字面量运行 + 后缀），再接活跃段候选。
+    #expect(
+        state.semanticCandidateCommitText(for: "你好") == "，世界你好"
     )
 }

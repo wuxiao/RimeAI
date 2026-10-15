@@ -42,6 +42,9 @@ extension RimeAIInputController {
                 cancelLocalInference: { requestID in
                     DaemonClient.shared.cancel(requestID: requestID)
                 },
+                rimeCandidates: { pinyin in
+                    RimeEngine.shared.candidates(for: pinyin, limit: 10)
+                },
                 clientSessionID: sessionNonce,
                 loadCloudAPIKey: {
                     try? FileCloudCredentialStore.shared.loadAPIKey()

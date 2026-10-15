@@ -27,6 +27,7 @@
 		33E7DAB952C440766B7996B3 /* VoiceDictationXPCTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD234CEFDD5FA9B807E9FB6C /* VoiceDictationXPCTransport.swift */; };
 		37867F5E01F6BB897EC08273 /* PrivacyCenterWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4E932A06228AC16721C6EC9 /* PrivacyCenterWindowController.swift */; };
 		3A2960D3EB0F897A426CCB49 /* LICENSE in Resources */ = {isa = PBXBuildFile; fileRef = B13613AAF975B361BFE2BF3F /* LICENSE */; };
+		3A46F75B5A23E6AE650F5FA6 /* SemanticSuggestionPipeline+Cloud.swift in Sources */ = {isa = PBXBuildFile; fileRef = F63D5AD411B068B7CDC27F1A /* SemanticSuggestionPipeline+Cloud.swift */; };
 		3FAB221103EA26163D3CB58B /* AppKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6801A4337F1F00500F50D3E9 /* AppKit.framework */; };
 		4463C801A4450107D442100B /* RimeAIInputController+CompositionIO.swift in Sources */ = {isa = PBXBuildFile; fileRef = 14CC5C1948B067A4B23E749C /* RimeAIInputController+CompositionIO.swift */; };
 		45E313CFAB3A5D76DDB7993E /* VoiceDictationPanelController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5310461FCC412B778653E6EE /* VoiceDictationPanelController.swift */; };
@@ -38,6 +39,7 @@
 		4D693F3F8ABABC62D25DFDDC /* CloudConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 69AC052D01A6D52A26EBA745 /* CloudConfiguration.swift */; };
 		4E3F788E070DF43AA5B28A4D /* VoiceEngineDescriptor.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4CA066DB6CCCE72D026DE8B /* VoiceEngineDescriptor.swift */; };
 		50E6A8E6CB7D5F9E160BF537 /* VoiceDictationClientMachine.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0123DA0305B4446B3BB12D8 /* VoiceDictationClientMachine.swift */; };
+		5363024BD41C7738D4147639 /* CompositionState+Derived.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4CA9D2D65569B2CBDFF2CC54 /* CompositionState+Derived.swift */; };
 		536F60256C9AF5C0D54D13B3 /* Carbon.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 788C51339ADFFBF98D03FA77 /* Carbon.framework */; };
 		57869766E8A2C48D33B3E9B5 /* CandidateSelectionTransition.swift in Sources */ = {isa = PBXBuildFile; fileRef = D847EDE10A3888794F8039E9 /* CandidateSelectionTransition.swift */; };
 		5A5B79189B04410AE73ECBEF /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 637A891DE7B132A9B509AA5B /* Security.framework */; };
@@ -57,11 +59,13 @@
 		7823D3CD208E19BC401A086D /* CandidatePanelController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6C4A8777A6DDC8C9DC12F750 /* CandidatePanelController.swift */; };
 		7BFF87100F5FAC25805666C9 /* RimeAIInputController+MenuAndSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE97AB5ECFB32DFFAA6D6561 /* RimeAIInputController+MenuAndSettings.swift */; };
 		7C0D75E778967D3941894CEA /* VoiceDictationProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 87DDE5158A829612B2735A60 /* VoiceDictationProtocol.swift */; };
+		84D910D4BAEFDF123678C9EE /* SemanticSuggestionPipeline+LocalResult.swift in Sources */ = {isa = PBXBuildFile; fileRef = 18C42CC842EE5B8C224E3FB1 /* SemanticSuggestionPipeline+LocalResult.swift */; };
 		86AF0E999163C7ECB51190F3 /* libsqlite3.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = 65EBC74AEA3EC251C73BAD08 /* libsqlite3.tbd */; };
 		88982131C6898013C07F7E1A /* SessionContextStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11EE11C318E49D35E2D79DA2 /* SessionContextStore.swift */; };
 		89D65E2B907799EBDB224DB7 /* RimeAIInputController+Pipeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F5E00B4B17D2ACFBE67454F /* RimeAIInputController+Pipeline.swift */; };
 		8D6E89061DC5C46DDBC2AF95 /* ThirdPartyLicenses in Resources */ = {isa = PBXBuildFile; fileRef = 071FD3F1371E8FCA78A6A517 /* ThirdPartyLicenses */; };
 		90B55499EB17854677C72521 /* RimeAIInputController+KeyEvents.swift in Sources */ = {isa = PBXBuildFile; fileRef = EB0CCD85E0B73D35F2E2DAFF /* RimeAIInputController+KeyEvents.swift */; };
+		99D5F344B69302D3572551AE /* SemanticSuggestionPipeline+Schedule.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2EB2AE233DB00280E0861F61 /* SemanticSuggestionPipeline+Schedule.swift */; };
 		A0828D044A2781B7A1281F6B /* RimeBridgeC.cc in Sources */ = {isa = PBXBuildFile; fileRef = D630CE241E90D97C4ABB48D4 /* RimeBridgeC.cc */; };
 		A23DE4871570B4145DD64520 /* PhraseBookStore+Domains.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9BB86F219C9E393EC2F8F483 /* PhraseBookStore+Domains.swift */; };
 		A9A60DF05A01CF10F025D6A3 /* PrivacyCenterWindowController+PhrasebookEditing.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3682B16DB8E49A50DF1B8F65 /* PrivacyCenterWindowController+PhrasebookEditing.swift */; };
@@ -83,6 +87,7 @@
 		DA99EF8DAC54A7E099D0B213 /* RimeAI.pdf in Resources */ = {isa = PBXBuildFile; fileRef = 950DBB495B5E335B83F744D2 /* RimeAI.pdf */; };
 		DBA575DCB562DFBF97901840 /* NDJSONUDSTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5BCC722BC32CFEEF8EC0F09 /* NDJSONUDSTransport.swift */; };
 		DC4C551E7A89FD026CF4344D /* shared in Resources */ = {isa = PBXBuildFile; fileRef = B46791C8427D267B49413A1E /* shared */; };
+		DE64A40B3C8DBD633269AA73 /* SemanticSuggestionPipeline+SuffixRefinement.swift in Sources */ = {isa = PBXBuildFile; fileRef = 36387F9172A27CFEB49BA859 /* SemanticSuggestionPipeline+SuffixRefinement.swift */; };
 		DE6D6EE0570BF6618CB6BFC1 /* VoiceReleasePolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 92A74F5E685900CDE8BC5440 /* VoiceReleasePolicy.swift */; };
 		E1CEB9B37B2B07C887A172BC /* HistoryStore+Retrieval.swift in Sources */ = {isa = PBXBuildFile; fileRef = 859DD8802FCF3A5A5C4F145C /* HistoryStore+Retrieval.swift */; };
 		E53ADEE6CA1D362D69932420 /* fun.wwcn.rimeai.voice-helper.plist in Resources */ = {isa = PBXBuildFile; fileRef = BDAE437F394DB10D5D2DDA2C /* fun.wwcn.rimeai.voice-helper.plist */; };
@@ -113,14 +118,17 @@
 		11EE11C318E49D35E2D79DA2 /* SessionContextStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionContextStore.swift; sourceTree = "<group>"; };
 		138BE62F0E6AA18A1AD2EAA1 /* HistoryStore+SQLite.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "HistoryStore+SQLite.swift"; sourceTree = "<group>"; };
 		14CC5C1948B067A4B23E749C /* RimeAIInputController+CompositionIO.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "RimeAIInputController+CompositionIO.swift"; sourceTree = "<group>"; };
+		18C42CC842EE5B8C224E3FB1 /* SemanticSuggestionPipeline+LocalResult.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SemanticSuggestionPipeline+LocalResult.swift"; sourceTree = "<group>"; };
 		1F2E6A4FF0F04E3B3A07C3A2 /* VoiceHotwordAdmissionState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceHotwordAdmissionState.swift; sourceTree = "<group>"; };
 		251E3CD3ACE1403F61267AC6 /* PostCommitContinuationCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PostCommitContinuationCoordinator.swift; sourceTree = "<group>"; };
 		2C36A37605A65A57A7197A0A /* RimeAIInputController+Voice.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "RimeAIInputController+Voice.swift"; sourceTree = "<group>"; };
 		2E3DB447A7851D1DB1F70C8E /* VoiceIntegrationSmokeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceIntegrationSmokeTests.swift; sourceTree = "<group>"; };
 		2EAD2AB4D84CD263997D93D8 /* CloudBrokerClientContinuationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudBrokerClientContinuationTests.swift; sourceTree = "<group>"; };
+		2EB2AE233DB00280E0861F61 /* SemanticSuggestionPipeline+Schedule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SemanticSuggestionPipeline+Schedule.swift"; sourceTree = "<group>"; };
 		339EB0642B5467FEFE04BC78 /* CloudBrokerProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudBrokerProtocol.swift; sourceTree = "<group>"; };
 		348BD796A393233937883B3E /* RimeEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RimeEngine.swift; sourceTree = "<group>"; };
 		361CD4E90A16E27ADE4431E3 /* PhraseBookStore+SQLite.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "PhraseBookStore+SQLite.swift"; sourceTree = "<group>"; };
+		36387F9172A27CFEB49BA859 /* SemanticSuggestionPipeline+SuffixRefinement.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SemanticSuggestionPipeline+SuffixRefinement.swift"; sourceTree = "<group>"; };
 		3682B16DB8E49A50DF1B8F65 /* PrivacyCenterWindowController+PhrasebookEditing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "PrivacyCenterWindowController+PhrasebookEditing.swift"; sourceTree = "<group>"; };
 		375C5312FEACD6074CE00CFF /* en */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = en; path = en.lproj/InfoPlist.strings; sourceTree = "<group>"; };
 		37B5BE0255F1DAF79AED725D /* ATTRIBUTION.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = ATTRIBUTION.md; sourceTree = "<group>"; };
@@ -131,6 +139,7 @@
 		43CAC7F3EB15F2DA4732BEC7 /* VoiceHelperLifecycle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceHelperLifecycle.swift; sourceTree = "<group>"; };
 		44D3E1D3D74AA5A17483B514 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		49A4F4E160B6131EDA37861B /* TypoVariantGenerator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TypoVariantGenerator.swift; sourceTree = "<group>"; };
+		4CA9D2D65569B2CBDFF2CC54 /* CompositionState+Derived.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "CompositionState+Derived.swift"; sourceTree = "<group>"; };
 		5310461FCC412B778653E6EE /* VoiceDictationPanelController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceDictationPanelController.swift; sourceTree = "<group>"; };
 		5C3A6F75554F3E967B0AEBA8 /* FailureCircuitBreaker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FailureCircuitBreaker.swift; sourceTree = "<group>"; };
 		5E3ECB2D7B7F9A8D952BA49E /* RimeAIInputController+Selection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "RimeAIInputController+Selection.swift"; sourceTree = "<group>"; };
@@ -197,6 +206,7 @@
 		EBC90E9224221723AD57AEDD /* RimeAISettingsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RimeAISettingsStore.swift; sourceTree = "<group>"; };
 		F3DCA0E166A32B785835C03E /* RimeAIInputMethod-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "RimeAIInputMethod-Bridging-Header.h"; sourceTree = "<group>"; };
 		F47379E095C861316F560AC5 /* PhraseBookStore+Phrases.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "PhraseBookStore+Phrases.swift"; sourceTree = "<group>"; };
+		F63D5AD411B068B7CDC27F1A /* SemanticSuggestionPipeline+Cloud.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SemanticSuggestionPipeline+Cloud.swift"; sourceTree = "<group>"; };
 		F8D2C516CD52254C4B88DA76 /* CandidatePanelContinuationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CandidatePanelContinuationTests.swift; sourceTree = "<group>"; };
 		FAA511A856592C2E0127E6EC /* LocalSemanticRanker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalSemanticRanker.swift; sourceTree = "<group>"; };
 		FD234CEFDD5FA9B807E9FB6C /* VoiceDictationXPCTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceDictationXPCTransport.swift; sourceTree = "<group>"; };
@@ -411,6 +421,7 @@
 				69AC052D01A6D52A26EBA745 /* CloudConfiguration.swift */,
 				A84B8CDEB740E011966B4EA7 /* CloudCredentialStore.swift */,
 				A894A7809D56255B0BE61F2C /* CompositionState.swift */,
+				4CA9D2D65569B2CBDFF2CC54 /* CompositionState+Derived.swift */,
 				93FAB8018BBF733F09CFF2D2 /* DaemonProtocol.swift */,
 				5C3A6F75554F3E967B0AEBA8 /* FailureCircuitBreaker.swift */,
 				B414312D8A8984B9E159294B /* HistoryStore.swift */,
@@ -429,6 +440,10 @@
 				B9854215EBFFE3F1FEE78CAA /* ProductDataLayout.swift */,
 				EBC90E9224221723AD57AEDD /* RimeAISettingsStore.swift */,
 				C7424ADFDE8C1F919E80776B /* SemanticSuggestionPipeline.swift */,
+				F63D5AD411B068B7CDC27F1A /* SemanticSuggestionPipeline+Cloud.swift */,
+				18C42CC842EE5B8C224E3FB1 /* SemanticSuggestionPipeline+LocalResult.swift */,
+				2EB2AE233DB00280E0861F61 /* SemanticSuggestionPipeline+Schedule.swift */,
+				36387F9172A27CFEB49BA859 /* SemanticSuggestionPipeline+SuffixRefinement.swift */,
 				874A3DD4E726FAEE606F0E69 /* ServiceLifecycleCoordinator.swift */,
 				11EE11C318E49D35E2D79DA2 /* SessionContextStore.swift */,
 				49A4F4E160B6131EDA37861B /* TypoVariantGenerator.swift */,
@@ -577,6 +592,7 @@
 				F84A78B234C882EFC14E03A5 /* CloudBrokerProtocol.swift in Sources */,
 				4D693F3F8ABABC62D25DFDDC /* CloudConfiguration.swift in Sources */,
 				746CB0A2B405054300AD911A /* CloudCredentialStore.swift in Sources */,
+				5363024BD41C7738D4147639 /* CompositionState+Derived.swift in Sources */,
 				6FA81738FDCC910412B09D2A /* CompositionState.swift in Sources */,
 				0C457A120AD470A4EECA20C0 /* DaemonClient.swift in Sources */,
 				E64A47738365183CA504A76F /* DaemonProtocol.swift in Sources */,
@@ -612,6 +628,10 @@
 				C956365AFD9D21697E7329DD /* RimeAISettingsStore.swift in Sources */,
 				A0828D044A2781B7A1281F6B /* RimeBridgeC.cc in Sources */,
 				6B41DA464CC336CD2590FD3C /* RimeEngine.swift in Sources */,
+				3A46F75B5A23E6AE650F5FA6 /* SemanticSuggestionPipeline+Cloud.swift in Sources */,
+				84D910D4BAEFDF123678C9EE /* SemanticSuggestionPipeline+LocalResult.swift in Sources */,
+				99D5F344B69302D3572551AE /* SemanticSuggestionPipeline+Schedule.swift in Sources */,
+				DE64A40B3C8DBD633269AA73 /* SemanticSuggestionPipeline+SuffixRefinement.swift in Sources */,
 				24CC0BBA66259B152C320F06 /* SemanticSuggestionPipeline.swift in Sources */,
 				3391ACAEAD45873C0FDC4C7D /* ServiceLifecycleCoordinator.swift in Sources */,
 				88982131C6898013C07F7E1A /* SessionContextStore.swift in Sources */,

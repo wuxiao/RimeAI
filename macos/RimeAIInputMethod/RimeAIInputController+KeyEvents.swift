@@ -52,7 +52,7 @@ extension RimeAIInputController {
                 return resolved
             }
         case 123, 124, 125, 126, 116, 121:
-            return handleArrowKey(client: client)
+            return handleArrowKey(event, client: client)
         default:
             break
         }
@@ -153,7 +153,7 @@ extension RimeAIInputController {
             return false
         }
         commitText(
-            composition.rawPrefixString + composition.pinyin,
+            composition.rawCompositionString,
             source: .rawPinyin,
             client: client,
             historyPinyin: composition.historyPinyin
@@ -163,6 +163,15 @@ extension RimeAIInputController {
 
     private func handleTabKey(client: any IMKTextInput) -> Bool {
         if let semanticCandidate = composition.semanticCandidate {
+            // KBD-007：跨段整句建议（段数 ≥ 2）先按段应用不提交，
+            // 用户可 ←→ 逐段复核后经 Space 上屏；不符合条件时回退
+            // 既有整句提交路径。
+            if applySegmentedSuggestionIfEligible(
+                semanticCandidate,
+                client: client
+            ) {
+                return true
+            }
             selectSemanticCandidate(semanticCandidate, client: client)
             return true
         }
@@ -194,7 +203,7 @@ extension RimeAIInputController {
         }
         guard composition.pinyin.isEmpty else {
             commitText(
-                composition.rawPrefixString + composition.pinyin,
+                composition.rawCompositionString,
                 source: .rawPinyin,
                 client: client,
                 historyPinyin: composition.historyPinyin
@@ -232,16 +241,45 @@ extension RimeAIInputController {
         return true
     }
 
-    private func handleArrowKey(client: any IMKTextInput) -> Bool {
-        if composition.pinyin.isEmpty,
-           !composition.prefixSegments.isEmpty
-        {
-            // 仅前缀状态同样存在 marked text，方向键直通会使
-            // marked range 与状态失联，先吞掉。
-            invalidateCurrentResult()
+    /// 方向键：←/→ 在拼音段之间移动焦点（任意段修正）。焦点移
+    /// 动后新焦点段按其拼音重新查候选；↑↓/PgUp/PgDn 与无可聚焦
+    /// 段时维持既有行为（活跃段空且存在前缀时吞掉，其余透传）。
+    private func handleArrowKey(
+        _ event: NSEvent,
+        client: any IMKTextInput
+    ) -> Bool {
+        let keyCode = event.keyCode
+        guard keyCode == 123 || keyCode == 124 else {
+            return swallowOrPassThroughArrow(client: client)
+        }
+        if keyCode == 123, composition.canMoveFocusLeft {
+            composition.moveFocusLeft(
+                finalizedText: activeSegmentFinalizedText()
+            )
+            invalidateInference(clearPresentation: true)
+            compositionInput(composition.pinyin, client: client)
+            scheduleSuffixRefinement(client: client)
             return true
         }
+        if keyCode == 124, composition.canMoveFocusRight {
+            composition.moveFocusRight(
+                finalizedText: activeSegmentFinalizedText()
+            )
+            invalidateInference(clearPresentation: true)
+            compositionInput(composition.pinyin, client: client)
+            scheduleSuffixRefinement(client: client)
+            return true
+        }
+        return swallowOrPassThroughArrow(client: client)
+    }
+
+    /// 既有方向键行为：活跃段空且存在前缀时吞掉（marked range 与
+    /// 状态失联防护），其余透传。
+    private func swallowOrPassThroughArrow(client: any IMKTextInput) -> Bool {
         invalidateCurrentResult()
+        if composition.pinyin.isEmpty, !composition.prefixSegments.isEmpty {
+            return true
+        }
         clearContextForCurrentApplication()
         return false
     }
@@ -389,9 +427,9 @@ extension RimeAIInputController {
             )
             return true
         }
-        if let revived = composition.reviveLastPinyinSegment() {
-            // 拼音段复活为活跃段继续编辑。
-            compositionInput(revived, client: client)
+        if composition.moveFocusLeft() {
+            // 前一个拼音段复活为焦点段继续编辑。
+            compositionInput(composition.pinyin, client: client)
             return true
         }
         return false
@@ -465,7 +503,7 @@ extension RimeAIInputController {
                 )
             } else {
                 commitText(
-                    composition.rawPrefixString + composition.pinyin,
+                    composition.rawCompositionString,
                     source: .rawPinyin,
                     client: client,
                     historyPinyin: composition.historyPinyin
@@ -474,10 +512,10 @@ extension RimeAIInputController {
             return true
         }
         return commitText(
-            composition.committedPrefixText,
+            composition.committedOuterText,
             source: .rimeMain,
             client: client,
-            historyPinyin: composition.prefixHistoryPinyin
+            historyPinyin: composition.historyPinyin
         )
     }
 

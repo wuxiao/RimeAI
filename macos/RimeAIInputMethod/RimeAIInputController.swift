@@ -144,7 +144,7 @@ final class RimeAIInputController: IMKInputController,
             return
         }
         commitText(
-            composition.committedPrefixText + composition.pinyin,
+            composition.committedOuterText + composition.pinyin,
             source: .rawPinyin,
             client: client,
             historyPinyin: composition.historyPinyin

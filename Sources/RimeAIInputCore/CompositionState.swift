@@ -16,18 +16,32 @@ public struct CompositionToken: Equatable, Sendable {
     }
 }
 
-/// 已定稿、位于活跃拼音段之前的 composition 切片。标点（与其他
-/// 字面符号）自身永远不触发上屏，而是暂存在这里，直到用户通过
+/// 已定稿、位于焦点段之外的 composition 切片。标点（与其他字面
+/// 符号）自身永远不触发上屏，而是暂存在切片里，直到用户通过
 /// Space、数字选词或 Enter 明确确认。
+///
+/// 拼音段在预编辑区显示定稿中文（`displayText`），Enter 原样上屏
+/// 时按 `rawText` 回放原始字母。
 public enum CompositionPrefixSegment: Equatable, Sendable {
-    /// 一段拼音与紧随其后的字面符号。`committedText` 是定稿时刻
-    /// 用户看到的 Rime 首选（无候选时回退为原始字母）。
+    /// 一段拼音与它的定稿文本。`committedText` 是定稿时刻用户看
+    /// 到的 Rime 首选（无候选时回退为原始字母）。
     case committedPinyin(pinyin: String, committedText: String)
     /// 标点或符号字面量，存储的是已按用户标点风格转换后的文本
     /// （全角中文标点或西文原样）。
     case literal(String)
 
+    /// 预编辑区显示文本：拼音段显示定稿中文，字面量原样。
     var displayText: String {
+        switch self {
+        case let .committedPinyin(_, text):
+            return text
+        case let .literal(text):
+            return text
+        }
+    }
+
+    /// 原始击键回放文本（Enter 原样上屏路径）：拼音段回放字母。
+    var rawText: String {
         switch self {
         case let .committedPinyin(pinyin, _):
             return pinyin
@@ -44,8 +58,29 @@ public enum CompositionPrefixSegment: Equatable, Sendable {
             return text
         }
     }
+
+    var isPinyinSegment: Bool {
+        if case .committedPinyin = self {
+            return true
+        }
+        return false
+    }
 }
 
+/// 跨标点推断布局构建的中间结构（避免大元组）。
+private struct LayoutPart {
+    let pinyin: String
+    let committedText: String
+    var separator: String
+}
+
+/// 段焦点模型下的 composition 布局：
+///
+/// `[前缀已定稿段][焦点段拼音][焦点字面量运行][后缀已定稿段]`
+///
+/// 焦点段携带活跃拼音并拥有候选；其余拼音段显示定稿中文。←/→
+/// 在拼音段之间移动焦点，焦点移动会重建 compositionID，使飞行
+/// 中的推断 token 全部失效。
 public struct CompositionState: Sendable {
     /// 每页固定显示的候选数。分页是纯视图状态：翻页不改变
     /// compositionID/pinyin/mainCandidates，也不递增 revision，
@@ -55,14 +90,21 @@ public struct CompositionState: Sendable {
     public private(set) var compositionID = UUID()
     public private(set) var revision: UInt64 = 0
     public private(set) var appSessionID: String
+    /// 焦点段的活跃拼音。
     public private(set) var pinyin = ""
+    /// 焦点段之前的已定稿切片。
     public private(set) var prefixSegments: [CompositionPrefixSegment] = []
+    /// 焦点段拼音与其后内容之间的字面量运行（保序）。仅当焦点
+    /// 位于非末段时才可能非空；末段之后键入的字面量直接进入前缀。
+    public private(set) var focusedSeparatorLiterals: [String] = []
+    /// 焦点段之后的已定稿切片。
+    public private(set) var suffixSegments: [CompositionPrefixSegment] = []
     public private(set) var mainCandidates: [String] = []
     /// 韵母首字母（i/u/v）开头的输入在 Rime 中无法解析：活跃段按
     /// “原始前导 + 余串候选”合成展示时，这里记录原始前导，供提交
     /// 路径把余串还原给 Rime 完成选词与学习。无前导时为 nil。
     public private(set) var rawLeadPrefix: String?
-    public private(set) var candidatePage = 0
+    public internal(set) var candidatePage = 0
     public private(set) var semanticCandidate: String?
     public private(set) var semanticCandidateDecision: SemanticInferenceDecision?
     /// 语义候选对应的跨标点段布局：由推断管线在应用候选时写入，
@@ -75,57 +117,50 @@ public struct CompositionState: Sendable {
         self.appSessionID = appSessionID
     }
 
-    /// 完整的 marked text：定稿前缀按原样渲染（拼音段保持字母），
-    /// 加上活跃拼音段。无前缀时与 `pinyin` 逐字节一致，保持分段
-    /// 改造之前的渲染行为。
+    /// 完整的 marked text：非焦点拼音段显示定稿中文，焦点段显示
+    /// 活跃拼音，字面量原样。无前缀、无字面量运行且无后缀时与
+    /// `pinyin` 逐字节一致，保持单段渲染行为不变。
     public var displayString: String {
-        prefixSegments.map(\.displayText).joined() + pinyin
-    }
-
-    /// 是否存在任何正在编辑的内容（含定稿前缀）。标点进入
-    /// composition 后，按键路径必须以此判断代替 `pinyin.isEmpty`。
-    public var hasComposition: Bool {
-        !prefixSegments.isEmpty || !pinyin.isEmpty
-    }
-
-    /// 前缀在上屏时贡献的文本：各拼音段的定稿文本与字面量原样拼接。
-    public var committedPrefixText: String {
-        prefixSegments.map(\.committedText).joined()
-    }
-
-    /// 前缀按原始击键回放（字母 + 字面量），供 Enter 原样上屏使用。
-    public var rawPrefixString: String {
         prefixSegments.map(\.displayText).joined()
+            + pinyin
+            + focusedSeparatorLiterals.joined()
+            + suffixSegments.map(\.displayText).joined()
     }
 
-    /// 仅前缀中的字母段拼接（不含标点），供部分消费提交路径与
-    /// 活跃段拼音另行拼接。
-    public var prefixHistoryPinyin: String {
-        prefixSegments.compactMap { segment in
-            if case let .committedPinyin(pinyin, _) = segment {
-                return pinyin
-            }
-            return nil
-        }.joined()
+    /// 是否存在任何正在编辑的内容（含焦点字面量运行与后缀）。
+    /// 标点进入 composition 后，按键路径必须以此判断代替
+    /// `pinyin.isEmpty`。
+    public var hasComposition: Bool {
+        !prefixSegments.isEmpty
+            || !pinyin.isEmpty
+            || !focusedSeparatorLiterals.isEmpty
+            || !suffixSegments.isEmpty
     }
 
-    /// 跨标点推断的段布局：前缀以 `.committedPinyin` 开头且活跃段
-    /// 非空时构造——每个拼音段的 separator 是紧随其后的连续字面量
-    /// 拼接，末段（活跃段）separator 为 ""、不携带定稿文本。前导
-    /// 字面量、无前缀段或构造结果超出 `PinyinSegmentPolicy` 约束
-    /// （段数/字母数/非标点字面量）时返回 nil，推断退回单段协议。
+    /// 跨标点推断的段布局：焦点必须是最后一个拼音段（无后缀、无
+    /// 焦点字面量运行）且前缀以 `.committedPinyin` 开头时构造——
+    /// 每个拼音段的 separator 是紧随其后的连续字面量拼接，末段
+    /// （焦点段）separator 为 ""、不携带定稿文本。焦点在中间时推
+    /// 断退回单段协议（跨段一致性由云端整句建议与本地重推负责）。
     public var inferenceSegments: [PinyinSegment]? {
         guard !pinyin.isEmpty,
+              focusedSeparatorLiterals.isEmpty,
+              suffixSegments.isEmpty,
               case .committedPinyin? = prefixSegments.first
         else {
             return nil
         }
-        var collected:
-            [(pinyin: String, committedText: String, separator: String)] = []
+        var collected: [LayoutPart] = []
         for segment in prefixSegments {
             switch segment {
             case let .committedPinyin(segmentPinyin, committedText):
-                collected.append((segmentPinyin, committedText, ""))
+                collected.append(
+                    LayoutPart(
+                        pinyin: segmentPinyin,
+                        committedText: committedText,
+                        separator: ""
+                    )
+                )
             case let .literal(text):
                 guard !collected.isEmpty else {
                     return nil
@@ -150,40 +185,16 @@ public struct CompositionState: Sendable {
         return segments
     }
 
-    /// 历史库的 pinyin 字段：全部字母段拼接、不含标点，保持该列
-    /// 可作为 Rime 输入重现的契约。HistoryStore 拒绝超过 256 字节
-    /// 的条目，超限时保留尾部（最近的输入段）。
-    public var historyPinyin: String {
-        let joined = prefixHistoryPinyin + pinyin
-        return Self.truncatedToUTF8Limit(joined, limit: 256)
-    }
-
-    private static func truncatedToUTF8Limit(
-        _ string: String,
-        limit: Int
-    ) -> String {
-        guard string.utf8.count > limit else {
-            return string
-        }
-        var kept: [UnicodeScalar] = []
-        var used = 0
-        for scalar in string.unicodeScalars.reversed() {
-            let width = UTF8.width(scalar)
-            if used + width > limit {
-                continue
-            }
-            kept.append(scalar)
-            used += width
-        }
-        return String(String.UnicodeScalarView(kept.reversed()))
-    }
-
-    /// 追加字面符号（标点等）。活跃段非空时先定稿为 committedPinyin
+    /// 追加字面符号（标点等）。焦点段非空时先定稿为 committedPinyin
     /// 段——定稿文本由调用方传入（字形已按用户偏好转换、基准与
     /// 提交路径一致：当前页第一项候选；无候选（如混输态）回退原始
     /// 字母），未传时保持旧行为（全局首选/原始字母）。语义候选不
-    /// 参与定稿，AI 候选仅可经 Tab 显式采用。拼音清空同时重建
-    /// compositionID，使飞行中的推断 token 立即失效。
+    /// 参与定稿，AI 候选仅可经 Tab 显式采用。
+    ///
+    /// 字面量落点：焦点之后仍有内容时插入焦点字面量运行最前（编
+    /// 辑点紧跟拼音，先于既有的段间标点）；否则追加到前缀（既有
+    /// 行为）。拼音清空同时重建 compositionID，使飞行中的推断
+    /// token 立即失效。
     public mutating func appendLiteral(
         _ text: String,
         finalizedText: String? = nil
@@ -192,16 +203,18 @@ public struct CompositionState: Sendable {
             return
         }
         if !pinyin.isEmpty {
-            let finalized = finalizedText
-                ?? (mainCandidates.first ?? pinyin)
             prefixSegments.append(
-                .committedPinyin(pinyin: pinyin, committedText: finalized)
+                .committedPinyin(pinyin: pinyin, committedText: finalizedText ?? (mainCandidates.first ?? pinyin))
             )
             pinyin = ""
             rawLeadPrefix = nil
             compositionID = UUID()
         }
-        prefixSegments.append(.literal(text))
+        if suffixSegments.contains(where: \.isPinyinSegment) {
+            focusedSeparatorLiterals.insert(text, at: 0)
+        } else {
+            prefixSegments.append(.literal(text))
+        }
         mainCandidates = []
         candidatePage = 0
         semanticCandidate = nil
@@ -210,10 +223,16 @@ public struct CompositionState: Sendable {
         revision &+= 1
     }
 
-    /// 弹出末尾的字面量段（退格在活跃段为空、末段为标点时使用）。
-    /// 末段不是字面量时返回 nil 且不改变状态。
+    /// 弹出末尾的字面量段（退格在活跃段为空时使用）。优先弹出焦
+    /// 点字面量运行中最新（紧贴拼音）的一个，其次弹出前缀末尾字
+    /// 面量；两者皆无时返回 nil 且不改变状态。
     @discardableResult
     public mutating func popTrailingLiteral() -> String? {
+        if !focusedSeparatorLiterals.isEmpty {
+            let focused = focusedSeparatorLiterals.removeFirst()
+            revision &+= 1
+            return focused
+        }
         guard case let .literal(text)? = prefixSegments.last else {
             return nil
         }
@@ -222,18 +241,121 @@ public struct CompositionState: Sendable {
         return text
     }
 
-    /// 提交含前缀的文本后清空前缀（部分消费场景：前缀已并入正式
-    /// 文本，保留会导致二次插入）。
-    public mutating func flushPrefix() {
-        guard !prefixSegments.isEmpty else {
-            return
+    /// ← ：焦点移到前一个拼音段。当前焦点段以 `finalizedText` 定稿
+    /// （nil 时取当前首选/原始字母回退）并入后缀；前缀最后一个拼
+    /// 音段复活为焦点段，它与既有内容之间的字面量成为焦点字面量
+    /// 运行。前缀没有拼音段时返回 false 且不改变状态。焦点段拼音
+    /// 为空（如刚退格删空）时不向后缀贡献内容。
+    @discardableResult
+    public mutating func moveFocusLeft(finalizedText: String? = nil) -> Bool {
+        guard let index = prefixSegments.lastIndex(where: \.isPinyinSegment)
+        else {
+            return false
         }
-        prefixSegments = []
+        guard case let .committedPinyin(segmentPinyin, _) = prefixSegments[index]
+        else {
+            return false
+        }
+        var separatorRun: [String] = []
+        var runEnd = index + 1
+        while runEnd < prefixSegments.count,
+              case let .literal(text) = prefixSegments[runEnd]
+        {
+            separatorRun.append(text)
+            runEnd += 1
+        }
+        let rest = Array(prefixSegments[runEnd...])
+
+        var newSuffix = rest
+        if !pinyin.isEmpty {
+            newSuffix.append(
+                .committedPinyin(
+                    pinyin: pinyin,
+                    committedText: finalizedText ?? (mainCandidates.first ?? pinyin)
+                )
+            )
+        }
+        newSuffix.append(
+            contentsOf: focusedSeparatorLiterals.map(CompositionPrefixSegment.literal)
+        )
+        newSuffix.append(contentsOf: suffixSegments)
+
+        prefixSegments = Array(prefixSegments[..<index])
+        suffixSegments = newSuffix
+        pinyin = segmentPinyin
+        focusedSeparatorLiterals = separatorRun
+        afterFocusMoved()
+        return true
+    }
+
+    /// → ：焦点移到下一个拼音段。当前焦点段以 `finalizedText` 定稿
+    /// （nil 时取当前首选/原始字母回退）并入前缀（连同焦点字面量
+    /// 运行）；后缀第一个拼音段复活为焦点段，其前的字面量成为焦点
+    /// 字面量运行。后缀没有拼音段时返回 false 且不改变状态。
+    @discardableResult
+    public mutating func moveFocusRight(finalizedText: String? = nil) -> Bool {
+        guard suffixSegments.contains(where: \.isPinyinSegment) else {
+            return false
+        }
+        if !pinyin.isEmpty {
+            prefixSegments.append(
+                .committedPinyin(
+                    pinyin: pinyin,
+                    committedText: finalizedText ?? (mainCandidates.first ?? pinyin)
+                )
+            )
+        }
+        prefixSegments.append(
+            contentsOf: focusedSeparatorLiterals.map(CompositionPrefixSegment.literal)
+        )
+
+        var leading: [String] = []
+        while case let .literal(text)? = suffixSegments.first {
+            leading.append(text)
+            suffixSegments.removeFirst()
+        }
+        guard case let .committedPinyin(nextPinyin, _)? = suffixSegments.first
+        else {
+            return false
+        }
+        suffixSegments.removeFirst()
+
+        pinyin = nextPinyin
+        focusedSeparatorLiterals = leading
+        afterFocusMoved()
+        return true
+    }
+
+    /// 焦点移动后的公共收敛：编辑目标变更，候选、分页、语义候选与
+    /// 飞行中 token 全部失效（compositionID 重建）。
+    private mutating func afterFocusMoved() {
+        mainCandidates = []
+        rawLeadPrefix = nil
+        candidatePage = 0
+        semanticCandidate = nil
+        semanticCandidateDecision = nil
+        semanticCandidateSegments = nil
+        compositionID = UUID()
         revision &+= 1
     }
 
-    /// 清除活跃段但保留定稿前缀（退格把活跃段删空时使用；
-    /// 与 `reset` 的区别是前缀与显示继续存活）。
+    /// 提交含前缀的文本后清空焦点之外的全部切片（部分消费场景：
+    /// 前缀与后缀已并入正式文本，保留会导致二次插入）。
+    public mutating func flushPrefix() {
+        guard !prefixSegments.isEmpty
+            || !focusedSeparatorLiterals.isEmpty
+            || !suffixSegments.isEmpty
+        else {
+            return
+        }
+        prefixSegments = []
+        focusedSeparatorLiterals = []
+        suffixSegments = []
+        revision &+= 1
+    }
+
+    /// 清除焦点段但保留其余切片（退格把焦点段删空时使用；与
+    /// `reset` 的区别是其余内容与显示继续存活）。
     public mutating func clearActivePinyin() {
         guard !pinyin.isEmpty else {
             return
@@ -249,6 +371,93 @@ public struct CompositionState: Sendable {
         revision &+= 1
     }
 
+
+    /// 分段向后重推（KBD-006）：更新后缀拼音段的定稿文本。仅当
+    /// token 仍匹配（期间无任何编辑）且目标段是拼音段时应用；
+    /// revision 递增使批内后续步骤以最新 token 继续判定，用户编辑
+    /// 则使剩余步骤全部失效。
+    public mutating func updateSuffixCommittedText(
+        atSuffixIndex index: Int,
+        committedText: String,
+        token: CompositionToken
+    ) -> Bool {
+        guard token == self.token,
+              suffixSegments.indices.contains(index),
+              case let .committedPinyin(pinyin, _) = suffixSegments[index],
+              !committedText.isEmpty
+        else {
+            return false
+        }
+        suffixSegments[index] = .committedPinyin(
+            pinyin: pinyin,
+            committedText: committedText
+        )
+        revision &+= 1
+        return true
+    }
+
+    /// 云端整句按段应用（KBD-007）：把已按段拆分的建议文本写入各
+    /// 段定稿（前缀改写、焦点段定稿、后缀改写），不触发提交——
+    /// 用户仍可 ←→ 逐段复核后经 Space 上屏。token 匹配、活跃段非
+    /// 空、段数与文本一一对应且均非空时应用；焦点段定稿后活跃拼
+    /// 音清空并重建 compositionID，焦点字面量运行原位保留。
+    public mutating func applySegmentedSuggestion(
+        _ texts: [String],
+        token: CompositionToken
+    ) -> Bool {
+        guard token == self.token,
+              !isSelecting,
+              !isSecureInput,
+              !pinyin.isEmpty
+        else {
+            return false
+        }
+        let prefixPinyinCount = prefixSegments.filter(\.isPinyinSegment).count
+        let suffixPinyinCount = suffixSegments.filter(\.isPinyinSegment).count
+        guard texts.count == prefixPinyinCount + 1 + suffixPinyinCount,
+              texts.allSatisfy({ !$0.isEmpty })
+        else {
+            return false
+        }
+        var next = texts.makeIterator()
+        for index in prefixSegments.indices {
+            guard case let .committedPinyin(segmentPinyin, _) = prefixSegments[index]
+            else {
+                continue
+            }
+            let text = next.next() ?? ""
+            prefixSegments[index] = .committedPinyin(
+                pinyin: segmentPinyin,
+                committedText: text
+            )
+        }
+        // 焦点段定稿入前缀末尾（布局顺序不变），字面量运行原位保留
+        let focusedText = next.next() ?? ""
+        prefixSegments.append(
+            .committedPinyin(pinyin: pinyin, committedText: focusedText)
+        )
+        pinyin = ""
+        rawLeadPrefix = nil
+        for index in suffixSegments.indices {
+            guard case let .committedPinyin(segmentPinyin, _) = suffixSegments[index]
+            else {
+                continue
+            }
+            let text = next.next() ?? ""
+            suffixSegments[index] = .committedPinyin(
+                pinyin: segmentPinyin,
+                committedText: text
+            )
+        }
+        mainCandidates = []
+        candidatePage = 0
+        semanticCandidate = nil
+        semanticCandidateDecision = nil
+        semanticCandidateSegments = nil
+        compositionID = UUID()
+        revision &+= 1
+        return true
+    }
 
     @discardableResult
     public mutating func replaceInput(
@@ -272,28 +481,6 @@ public struct CompositionState: Sendable {
         return token
     }
 
-    /// 弹出最后一个前缀段并把它作为活跃拼音段复活（退格路径）。
-    /// 与 `popSegment` 的区别：拼音段复活后前缀仍保留其前序段，
-    /// 状态回到该段定稿前的编辑形态。
-    @discardableResult
-    public mutating func reviveLastPinyinSegment() -> String? {
-        guard case let .committedPinyin(pinyin, _)? = prefixSegments.last
-        else {
-            return nil
-        }
-        prefixSegments.removeLast()
-        self.pinyin = pinyin
-        mainCandidates = []
-        rawLeadPrefix = nil
-        candidatePage = 0
-        semanticCandidate = nil
-        semanticCandidateDecision = nil
-        semanticCandidateSegments = nil
-        compositionID = UUID()
-        revision &+= 1
-        return pinyin
-    }
-
 
     @discardableResult
     public mutating func applySemanticCandidate(
@@ -315,37 +502,6 @@ public struct CompositionState: Sendable {
         return true
     }
 
-    /// 语义候选是否已整句覆盖定稿前缀：候选携带跨标点段布局，且
-    /// 布局与候选文本的结构校验（分隔符按序出现、各段非空、整体
-    /// 不超上限）通过即视为覆盖。校验与准入用同一个
-    /// `CloudGeneratedSentencePolicy`（confidence 传 1，只关心结
-    /// 构），提交判定因此与准入判定同口径。
-    var semanticCandidateCoversPrefix: Bool {
-        guard let text = semanticCandidate,
-              let segments = semanticCandidateSegments
-        else {
-            return false
-        }
-        return CloudGeneratedSentencePolicy.allows(
-            text: text,
-            pinyinSegments: segments,
-            confidence: 1
-        )
-    }
-
-    /// 语义候选提交时上屏的完整文本：候选携带跨标点段布局且布局
-    /// 与候选文本匹配（`semanticCandidateCoversPrefix`）时，整句已
-    /// 覆盖定稿前缀的全部内容，直接返回候选本身，前置
-    /// `committedPrefixText` 会造成前缀重复上屏；无布局或布局不匹
-    /// 配时保持旧行为（前置前缀）。段布局随 `beginSelection()` 清
-    /// 空，须在此之前调用。
-    public func semanticCandidateCommitText(for candidate: String) -> String {
-        if candidate == semanticCandidate, semanticCandidateCoversPrefix {
-            return candidate
-        }
-        return committedPrefixText + candidate
-    }
-
     public mutating func beginSelection() {
         revision &+= 1
         isSelecting = true
@@ -354,59 +510,13 @@ public struct CompositionState: Sendable {
         semanticCandidateSegments = nil
     }
 
-    /// 候选总页数；无候选时为 0，其余向上取整。
-    public var candidatePageCount: Int {
-        guard !mainCandidates.isEmpty else {
-            return 0
-        }
-        return (mainCandidates.count + Self.candidatesPerPage - 1)
-            / Self.candidatesPerPage
-    }
-
-    /// 当前页可见的候选切片。
-    public var visibleMainCandidates: [String] {
-        let start = candidatePage * Self.candidatesPerPage
-        guard start < mainCandidates.count else {
-            return []
-        }
-        let end = min(start + Self.candidatesPerPage, mainCandidates.count)
-        return Array(mainCandidates[start ..< end])
-    }
-
-    /// 数字键的页内槽位（1-based）映射到全局候选索引；越界返回 nil。
-    public func globalCandidateIndex(forPageSlot slot: Int) -> Int? {
-        guard (1 ... Self.candidatesPerPage).contains(slot) else {
-            return nil
-        }
-        let index = candidatePage * Self.candidatesPerPage + slot - 1
-        return index < mainCandidates.count ? index : nil
-    }
-
-    /// 候选向后翻一页；已在最后一页时返回 false 且不改变状态。
-    @discardableResult
-    public mutating func advanceCandidatePage() -> Bool {
-        guard candidatePage + 1 < candidatePageCount else {
-            return false
-        }
-        candidatePage += 1
-        return true
-    }
-
-    /// 候选向前翻一页；已在第一页时返回 false 且不改变状态。
-    @discardableResult
-    public mutating func retreatCandidatePage() -> Bool {
-        guard candidatePage > 0 else {
-            return false
-        }
-        candidatePage -= 1
-        return true
-    }
-
     public mutating func reset() {
         revision &+= 1
         compositionID = UUID()
         pinyin = ""
         prefixSegments = []
+        focusedSeparatorLiterals = []
+        suffixSegments = []
         mainCandidates = []
         rawLeadPrefix = nil
         candidatePage = 0
@@ -427,6 +537,8 @@ public struct CompositionState: Sendable {
         isSecureInput = false
     }
 
+    /// 当前 composition 的飞行中 token：推断结果应用时用于核对
+    /// compositionID、revision 与会话。
     public var token: CompositionToken {
         CompositionToken(
             compositionID: compositionID,
