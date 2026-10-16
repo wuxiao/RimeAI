@@ -30,7 +30,9 @@ targets:
       # into generated projects whenever the shared package grew.
       - path: ../Sources/RimeAIInputCore/CandidateSelectionTransition.swift
       - path: ../Sources/RimeAIInputCore/CloudConfiguration.swift
+      - path: ../Sources/RimeAIInputCore/CloudGeneratedSentencePolicy.swift
       - path: ../Sources/RimeAIInputCore/CompositionState.swift
+      - path: ../Sources/RimeAIInputCore/CompositionState+Derived.swift
       - path: ../Sources/RimeAIInputCore/DaemonProtocol.swift
       - path: ../Sources/RimeAIInputCore/FailureCircuitBreaker.swift
       - path: ../Sources/RimeAIInputCore/InputPreferences.swift
@@ -76,7 +78,9 @@ targets:
         buildPhase: resources
       - path: ../Sources/RimeAIInputCore/CandidateSelectionTransition.swift
       - path: ../Sources/RimeAIInputCore/CloudConfiguration.swift
+      - path: ../Sources/RimeAIInputCore/CloudGeneratedSentencePolicy.swift
       - path: ../Sources/RimeAIInputCore/CompositionState.swift
+      - path: ../Sources/RimeAIInputCore/CompositionState+Derived.swift
       - path: ../Sources/RimeAIInputCore/DaemonProtocol.swift
       - path: ../Sources/RimeAIInputCore/FailureCircuitBreaker.swift
       - path: ../Sources/RimeAIInputCore/InputPreferences.swift
@@ -124,7 +128,9 @@ targets:
         buildPhase: resources
       - path: ../Sources/RimeAIInputCore/CandidateSelectionTransition.swift
       - path: ../Sources/RimeAIInputCore/CloudConfiguration.swift
+      - path: ../Sources/RimeAIInputCore/CloudGeneratedSentencePolicy.swift
       - path: ../Sources/RimeAIInputCore/CompositionState.swift
+      - path: ../Sources/RimeAIInputCore/CompositionState+Derived.swift
       - path: ../Sources/RimeAIInputCore/DaemonProtocol.swift
       - path: ../Sources/RimeAIInputCore/FailureCircuitBreaker.swift
       - path: ../Sources/RimeAIInputCore/InputPreferences.swift

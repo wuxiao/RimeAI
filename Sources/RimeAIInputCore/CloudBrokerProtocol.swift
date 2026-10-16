@@ -181,76 +181,39 @@ public enum CloudInferenceDecision: String, Codable, Sendable {
 /// ≤0x20 or 0x7F) and the confidence floor — plus, for segmented
 /// requests, the separator layout. A malformed or hostile response can
 /// still never reach presentation.
-public enum CloudGeneratedSentencePolicy {
-    public static let maximumCharacterCount = 128
-    public static let minimumConfidence = 0.60
-
-    /// Single-segment variant (no cross-punctuation layout): structural
-    /// bounds only, mixed Chinese/English text allowed.
-    public static func allows(
-        text: String,
-        confidence: Double
-    ) -> Bool {
-        !text.isEmpty
-            && text.count <= maximumCharacterCount
-            && text.unicodeScalars.allSatisfy { scalar in
-                scalar.value > 0x20 && scalar.value != 0x7F
-            }
-            && confidence.isFinite
-            && confidence >= minimumConfidence
-    }
-
-    /// Cross-punctuation variant: the text is split by the requested
-    /// separators in order and each part must be non-empty (a dropped
-    /// or misplaced separator breaks the layout); the whole text is
-    /// then bounded by the single-segment structural rules. Each part
-    /// is not required to be pure Han or to fit its segment's pinyin
-    /// letter count.
-    /// 按段拆分整句建议（KBD-007 按段接受的基础）：依据各段分隔
-    /// 符按序切割，返回与段一一对应的文本切片；分隔符缺失或任何
-    /// 切片为空时返回 nil。与 `allows(text:pinyinSegments:confidence:)`
-    /// 的结构校验同口径。
-    public static func segmentTexts(
-        text: String,
-        pinyinSegments: [PinyinSegment]
-    ) -> [String]? {
-        guard let lastSegment = pinyinSegments.last,
-              PinyinSegmentPolicy.isValid(
-                  pinyinSegments,
-                  activePinyin: lastSegment.pinyin
-              )
-        else {
-            return nil
-        }
-        var remainder = Substring(text)
-        var parts: [String] = []
-        for segment in pinyinSegments.dropLast() {
-            guard let separatorRange = remainder.range(of: segment.separator)
-            else {
-                return nil
-            }
-            parts.append(String(remainder[..<separatorRange.lowerBound]))
-            remainder = remainder[separatorRange.upperBound...]
-        }
-        parts.append(String(remainder))
-        guard parts.allSatisfy({ !$0.isEmpty }) else {
-            return nil
-        }
-        return parts
-    }
-
-    public static func allows(
-        text: String,
-        pinyinSegments: [PinyinSegment],
-        confidence: Double
-    ) -> Bool {
-        guard confidence.isFinite,
-              confidence >= minimumConfidence,
-              segmentTexts(text: text, pinyinSegments: pinyinSegments) != nil
+/// 云策略层的 CompositionState 派生：语义候选整句覆盖判定与提交
+/// 文本组装。仅 macOS 主线目标编译（iOS 键盘为本地-only，不编译
+/// 云协议层，也不使用这些成员）。
+extension CompositionState {
+    /// 语义候选是否已整句覆盖定稿前缀：候选携带跨标点段布局，且
+    /// 布局与候选文本的结构校验（分隔符按序出现、各段非空、整体
+    /// 不超上限）通过即视为覆盖。校验与准入用同一个
+    /// `CloudGeneratedSentencePolicy`（confidence 传 1，只关心结
+    /// 构），提交判定因此与准入判定同口径。
+    var semanticCandidateCoversPrefix: Bool {
+        guard let text = semanticCandidate,
+              let segments = semanticCandidateSegments
         else {
             return false
         }
-        return allows(text: text, confidence: confidence)
+        return CloudGeneratedSentencePolicy.allows(
+            text: text,
+            pinyinSegments: segments,
+            confidence: 1
+        )
+    }
+
+    /// 语义候选提交时上屏的完整文本：候选携带跨标点段布局且布局
+    /// 与候选文本匹配（`semanticCandidateCoversPrefix`）时，整句已
+    /// 覆盖焦点之外的全部内容，直接返回候选本身，前置定稿文本会
+    /// 造成重复上屏；无布局或布局不匹配时前置全部定稿文本（前缀 +
+    /// 字面量运行 + 后缀）。段布局随 `beginSelection()` 清空，须在
+    /// 此之前调用。
+    public func semanticCandidateCommitText(for candidate: String) -> String {
+        if candidate == semanticCandidate, semanticCandidateCoversPrefix {
+            return candidate
+        }
+        return committedOuterText + candidate
     }
 }
 

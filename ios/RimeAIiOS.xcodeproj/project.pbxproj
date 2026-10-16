@@ -7,10 +7,12 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		00E538C6B3D83EF8100FF412 /* CompositionState+Derived.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04CB1583712A4B0E3711C3E3 /* CompositionState+Derived.swift */; };
 		0782113DCF76F74902C15209 /* RimeAIKeyboardUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC569F10883A5DC32F667689 /* RimeAIKeyboardUITests.swift */; };
 		14CA52035136A79AD76A593C /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 0379CB3D4A6A313D154FE803 /* PrivacyInfo.xcprivacy */; };
 		24C985EC002A775214A10B33 /* CandidateSelectionTransition.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12B7515B53A6BE3F091BDA75 /* CandidateSelectionTransition.swift */; };
 		26D9E37A7ABDA531D4B88BEF /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2E83D5F1391FEF3FF8E92751 /* ContentView.swift */; };
+		2D0C8974A7045F486B59BF79 /* CompositionState+Derived.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04CB1583712A4B0E3711C3E3 /* CompositionState+Derived.swift */; };
 		2FC5463EDC86A0BAAE350FFE /* RimeAINative.xcframework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 2DFB1D82D61DB354384144D3 /* RimeAINative.xcframework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		34583B0B82FB028FED530DC3 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = B8263002701C93B3FB9D0EC9 /* PrivacyInfo.xcprivacy */; };
 		352EC2ECD3E182C49990E535 /* LocalSemanticRanker.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5B1CC1B0D802EF3DE34B977 /* LocalSemanticRanker.swift */; };
@@ -35,7 +37,10 @@
 		8EC6730B703411FE2206EE31 /* RimeAIKeyboard.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 32CFB4D89CBF3678704EE31A /* RimeAIKeyboard.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		904016E8298661EA62EE49C9 /* LICENSE in Resources */ = {isa = PBXBuildFile; fileRef = 7D320EC1D0325B1E0CAB7EF9 /* LICENSE */; };
 		9535198E6F559FB24233E541 /* RimeBridgeC.cc in Sources */ = {isa = PBXBuildFile; fileRef = EA5391E955042D9DE660654E /* RimeBridgeC.cc */; };
+		9562797D4C9B9FE9A299766C /* CloudGeneratedSentencePolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D473666A7B7032BDE411E38 /* CloudGeneratedSentencePolicy.swift */; };
 		998AB59E79516686F51DEAE1 /* SemanticModel in Resources */ = {isa = PBXBuildFile; fileRef = 4BE72A421A5A59F6F24ECC87 /* SemanticModel */; };
+		9E34A45865D533ECFC92899E /* CompositionState+Derived.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04CB1583712A4B0E3711C3E3 /* CompositionState+Derived.swift */; };
+		A61E8EC1FC44E2A4E23C07F2 /* CloudGeneratedSentencePolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D473666A7B7032BDE411E38 /* CloudGeneratedSentencePolicy.swift */; };
 		A75B3D427059FB4D0617810F /* RimeData in Resources */ = {isa = PBXBuildFile; fileRef = 2E844ACA905A4D402DF2F8B7 /* RimeData */; };
 		A7FF821262560DB31C4BCB25 /* CloudConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = DBD0251A5236459AD7BC2AC2 /* CloudConfiguration.swift */; };
 		AB4DEFA6A71E53078B587734 /* SessionContextStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7F1470328C762376AE7332E6 /* SessionContextStore.swift */; };
@@ -58,6 +63,7 @@
 		EAED101605D2EE77F33A0B09 /* SessionContextStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7F1470328C762376AE7332E6 /* SessionContextStore.swift */; };
 		F05C9B544749C2418E6CAD3E /* RimeAINative.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 2DFB1D82D61DB354384144D3 /* RimeAINative.xcframework */; };
 		F242E94FED12794FE4E882D7 /* CompositionState.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF57E3A230AFEFF7860AAAC2 /* CompositionState.swift */; };
+		FB74364F5EAEB9610547D018 /* CloudGeneratedSentencePolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D473666A7B7032BDE411E38 /* CloudGeneratedSentencePolicy.swift */; };
 		FD9799D42FC0803C1948F168 /* ThirdPartyLicenses in Resources */ = {isa = PBXBuildFile; fileRef = D8B3AA8CDD7B4705DD7B79F7 /* ThirdPartyLicenses */; };
 		FE5DCF9F94AF3DC3E7E950EA /* CandidateSelectionTransition.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12B7515B53A6BE3F091BDA75 /* CandidateSelectionTransition.swift */; };
 		FF432F8AB3E4AC37E80B98B7 /* RimeAIApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9876EF2C99B4E9AA70FEACF8 /* RimeAIApp.swift */; };
@@ -107,6 +113,7 @@
 
 /* Begin PBXFileReference section */
 		0379CB3D4A6A313D154FE803 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		04CB1583712A4B0E3711C3E3 /* CompositionState+Derived.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "CompositionState+Derived.swift"; sourceTree = "<group>"; };
 		12B7515B53A6BE3F091BDA75 /* CandidateSelectionTransition.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CandidateSelectionTransition.swift; sourceTree = "<group>"; };
 		26F1B64AD61DCF32125ED8D5 /* VoiceDictationKeyRouter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceDictationKeyRouter.swift; sourceTree = "<group>"; };
 		2A30F957DD2B14C528521D6F /* RimeCandidateIntegrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RimeCandidateIntegrationTests.swift; sourceTree = "<group>"; };
@@ -115,6 +122,7 @@
 		2E844ACA905A4D402DF2F8B7 /* RimeData */ = {isa = PBXFileReference; lastKnownFileType = folder; path = RimeData; sourceTree = SOURCE_ROOT; };
 		32CFB4D89CBF3678704EE31A /* RimeAIKeyboard.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = RimeAIKeyboard.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		34E132BC90CCEFC24D48F027 /* DaemonProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonProtocol.swift; sourceTree = "<group>"; };
+		3D473666A7B7032BDE411E38 /* CloudGeneratedSentencePolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudGeneratedSentencePolicy.swift; sourceTree = "<group>"; };
 		48AC0202340FE574C3962BC2 /* RimeAISettingsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RimeAISettingsStore.swift; sourceTree = "<group>"; };
 		4BE72A421A5A59F6F24ECC87 /* SemanticModel */ = {isa = PBXFileReference; lastKnownFileType = folder; path = SemanticModel; sourceTree = SOURCE_ROOT; };
 		799D19513770D553F55C218E /* LocalSemanticModelIntegrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalSemanticModelIntegrationTests.swift; sourceTree = "<group>"; };
@@ -181,7 +189,9 @@
 			children = (
 				12B7515B53A6BE3F091BDA75 /* CandidateSelectionTransition.swift */,
 				DBD0251A5236459AD7BC2AC2 /* CloudConfiguration.swift */,
+				3D473666A7B7032BDE411E38 /* CloudGeneratedSentencePolicy.swift */,
 				FF57E3A230AFEFF7860AAAC2 /* CompositionState.swift */,
+				04CB1583712A4B0E3711C3E3 /* CompositionState+Derived.swift */,
 				34E132BC90CCEFC24D48F027 /* DaemonProtocol.swift */,
 				D3B05930CAA3285BECB5D76C /* FailureCircuitBreaker.swift */,
 				C4E29FA4D929F61865BB0DD0 /* InputPreferences.swift */,
@@ -448,6 +458,8 @@
 			files = (
 				24C985EC002A775214A10B33 /* CandidateSelectionTransition.swift in Sources */,
 				37DA45BB95AFCCA164613D58 /* CloudConfiguration.swift in Sources */,
+				FB74364F5EAEB9610547D018 /* CloudGeneratedSentencePolicy.swift in Sources */,
+				00E538C6B3D83EF8100FF412 /* CompositionState+Derived.swift in Sources */,
 				F242E94FED12794FE4E882D7 /* CompositionState.swift in Sources */,
 				E6E3E58E5A8E87C5845E8AEF /* DaemonProtocol.swift in Sources */,
 				C1CDBEE8AD7B61CCFF04EC1F /* FailureCircuitBreaker.swift in Sources */,
@@ -467,6 +479,8 @@
 			files = (
 				FE5DCF9F94AF3DC3E7E950EA /* CandidateSelectionTransition.swift in Sources */,
 				ADCDDEC8C0A1C2301A591D17 /* CloudConfiguration.swift in Sources */,
+				A61E8EC1FC44E2A4E23C07F2 /* CloudGeneratedSentencePolicy.swift in Sources */,
+				9E34A45865D533ECFC92899E /* CompositionState+Derived.swift in Sources */,
 				CC246EFE2C1DDBCA75E06AE4 /* CompositionState.swift in Sources */,
 				26D9E37A7ABDA531D4B88BEF /* ContentView.swift in Sources */,
 				B5213497E3D9E28D49811C0A /* DaemonProtocol.swift in Sources */,
@@ -494,6 +508,8 @@
 			files = (
 				834B8788E228BC8E5166D5AF /* CandidateSelectionTransition.swift in Sources */,
 				A7FF821262560DB31C4BCB25 /* CloudConfiguration.swift in Sources */,
+				9562797D4C9B9FE9A299766C /* CloudGeneratedSentencePolicy.swift in Sources */,
+				2D0C8974A7045F486B59BF79 /* CompositionState+Derived.swift in Sources */,
 				D9C00FE9F148529973564162 /* CompositionState.swift in Sources */,
 				D3B2F77D18F08B22DDC89C40 /* DaemonProtocol.swift in Sources */,
 				45094F610B6BB260D5B7617E /* FailureCircuitBreaker.swift in Sources */,
