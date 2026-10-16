@@ -313,6 +313,18 @@ class _ProMingScorer:
         return 0
 
 
+class _AntiMingScorer:
+    """Adjudication-only scorer: hates 命 (the winning path's first char)."""
+
+    max_context_characters = 40
+
+    def next_char_log_prob(self, context: str, character: str) -> float:
+        return math.log(1e-300) if character == "命" else math.log(0.5)
+
+    def character_frequency(self, character: str) -> int:
+        return 0
+
+
 def test_suggest_accepts_custom_scorer(tmp_path: Path):
     from rimeai_runtime.lm_fusion import StaticCharLM
 
@@ -337,8 +349,8 @@ def test_suggest_accepts_custom_scorer(tmp_path: Path):
 def test_scorer_adjudicates_margin_without_steering_expansion(
     tmp_path: Path,
 ):
-    # Ruling 10: beam 扩展永远走静态打分；自定义 scorer 只参与最终
-    # 路径裁决（margin），不得改变解码文本。
+    # One-way ratchet: beam 扩展与门控永远走静态打分；自定义 scorer
+    # 只能提升 confidence，不得改变解码文本、margin 或接受决策。
     decoder = _decoder(tmp_path)
 
     default = decoder.suggest(
@@ -355,7 +367,34 @@ def test_scorer_adjudicates_margin_without_steering_expansion(
 
     assert biased.text == default.text == "命令"
     assert biased.reason == default.reason == "suggestion"
-    assert biased.margin > default.margin
+    assert biased.margin == default.margin
+    assert biased.confidence > default.confidence
+
+
+def test_adversarial_scorer_cannot_demote_a_statically_accepted_suggestion(
+    tmp_path: Path,
+):
+    # Ratchet 的另一半：即便融合 margin 远低于阈值，静态已接受的建议
+    # 也不得被压回 below_threshold，confidence 不得被降低。
+    decoder = _decoder(tmp_path)
+
+    default = decoder.suggest(
+        context="请执行这条",
+        pinyin="mingling",
+        candidates=["明令", "命令"],
+    )
+    adversarial = decoder.suggest(
+        context="请执行这条",
+        pinyin="mingling",
+        candidates=["明令", "命令"],
+        scorer=_AntiMingScorer(),
+    )
+
+    assert default.reason == "suggestion"
+    assert adversarial.reason == "suggestion"
+    assert adversarial.text == default.text
+    assert adversarial.margin == default.margin
+    assert adversarial.confidence == pytest.approx(default.confidence)
 
 
 def test_threshold_training_uses_validation_and_never_test_labels(

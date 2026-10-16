@@ -41,8 +41,9 @@
       "char_accuracy": 0.045089
     },
     "fused_minus_decoder": {
-      "sentence_accuracy": -0.013347,
-      "char_accuracy": -0.008727
+      "sentence_accuracy": 0.0,
+      "char_accuracy": 0.0,
+      "note": "one-way ratchet gating (2026-10-16, see fused_one_way_ratchet): acceptance is decided by the statically calibrated margin; the fused scorer only boosts confidence. fused == decoder by construction. Superseded measurement: -0.013347 / -0.008727 (43 threshold flips) under fused-margin gating, preserved in fused_one_way_ratchet.supersedes"
     },
     "latency_budget": {
       "budget_ms": 1.0,
@@ -88,6 +89,24 @@
       "neural_minus_baseline_sentence_accuracy": 0.184805
     },
     "notes": "Scored raw suggestions (empty = abstain, no baseline fallback, min_confidence 0.0). Same run's static/fused arms reproduced identical accuracy (decoder 0.790554, fused 0.777207); absolute latencies drift with machine load and are not restated. The neural route decodes from the model + vocabulary under pinyin constraints, so it is NOT bounded by gold_in_top10_coverage (0.810062) — it bypasses the frozen Rime Top-10 ceiling entirely. ~286s wall time for 974 samples (~0.29s/sample, model loaded once): eval-grade latency, not yet interactive (Phase 2 需要 4-bit 引擎)."
+  },
+  "fused_one_way_ratchet": {
+    "date": "2026-10-16",
+    "decision": "用户拍板采纳方案 b（静态门控 + 融合只升不降）：suggest/suggest_segments 的接受判定只用静态 margin（阈值 v3 静态标定，分布稳定），融合 scorer 只能提升 confidence，不得把静态已接受的建议压回 below_threshold。",
+    "command": ".venv/bin/python -m rimeai_eval sentence-benchmark .rimeai/datasets/p0-librime-1.17.0-luna-simp.jsonl --language-model .rimeai/models/p0-char-ngram-v2.json.gz --decoder-config .rimeai/models/p0-beam-sentence-v3.json --rime-dictionary .rimeai/rime/shared/luna_pinyin.dict.yaml --user-lm \"$HOME/Library/Application Support/RimeAI/language_profile/user-lm.json.gz\"",
+    "metrics": {
+      "fused_sentence_accuracy": 0.790554,
+      "fused_char_accuracy": 0.853268,
+      "fused_decoder_latency_ms_p95": 1.620125,
+      "decision_counts": {"below_threshold": 157, "no_change": 649, "suggestion": 168}
+    },
+    "supersedes": {
+      "fused_sentence_accuracy": 0.777207,
+      "fused_char_accuracy": 0.844541,
+      "fused_minus_decoder_sentence_accuracy": -0.013347,
+      "decision_counts": {"below_threshold": 200, "no_change": 649, "suggestion": 125},
+      "mechanism": "fused margins gated by the statically trained threshold — 43 accepted suggestions flipped below threshold"
+    }
   },
   "notes": [
     "Neural arm completed on 2026-10-13 (see neural_arm): constrained-qwen-v2 达到 0.911704 句正确率、0 弃权，领先 n-gram beam +12.12pt —— C3 octagram 双轨的启动条件之二（神经路线精度不达标）不成立，路线决策证据已就位（等待用户对照 constrained-qwen bake-off 报告最终拍板）。",

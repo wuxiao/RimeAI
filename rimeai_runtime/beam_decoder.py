@@ -1,5 +1,7 @@
 """Pinyin-constrained beam decoder backed by a frozen character language model."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 import json
 import math
@@ -139,23 +141,26 @@ class BeamSentenceDecoder:
                 return candidate, syllables
         return None
 
-    def raw_decode(
+    def _decode_pair(
         self,
         *,
         context: str,
         pinyin: str,
         candidates: Sequence[str],
         scorer: CharLMScorer | None = None,
-    ) -> Tuple[str, float]:
+    ) -> Tuple[str, float, Optional[float]]:
+        """One static beam expansion returning the decoded text with the
+        static margin (gate metric) and, when a scorer is given, the
+        scorer-adjudicated margin."""
         if not candidates:
-            return "", 0.0
+            return "", 0.0, None
         complete = self._first_complete_candidate(
             pinyin=pinyin,
             candidates=candidates,
             maximum_characters=MAX_SENTENCE_CHARACTERS,
         )
         if complete is None:
-            return candidates[0], 0.0
+            return candidates[0], 0.0, None
         baseline, syllables = complete
         candidate_segments = [
             self.guard.segment(
@@ -186,7 +191,7 @@ class BeamSentenceDecoder:
                 ):
                     characters.add(candidate[position])
             if not characters:
-                return baseline, 0.0
+                return baseline, 0.0, None
             expanded = [
                 (
                     prefix + character,
@@ -203,16 +208,34 @@ class BeamSentenceDecoder:
             expanded.sort(key=lambda item: (-item[1], item[0]))
             beam = expanded[: self.config.beam_width]
         best_text, best_score = beam[0]
+        static_margin = best_score - self._sequence_score(
+            static_scorer,
+            context,
+            baseline,
+        )
         if scorer is None:
-            baseline_score = self._sequence_score(
-                static_scorer,
-                context,
-                baseline,
-            )
-            return best_text, best_score - baseline_score
+            return best_text, static_margin, None
         final_score = self._sequence_score(scorer, context, best_text)
         baseline_score = self._sequence_score(scorer, context, baseline)
-        return best_text, final_score - baseline_score
+        return best_text, static_margin, final_score - baseline_score
+
+    def raw_decode(
+        self,
+        *,
+        context: str,
+        pinyin: str,
+        candidates: Sequence[str],
+        scorer: CharLMScorer | None = None,
+    ) -> Tuple[str, float]:
+        text, static_margin, fused_margin = self._decode_pair(
+            context=context,
+            pinyin=pinyin,
+            candidates=candidates,
+            scorer=scorer,
+        )
+        if scorer is not None and fused_margin is not None:
+            return text, fused_margin
+        return text, static_margin
 
     def suggest(
         self,
@@ -233,26 +256,41 @@ class BeamSentenceDecoder:
             return BeamSuggestion("", 0.0, 0.0, "incomplete_candidate")
         if len(complete[0]) > MAX_SENTENCE_CHARACTERS:
             return BeamSuggestion("", 0.0, 0.0, "too_long")
-        text, margin = self.raw_decode(
+        # One-way ratchet: acceptance is decided by the statically calibrated
+        # margin only; the fused scorer can raise confidence, never demote a
+        # statically accepted suggestion below the gate.
+        text, static_margin, fused_margin = self._decode_pair(
             context=context,
             pinyin=pinyin,
             candidates=candidates,
             scorer=scorer,
         )
         if not text or text == candidates[0]:
-            return BeamSuggestion("", 0.0, margin, "no_change")
-        if margin < self.config.threshold:
-            return BeamSuggestion("", 0.0, margin, "below_threshold")
+            return BeamSuggestion("", 0.0, static_margin, "no_change")
+        if static_margin < self.config.threshold:
+            return BeamSuggestion("", 0.0, static_margin, "below_threshold")
         confidence = 1.0 / (
             1.0
             + math.exp(
                 -max(
                     -30.0,
-                    min(30.0, margin - self.config.threshold),
+                    min(30.0, static_margin - self.config.threshold),
                 )
             )
         )
-        return BeamSuggestion(text, confidence, margin, "suggestion")
+        if fused_margin is not None:
+            fused_confidence = 1.0 / (
+                1.0
+                + math.exp(
+                    -max(
+                        -30.0,
+                        min(30.0, fused_margin - self.config.threshold),
+                    )
+                )
+            )
+            if fused_confidence > confidence:
+                confidence = fused_confidence
+        return BeamSuggestion(text, confidence, static_margin, "suggestion")
 
     def suggest_segments(
         self,

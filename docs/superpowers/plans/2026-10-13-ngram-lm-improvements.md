@@ -220,16 +220,23 @@ def test_train_reports_selected_alpha():
 
 ## 后续阶段（另行立项，本计划不做）
 
-按 Task 5 的门控数字决定是否启动；**C3 及任何整句路线扩张决策必须排在姊妹计划（constrained-qwen-v1）Task 6 对照赛之后**，避免 n-gram beam、octagram、神经约束解码三路线并存：
+## 后续阶段（2026-10-16 路线决策后修订）
 
-| 候选项 | 启动门 | 要点 |
+**决策依据**（同日基准，见 `docs/baselines/sentence-benchmark-backoff-v2.json`）：constrained-qwen-v2 在冻结集 test split 达到 0.911704 句正确率、0 弃权，领先 n-gram beam（0.790554）+12.12pt，且从词表+模型解码、不受 gold_in_top10_coverage（0.810062）天花板约束；用户拍板：**砍 C3、缓 C4，C 阶段主投姊妹计划 Phase 2 部署化**。
+
+| 候选项 | 状态 | 说明 |
 |---|---|---|
-| C1 语料扩规模 | 静态 LM 是当前瓶颈（benchmark 显示回退平滑后提升 < 1pt） | 扩 `datasets/corpora.lock.json` 多领域源；先做 C2 |
-| C2 计数存储 trie/mmap 化 | 准备承接 >1GB 计数表 | gzip JSON → DAWG/marisa-trie 或 sqlite 只读；万象用 C++ 前缀树 + mmap 的先例 |
-| C3 octagram 双轨模式 | 姊妹计划 bake-off 完成且神经路线精度或延时不达标，**同时** `gold_in_top10_coverage` < 85%（冻结边界成为主要损失源） | 自训 n-gram 编译为 `.gram`，librime 编 octagram 插件做引擎内兜底；注意引擎内打分与词库权重的联合调参耦合 |
-| C4 词典质量工程 | C3 评估后仍受词库限制 | 借鉴万象方法论（AI 筛选+人工校对+双键词频+错音词库），不得复制 GPL-3.0 词表内容 |
+| ~~C3 octagram 双轨~~ | **取消** | 与神经路线同目标（绕开 Top-10 天花板）但被支配：期望上限≈万象档位（<80%），成本高（自训 .gram + 重编 librime + 词库权重与引擎内打分联合调参）。神经路线已实测 91.17%。唯一翻盘前提：要求纯本地零模型依赖 |
+| C4 词典质量工程 | **暂缓** | 前提（用户主要从 Top-10 选字）待 Phase 2 上线后用真实数据验证"直接选候选 vs 接受整句建议"比例再决定 |
+| **Phase 2 部署化（主线）** | **启动** | 顺序：① 延迟 spike（4-bit MLX/llama.cpp 实测每句延迟，先拿数字再写集成）② 与 n-gram beam 的仲裁协议设计（两路置信度不可比，必须先定）③ daemon 接入 + 异步建议形态。n-gram beam 降级为零延迟兜底路径，角色不变 |
+| C1/C2（语料扩规模、trie/mmap 存储） | 维持原门控 | 静态 n-gram 仍是排序兜底与 beam 底座，门控条件不变 |
+| C5（新增）错误构成分析 | 喂 Phase 3 决策 | 神经路线剩余 8.8% 错误的构成（模型知识/解码贪心/个性化）决定 SFT 值不值得做；姊妹计划的 error taxonomy 工作直接供给 |
 
 对姊妹计划的建议（不在本计划任务内）：其 Phase 2 接入 daemon 前需先定义与现役 beam 建议的**仲裁策略与置信度校准**——两路线置信度口径不同，不可裸比。
+
+## 决策日志
+
+- 2026-10-16：fused 阈值策略选**方案 b（单向棘轮门控）**——静态 margin 决定接受，融合只升不降；理由：user LM 是移动靶（λ 随证据量漂移），按代表性快照标定阈值不可靠；且整句个性化终局大概率迁移到神经路径（Phase 3 SFT/logit bias），不值得重武器。实现与验证见 `docs/baselines/sentence-benchmark-backoff-v2.json` 的 `fused_one_way_ratchet`（fused == decoder 构造性等价）。
 
 ## Self-Review 记录
 
