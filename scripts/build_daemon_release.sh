@@ -328,6 +328,10 @@ runtime_directory="${build_root}/runtime"
 mkdir -m 700 "${runtime_directory}"
 socket_file="${runtime_directory}/rimeai.sock"
 daemon_log="${build_root}/daemon.log"
+# Release validation must be deterministic and artifact-scoped: the
+# user LM is machine-local runtime state (a missing artifact keeps the
+# baseline behavior bit-for-bit), so the probe daemon pins an absent
+# user-LM path instead of the host's trained profile.
 "${daemon_executable}" \
   --socket "${socket_file}" \
   --language-model "${staging_root}/models/p0-char-ngram-v2.json.gz" \
@@ -336,7 +340,9 @@ daemon_log="${build_root}/daemon.log"
   --neural-model "${staging_root}/models/rimeai-ranker-s-24m-v1" \
   --fusion-config \
     "${staging_root}/models/rimeai-ranker-s-24m-fusion-v1.json" \
-  --neural-device cpu >"${daemon_log}" 2>&1 &
+  --neural-device cpu \
+  --user-lm "${build_root}/validation-absent-user-lm.json.gz" \
+  >"${daemon_log}" 2>&1 &
 daemon_pid=$!
 ready=0
 for _ in {1..240}; do

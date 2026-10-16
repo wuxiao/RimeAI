@@ -131,7 +131,13 @@ Release INT8 曾有冻结质量与延迟证据；本次 clean baseline 未执行
 Python 3.9 工具链），`rimeai_eval/onnx_ranker.py` 保留导出/量化工具与评估
 适配层（RankerError/Ranking 合同）；daemon 诊断的 neural_ranker 条目新增
 `model_type` 字段，区分 `rimeai-pinyin-listwise-cross-encoder`（浮点）与
-`...-onnx`（INT8）。等价性证明与单一制品决策仍未收口（见 KBD-002）。
+`...-onnx`（INT8）。等价性证明已完成（2026-10-16，冻结测试集 top-1 一致率 99.38%、质量差 ±0.12pp、
+INT8 延迟更低，报告 `.rimeai/reports/ranker-float-vs-int8.json`）：产品采用双制品
+目标——Debug/本机 LaunchAgent 浮点、Release builder INT8（上一表），两者均由
+`load_neural_ranker` 按 manifest model_type 加载，诊断条目携带 model_type。
+Release builder 全流程已用 ONNX 路径重跑通过（preview-4-segment-focus）；发布
+验证的探针 daemon 显式钉死缺失 user-lm 路径——用户画像是机器本地运行时状态，
+发布验证必须确定性且 artifact-scoped。
 
 ### 4.3 排序与整句
 
