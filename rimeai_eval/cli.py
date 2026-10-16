@@ -716,10 +716,14 @@ def _evaluate(
             )
             return 2
         try:
-            ranker = load_neural_ranker(
-                ranker_config,
-                PinyinGuard.from_rime_dictionary(dictionary_path),
-                device=device,
+            from .onnx_ranker import adapt_runtime_ranker
+
+            ranker = adapt_runtime_ranker(
+                load_neural_ranker(
+                    ranker_config,
+                    PinyinGuard.from_rime_dictionary(dictionary_path),
+                    device=device,
+                )
             )
             report = evaluate_dataset(
                 selected_samples,

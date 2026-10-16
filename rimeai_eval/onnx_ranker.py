@@ -63,6 +63,23 @@ class OnnxNeuralListwiseRanker(RuntimeOnnxNeuralListwiseRanker):
         return Ranking(tuple(ranking), confidence)
 
 
+def adapt_runtime_ranker(
+    runtime_ranker: RuntimeOnnxNeuralListwiseRanker,
+) -> OnnxNeuralListwiseRanker | RuntimeOnnxNeuralListwiseRanker:
+    """Re-home a runtime ONNX ranker into the eval adapter.
+
+    The runtime loader returns the daemon contract (``rank_candidates``
+    only, ``NeuralRankerError``); the evaluation harness expects the
+    historical ``rank(sample)``/``RankerError`` shape. Re-homing reuses
+    the loaded session without a second cold start.
+    """
+    if type(runtime_ranker) is RuntimeOnnxNeuralListwiseRanker:
+        adapted = OnnxNeuralListwiseRanker.__new__(OnnxNeuralListwiseRanker)
+        adapted.__dict__.update(runtime_ranker.__dict__)
+        return adapted
+    return runtime_ranker
+
+
 def export_quantized_onnx_ranker(
     source_artifact_path: Path,
     output_path: Path,
