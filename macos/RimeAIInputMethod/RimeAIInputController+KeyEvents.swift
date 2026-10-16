@@ -48,6 +48,12 @@ extension RimeAIInputController {
         case 49:
             return handleSpaceKey(client: client)
         case 27, 24:
+            // shift + `-`/`=` 是下划线/加号字面量，不参与候选翻页：
+            // 段间下划线分段（KBD-005）依赖它进入字符路径后作为
+            // 字面量定稿前缀段。
+            if event.modifierFlags.contains(.shift) {
+                break
+            }
             if let resolved = handleCandidatePageKey(event, client: client) {
                 return resolved
             }
@@ -364,6 +370,16 @@ extension RimeAIInputController {
                     leadingCommit,
                     replacementRange: notFoundRange
                 )
+                return true
+            }
+            // 组合进行中的下划线：半角字面量进入 composition（段间
+            // 分隔符，KBD-005），优先于标点表与 flush 判定。
+            if composition.hasComposition,
+               let segmentLiteral = RimeAIInputTextTransformer
+                   .compositionSegmentLiteralText(scalar)
+            {
+                appendCompositionLiteral(segmentLiteral, client: client)
+                configureVoiceHotKey()
                 return true
             }
             if let literalText = RimeAIInputTextTransformer

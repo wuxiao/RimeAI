@@ -176,6 +176,18 @@ public enum RimeAIInputTextTransformer {
         return nil
     }
 
+    /// 组合进行中的下划线（shift+连字符）：始终以半角字面量进入
+    /// composition，作为段间分隔符（KBD-005 下划线分段）。不在
+    /// chinesePunctuation 表内，故不影响非组合态的直通行为。
+    public static func compositionSegmentLiteralText(
+        _ scalar: UnicodeScalar
+    ) -> String? {
+        guard scalar.value == 0x5F else {
+            return nil
+        }
+        return String(Character(scalar))
+    }
+
     /// 空缓冲（composition 尚未开始，即该键是第一个字符）时：标点表
     /// 字符直接上屏的文本；返回 nil 表示该键不走直接上屏路径（仍按
     /// composition 字面量或放行处理）。文本沿用 `compositionLiteralText`

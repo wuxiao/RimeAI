@@ -423,3 +423,15 @@ func segmentTextsSplitsBySeparatorsInOrder() {
     )
 }
 
+
+@Test
+func compositionSegmentLiteralAcceptsOnlyUnderscore() {
+    // 下划线：组合进行中的半角字面量（段间分隔符，KBD-005）。
+    #expect(
+        RimeAIInputTextTransformer.compositionSegmentLiteralText("_") == "_"
+    )
+    // 其余字符不走该通道（标点表与 flush 判定不受影响）。
+    #expect(RimeAIInputTextTransformer.compositionSegmentLiteralText("-") == nil)
+    #expect(RimeAIInputTextTransformer.compositionSegmentLiteralText("+") == nil)
+    #expect(RimeAIInputTextTransformer.compositionSegmentLiteralText("a") == nil)
+}
