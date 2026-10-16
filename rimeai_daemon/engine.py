@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 from typing import Any
 
@@ -94,7 +95,7 @@ class LocalInferenceEngine:
         self._user_lm: UserLanguageModel | None = None
         self._user_lm_mtime: float | None = None
         self._refresh_user_lm(force=True)
-        self.artifacts = [
+        self.artifacts: list[dict[str, Any]] = [
             {
                 "role": "language_model",
                 "path": str(language_model_path.resolve()),
@@ -113,12 +114,22 @@ class LocalInferenceEngine:
         ]
         if neural_model_path is not None and fusion_config_path is not None:
             neural_manifest = neural_model_path / "manifest.json"
+            neural_model_type = None
+            try:
+                neural_manifest_payload = json.loads(
+                    neural_manifest.read_text(encoding="utf-8")
+                )
+            except (OSError, json.JSONDecodeError):
+                neural_manifest_payload = None
+            if isinstance(neural_manifest_payload, dict):
+                neural_model_type = neural_manifest_payload.get("model_type")
             self.artifacts.extend(
                 [
                     {
                         "role": "neural_ranker",
                         "path": str(neural_manifest.resolve()),
                         "sha256": _sha256_path(neural_manifest),
+                        "model_type": neural_model_type,
                     },
                     {
                         "role": "fusion_config",

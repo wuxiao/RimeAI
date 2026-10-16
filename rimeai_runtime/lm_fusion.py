@@ -15,7 +15,10 @@ from .ngram_ranker import NGramRankerModel, ORDERS
 
 
 class CharLMScorer(Protocol):
-    max_context_characters: int
+    @property
+    def max_context_characters(self) -> int:
+        """Upper bound of the fused context window, in characters."""
+        ...
 
     def next_char_log_prob(self, context: str, character: str) -> float:
         """Log probability of `character` following `context`."""

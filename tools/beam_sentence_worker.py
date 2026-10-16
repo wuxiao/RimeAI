@@ -8,7 +8,7 @@ import math
 import os
 from pathlib import Path
 import sys
-from typing import Any, List, Tuple
+from typing import Any, List, NoReturn, Tuple
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -22,7 +22,7 @@ from rimeai_runtime.ngram_ranker import NGramModelError, load_ngram_model
 from rimeai_runtime.pinyin_guard import PinyinGuard
 
 
-def fail(message: str) -> None:
+def fail(message: str) -> NoReturn:
     print(f"beam-sentence: {message}", file=sys.stderr, flush=True)
     raise SystemExit(2)
 

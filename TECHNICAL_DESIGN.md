@@ -124,6 +124,15 @@ Rime 是唯一同步主链。所有本地模型、云端和语音组件都可以
 Release INT8 曾有冻结质量与延迟证据；本次 clean baseline 未执行真实签名发布
 制品与部署环境资格。Debug 与 Release 必须统一目标，或持续维护并验证等价性。
 
+2026-10-16 结构修复：Release 的 ONNX 加载路径此前在运行时包中是死代码
+（`rimeai_runtime/neural_ranker.py` 懒加载 `from .onnx_ranker import ...`，
+但该模块从未存在，daemon 遇到 ONNX model_type 即 ModuleNotFoundError）。
+现 `rimeai_runtime/onnx_ranker.py` 提供运行时加载/推理（仅 onnxruntime，
+Python 3.9 工具链），`rimeai_eval/onnx_ranker.py` 保留导出/量化工具与评估
+适配层（RankerError/Ranking 合同）；daemon 诊断的 neural_ranker 条目新增
+`model_type` 字段，区分 `rimeai-pinyin-listwise-cross-encoder`（浮点）与
+`...-onnx`（INT8）。等价性证明与单一制品决策仍未收口（见 KBD-002）。
+
 ### 4.3 排序与整句
 
 - 24M 拼音感知 Cross-Encoder 与 char n-gram 融合，对可比较的 Rime Top-10

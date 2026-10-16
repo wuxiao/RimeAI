@@ -178,3 +178,4 @@ extension CompositionState {
         return true
     }
 }
+
