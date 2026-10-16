@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "spike": "phase2-4bit-latency",
+  "date": "2026-10-17",
+  "hardware": "Apple M1 Pro, arm64, macOS (Phase 2 目标硬件下限)",
+  "question": "4-bit MLX 能否把 constrained-qwen 整句延迟压进交互预算？",
+  "probe": "scripts/spike_4bit_latency.py（约束解码成本画像：每请求一次 context 预填充 + 逐 token 单步前向，prompt cache；贪心无掩码，掩码开销可忽略）",
+  "models": {
+    "mlx_4bit": "/tmp/qwen05b-4bit（mlx_lm.convert -q，4.5 bits/weight，276MB，加载 750ms）",
+    "torch_fp16": ".rimeai/models/qwen2.5-0.5b-base-060db64（现役 worker 引擎，fp16 MPS，加载 2911ms）"
+  },
+  "results_prefill_plus_steps_ms_p50": {
+    "ctx14_tokens": {
+      "mlx_4bit": {"4": 64.9, "10": 113.0, "20": 193.4, "30": 283.1},
+      "torch_fp16": {"4": 166.6, "10": 366.9, "30": 1049.7}
+    },
+    "note": "ctx32_tokens 档（mlx）：10 字 125.9、30 字 309.0；逐 token 步进 mlx_4bit 约 9-12ms（p50），为该硬件的单步下限"
+  },
+  "verdict": {
+    "speedup": "MLX 4-bit 对现役 fp16 MPS 约 3-3.7×（10 字句 367→113ms，30 字句 1050→283ms），模型体积 1GB→276MB，加载 2.9s→0.75s。值得采用。",
+    "interactive_budget": "未达标：即使 4-bit，10 字句仍 ~113ms、逐 token ~9ms 是 M1 Pro 下限。同步交互（<50ms）在 0.5B 规模上不可达。",
+    "implications": [
+      "Phase 2 产品形态必须是异步建议（用户继续打字、建议 100-300ms 后浮现），或",
+      "持久前缀缓存：请求间 context 逐键增长，复用 prompt cache 后稳态成本 ≈ 步数×9ms（4-10 字 ≈ 40-90ms），接近交互预算——这是比换引擎更大的杠杆，优先实现",
+      "仲裁协议设计时以'延迟分级'为前提：n-gram beam（~2ms，同步）与神经臂（异步）不是同赛道竞争，是不同延迟档的互补来源"
+    ]
+  },
+  "reproduce": {
+    "venv": ".venv/bin/python -m venv /tmp/mlx-spike-venv && /tmp/mlx-spike-venv/bin/pip install mlx-lm",
+    "quantize": "/tmp/mlx-spike-venv/bin/mlx_lm.convert --hf-path .rimeai/models/qwen2.5-0.5b-base-060db64 -q --mlx-path /tmp/qwen05b-4bit",
+    "mlx": "/tmp/mlx-spike-venv/bin/python scripts/spike_4bit_latency.py mlx",
+    "torch": ".venv/bin/python scripts/spike_4bit_latency.py torch"
+  },
+  "caveats": "贪心无拼音掩码（掩码为词表级 numpy 操作，开销可忽略）；p50 为弃首轮后 11 轮中位；M1 Pro 为最低目标硬件，更新 M 系列会整体更快；真实 worker 平均 294ms/句（含掩码与终门，句长混合），与 fp16 探针量级一致。"
+}
