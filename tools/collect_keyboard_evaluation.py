@@ -2,14 +2,15 @@
 """Collect a frozen RimeAI keyboard interaction observation set on macOS."""
 
 import argparse
+import contextlib
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import time
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 
@@ -161,6 +162,25 @@ def undo() -> None:
     )
 
 
+def undo_until_empty(max_attempts: int = 3) -> str:
+    """Undo until the document is empty (bounded).
+
+    macOS 26 TextEdit splits an IME commit into two undo steps (the
+    marked-text insertion, then the commit replacement), so a single
+    Cmd+Z restores the raw pinyin instead of clearing the document.
+    The probe verifies that the accepted text is fully undoable,
+    regardless of host undo granularity.
+    """
+    text = read_document()
+    for _ in range(max_attempts):
+        if text == "":
+            return text
+        undo()
+        time.sleep(0.4)
+        text = read_document()
+    return text
+
+
 def load_scenarios(path: Path) -> list[dict[str, Any]]:
     scenarios: list[dict[str, Any]] = []
     identifiers = set()
@@ -212,7 +232,7 @@ def load_scenarios(path: Path) -> list[dict[str, Any]]:
             )
         identifiers.add(scenario["id"])
         scenarios.append(scenario)
-    if set(row["category"] for row in scenarios) != set(KEYBOARD_CATEGORIES):
+    if {row["category"] for row in scenarios} != set(KEYBOARD_CATEGORIES):
         raise KeyboardCollectionError("scenarios do not cover every category")
     return scenarios
 
@@ -238,6 +258,22 @@ def require_selected_input_method() -> None:
         )
 
 
+def close_all_documents() -> None:
+    """Close every TextEdit document so scenarios run on a fresh window.
+
+    Leftover documents pollute reads: ``window 1`` resolves to the
+    frontmost window, and a stale window (e.g. from a manual probe) makes
+    the revert probe read stale text instead of the scenario result.
+    """
+    run_apple_script(
+        'tell application "TextEdit"\n'
+        "close every document saving no\n"
+        "make new document\n"
+        "activate\n"
+        "end tell"
+    )
+
+
 def collect(
     scenarios_path: Path,
     output_path: Path,
@@ -247,6 +283,8 @@ def collect(
     if sys.platform != "darwin":
         raise KeyboardCollectionError("keyboard collection requires macOS")
     require_selected_input_method()
+    close_all_documents()
+    time.sleep(0.5)
     scenarios = load_scenarios(scenarios_path)
     observations: list[dict[str, Any]] = []
     for scenario in scenarios:
@@ -278,9 +316,7 @@ def collect(
         text_after_revert: str | None = None
         reverted = False
         if scenario["revert_probe"]:
-            undo()
-            time.sleep(0.4)
-            text_after_revert = read_document()
+            text_after_revert = undo_until_empty()
             reverted = text_after_revert == ""
 
         backspace_cleared = False
@@ -335,10 +371,8 @@ def collect(
             os.fsync(output.fileno())
         os.replace(temporary_name, output_path)
     except BaseException:
-        try:
+        with contextlib.suppress(FileNotFoundError):
             os.unlink(temporary_name)
-        except FileNotFoundError:
-            pass
         raise
     return observations
 
