@@ -1,4 +1,5 @@
 #!/bin/zsh
+# shellcheck disable=SC1071  # zsh script; ShellCheck only lints sh/bash
 
 set -euo pipefail
 
@@ -63,7 +64,9 @@ done
 portable_core_sources=(
   CandidateSelectionTransition.swift
   CloudConfiguration.swift
+  CloudGeneratedSentencePolicy.swift
   CompositionState.swift
+  CompositionState+Derived.swift
   DaemonProtocol.swift
   FailureCircuitBreaker.swift
   InputPreferences.swift
