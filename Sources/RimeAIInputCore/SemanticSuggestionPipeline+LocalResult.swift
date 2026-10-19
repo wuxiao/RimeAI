@@ -274,4 +274,67 @@ extension SemanticSuggestionPipeline {
         }
         emit(.suggestionSlotChanged)
     }
+
+    // MARK: - 异步神经整句迟到帧（LM-001 双延迟档神经臂）
+
+    /// 应用 daemon 迟到帧：同步 n-gram 句建议先出，神经整句 100-300ms
+    /// 后到达同一建议位。守卫梯：期望槽匹配 → 活组合令牌未推进
+    /// （击键/选词会推进 revision，旧帧即 stale）→ Secure Input →
+    /// 云端所有权 → 结构门。拼音正确性由 worker 端拼音掩码与终门
+    /// 保证（约束解码合同），客户端不重复拼音校验。
+    public func applyNeuralSentenceLate(_ frame: DaemonSentenceLateFrame) {
+        guard neuralLateRequestID == frame.requestID,
+              let expectedToken = neuralLateToken,
+              frame.matches(expectedToken)
+        else {
+            emit(.diagnostic(.staleResult))
+            return
+        }
+        // 一次性消费：同帧不重复应用。
+        neuralLateRequestID = nil
+        neuralLateToken = nil
+        neuralLateSegments = nil
+        guard composition.token == expectedToken else {
+            emit(.diagnostic(.staleResult))
+            return
+        }
+        guard !dependencies.isSecureEventInputEnabled() else {
+            emit(.secureInputDetected)
+            return
+        }
+        guard !cloudSuggestionApplied, frame.isValid else {
+            return
+        }
+        let result = frame.asInferenceResult()
+        let segments = neuralLateSegments
+        let candidatePresentation = result.candidatePresentation(
+            characterSet: dependencies.characterSet()
+        )
+        guard case let .candidate(text, decision, confidence) =
+            candidatePresentation
+        else {
+            // 字形不符等终端态：迟到帧静默丢弃，保持既有展示。
+            emit(.suggestionSlotChanged)
+            return
+        }
+        guard dependencies.applySemanticCandidate(
+            text,
+            expectedToken,
+            decision,
+            segments
+        ) else {
+            emit(.diagnostic(.invalidResult))
+            return
+        }
+        presentation = .candidate(
+            text: text,
+            decision: decision,
+            confidence: confidence
+        )
+        historySource = .localSemantic
+        cloudCandidate = nil
+        emit(.diagnostic(.resultShown))
+        emit(.diagnostic(.sentenceSuggestionShown))
+        emit(.suggestionSlotChanged)
+    }
 }

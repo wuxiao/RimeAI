@@ -7,7 +7,7 @@ extension RimeAIInputController {
     /// All IMK-process side effects the pipeline needs, injected as
     /// closures so InputCore stays free of Carbon and singletons.
     func makeSuggestionPipeline() -> SemanticSuggestionPipeline {
-        SemanticSuggestionPipeline(
+        let pipeline = SemanticSuggestionPipeline(
             dependencies: SemanticSuggestionDependencies(
                 now: { ProcessInfo.processInfo.systemUptime },
                 scheduling: DispatchQueueSemanticSuggestionScheduling(),
@@ -100,6 +100,12 @@ extension RimeAIInputController {
                 }
             )
         )
+        // 神经臂迟到帧：daemon 连接层收到 sentence_late 后派发到本
+        // 控制器的流水线（主线程）。
+        DaemonClient.shared.onSentenceLateFrame = { [weak pipeline] frame in
+            pipeline?.applyNeuralSentenceLate(frame)
+        }
+        return pipeline
     }
 
     /// Forward the pipeline's diagnostic stream to the settings store and

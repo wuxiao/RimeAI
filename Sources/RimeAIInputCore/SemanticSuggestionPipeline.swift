@@ -261,6 +261,11 @@ public final class SemanticSuggestionPipeline: @unchecked Sendable {
     // Segment layout of the in-flight local request, consumed by
     // `applyLocalResult` for cross-punctuation sentence validation.
     var pendingRequestSegments: [PinyinSegment]?
+    // 异步神经整句迟到帧（LM-001）：发送时登记的期望槽
+    // （latest-request-wins，迟到帧只消费登记过的 requestID）。
+    var neuralLateRequestID: String?
+    var neuralLateToken: CompositionToken?
+    var neuralLateSegments: [PinyinSegment]?
     var pendingCloudRequestID: String?
     /// 分段向后重推（KBD-006）：防抖任务与在途请求 ID 集合。
     var suffixRefinementTask: (any SemanticSuggestionTask)?
@@ -319,6 +324,9 @@ public final class SemanticSuggestionPipeline: @unchecked Sendable {
         cloudSuggestionApplied = false
         phraseContext = nil
         cloudCyclePending = false
+        neuralLateRequestID = nil
+        neuralLateToken = nil
+        neuralLateSegments = nil
     }
 
     /// No candidates and no mixed suggestion: collapse the slot to the

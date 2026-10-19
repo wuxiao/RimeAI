@@ -105,7 +105,8 @@ extension SemanticSuggestionPipeline {
         }
     }
 
-    /// 发送本地推断请求并登记在途槽（latest-request-wins）。
+    /// 发送本地推断请求并登记在途槽（latest-request-wins）；同步句
+    /// 建议允许时同时登记神经臂迟到帧期望槽。
     private func sendInference(
         _ request: SemanticInferenceRequest,
         token: CompositionToken
@@ -114,6 +115,15 @@ extension SemanticSuggestionPipeline {
         pendingRequestID = requestID
         pendingRequestSegments = request.segments
         pendingRequestStartedAt = dependencies.now()
+        if request.allowSentence {
+            neuralLateRequestID = requestID
+            neuralLateToken = token
+            neuralLateSegments = request.segments
+        } else {
+            neuralLateRequestID = nil
+            neuralLateToken = nil
+            neuralLateSegments = nil
+        }
         emit(.diagnostic(.requestStarted))
         dependencies.sendLocalInference(request) { [weak self] result in
             Task { @MainActor [weak self] in

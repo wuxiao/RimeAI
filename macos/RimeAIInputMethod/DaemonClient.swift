@@ -14,6 +14,9 @@ final class DaemonClient: @unchecked Sendable {
     typealias ReadyCompletion = @MainActor @Sendable (
         Result<Void, Error>
     ) -> Void
+    /// 异步神经整句迟到帧回调（主线程派发；由输入控制器接线到
+    /// 流水线的 applyNeuralSentenceLate）。
+    var onSentenceLateFrame: (@MainActor @Sendable (DaemonSentenceLateFrame) -> Void)?
 
     static let shared = DaemonClient()
 
@@ -303,6 +306,20 @@ private extension DaemonClient {
             return
         }
         if result.type == "cancelled" {
+            return
+        }
+        if result.type == "sentence_late" {
+            // 神经臂迟到帧：独立于在途请求槽（同步 result 可能已消费
+            // 完成该 requestID），绑定校验在流水线侧执行。
+            if let frame = try? decoder.decode(
+                DaemonSentenceLateFrame.self,
+                from: line
+            ) {
+                let handler = onSentenceLateFrame
+                DispatchQueue.main.async {
+                    handler?(frame)
+                }
+            }
             return
         }
         guard result.schemaVersion == 1,

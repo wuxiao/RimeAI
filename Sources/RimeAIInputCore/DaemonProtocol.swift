@@ -148,6 +148,7 @@ public struct DaemonHelloRequest: Codable, Sendable {
             "deadline",
             "decision-reasons",
             "long-input-reasons",
+            "sentence-late",
         ]
     ) {
         self.clientID = clientID
@@ -751,6 +752,107 @@ public struct SemanticInferenceResult: Codable, Sendable {
         case sentenceSuggestion = "sentence_suggestion"
         case confidence
         case decision
+        case modelArtifactID = "model_artifact_id"
+        case elapsedMilliseconds = "elapsed_ms"
+    }
+}
+
+/// 异步神经整句迟到帧（LM-001 双延迟档的神经臂）：daemon 在同步
+/// result 之后追加交付，绑定同一 composition/revision/session。
+/// 结构/绑定校验与 result 同口径；拼音正确性由 worker 端拼音掩码
+/// 与终门保证（约束解码合同），客户端不重复拼音校验。
+public struct DaemonSentenceLateFrame: Codable, Sendable, Equatable {
+    public let schemaVersion: Int
+    public let type: String
+    public let status: String
+    public let requestID: String?
+    public let compositionID: String?
+    public let revision: UInt64?
+    public let appSessionID: String?
+    public let sentenceSuggestion: String?
+    public let confidence: Double?
+    public let modelArtifactID: String?
+    public let elapsedMilliseconds: Double?
+
+    public init(
+        schemaVersion: Int = 1,
+        type: String = "sentence_late",
+        status: String,
+        requestID: String? = nil,
+        compositionID: String? = nil,
+        revision: UInt64? = nil,
+        appSessionID: String? = nil,
+        sentenceSuggestion: String? = nil,
+        confidence: Double? = nil,
+        modelArtifactID: String? = nil,
+        elapsedMilliseconds: Double? = nil
+    ) {
+        self.schemaVersion = schemaVersion
+        self.type = type
+        self.status = status
+        self.requestID = requestID
+        self.compositionID = compositionID
+        self.revision = revision
+        self.appSessionID = appSessionID
+        self.sentenceSuggestion = sentenceSuggestion
+        self.confidence = confidence
+        self.modelArtifactID = modelArtifactID
+        self.elapsedMilliseconds = elapsedMilliseconds
+    }
+
+    /// 与 result.matches 同口径的绑定校验（type 换为迟到帧自身）。
+    public func matches(_ token: CompositionToken) -> Bool {
+        schemaVersion == 1
+            && type == "sentence_late"
+            && status == "ok"
+            && compositionID == token.compositionID.uuidString
+            && revision == token.revision
+            && appSessionID == token.appSessionID
+    }
+
+    /// 结构门：非空单行整句 ≤30 字，置信度有限且在 [0, 1]。
+    public var isValid: Bool {
+        guard let sentenceSuggestion,
+              let confidence,
+              confidence.isFinite,
+              (0 ... 1).contains(confidence)
+        else {
+            return false
+        }
+        return !sentenceSuggestion.isEmpty
+            && sentenceSuggestion.count <= 30
+            && !sentenceSuggestion.contains("\n")
+            && !sentenceSuggestion.contains("\r")
+    }
+
+    /// 转换为既有展示/应用路径可消费的 result 形态（decision 固定为
+    /// sentenceSuggestion；迟到帧不携带重排候选）。
+    public func asInferenceResult() -> SemanticInferenceResult {
+        SemanticInferenceResult(
+            status: "ok",
+            requestID: requestID,
+            compositionID: compositionID,
+            revision: revision,
+            appSessionID: appSessionID,
+            rankedCandidate: nil,
+            sentenceSuggestion: sentenceSuggestion,
+            confidence: confidence,
+            decision: .sentenceSuggestion,
+            modelArtifactID: modelArtifactID,
+            elapsedMilliseconds: elapsedMilliseconds
+        )
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion = "schema_version"
+        case type
+        case status
+        case requestID = "request_id"
+        case compositionID = "composition_id"
+        case revision
+        case appSessionID = "app_session_id"
+        case sentenceSuggestion = "sentence_suggestion"
+        case confidence
         case modelArtifactID = "model_artifact_id"
         case elapsedMilliseconds = "elapsed_ms"
     }
