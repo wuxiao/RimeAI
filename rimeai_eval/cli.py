@@ -81,6 +81,9 @@ from .voice_observation_collection import (
     collect_voice_observations,
 )
 
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+"""Repository root anchoring the frozen default evaluation inputs."""
+
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="rimeai-eval")
@@ -277,14 +280,34 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sentence_parser = subparsers.add_parser(
         "evaluate-sentence",
+        aliases=["sentence"],
         help="evaluate a constrained local sentence decoder",
     )
-    sentence_parser.add_argument("dataset", type=Path)
+    sentence_parser.set_defaults(command="evaluate-sentence")
     sentence_parser.add_argument(
-        "--decoder-config", required=True, type=Path
+        "dataset",
+        nargs="?",
+        type=Path,
+        default=_REPO_ROOT / ".rimeai/datasets/p0-librime-1.17.0-luna-simp.jsonl",
+        help=(
+            "P0-format JSONL dataset (default: the frozen 974-sample "
+            "luna_pinyin test set)"
+        ),
     )
     sentence_parser.add_argument(
-        "--rime-dictionary", required=True, type=Path
+        "--decoder-config",
+        type=Path,
+        default=_REPO_ROOT / "examples/constrained_mlx_decoder.json",
+        help=(
+            "constrained decoder configuration (default: the deployed "
+            "MLX 8-bit deployment config)"
+        ),
+    )
+    sentence_parser.add_argument(
+        "--rime-dictionary",
+        type=Path,
+        default=_REPO_ROOT / ".rimeai/rime/shared/luna_pinyin.dict.yaml",
+        help="frozen Rime dictionary used for candidate legality",
     )
     sentence_parser.add_argument("--details-output", type=Path)
     sentence_parser.add_argument(

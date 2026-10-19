@@ -1,6 +1,6 @@
 import json
-from pathlib import Path
 import sys
+from pathlib import Path
 
 from rimeai_eval.cli import main
 
@@ -90,3 +90,39 @@ def test_sentence_evaluation_applies_only_pinyin_consistent_suggestions(
     assert report["metrics"]["relative_lift"] == 1.0
     assert report["decoder"]["valid_suggestions"] == 1
     assert report["decoder"]["pinyin_rejections"] == 1
+
+
+def test_sentence_alias_maps_to_evaluate_sentence_with_frozen_defaults():
+    """`rimeai_eval sentence`（无参）必须可解析并默认指向冻结集输入。
+
+    保护意图：LM-001 验证合同引用的字面命令 `python -m rimeai_eval
+    sentence`（constrained 路线，974 样本 test split）。别名或冻结集
+    默认值漂移会让合同命令重新失效。
+    """
+    from rimeai_eval.cli import _build_parser
+
+    parser = _build_parser()
+    args = parser.parse_args(["sentence"])
+    assert args.command == "evaluate-sentence"
+    assert args.split == "test"
+    assert args.dataset.name == "p0-librime-1.17.0-luna-simp.jsonl"
+    assert args.decoder_config.name == "constrained_mlx_decoder.json"
+    assert args.rime_dictionary.name == "luna_pinyin.dict.yaml"
+    # 冻结集默认输入必须真实存在（锚定 repo 根，不依赖 cwd）。
+    assert args.dataset.is_file()
+    assert args.decoder_config.is_file()
+    assert args.rime_dictionary.is_file()
+    # 显式传参仍然完全覆盖默认值。
+    explicit = parser.parse_args(
+        [
+            "sentence",
+            "other.jsonl",
+            "--decoder-config",
+            "cfg.json",
+            "--rime-dictionary",
+            "dict.yaml",
+        ]
+    )
+    assert str(explicit.dataset) == "other.jsonl"
+    assert str(explicit.decoder_config) == "cfg.json"
+    assert str(explicit.rime_dictionary) == "dict.yaml"
