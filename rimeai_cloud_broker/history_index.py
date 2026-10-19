@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import contextlib
+import json
 import sqlite3
 from array import array
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Protocol
 
-from .hnsw_index import HNSWGraphIndex
+from .hnsw_index import HNSWGraphIndex, Vector
 
 EMBEDDING_MODEL = "text-embedding-v4"
 EMBEDDING_DIMENSIONS = 512
@@ -71,7 +73,7 @@ class HistoryEmbeddingIndexer:
         with sqlite3.connect(self.database_path, timeout=1) as database:
             database.execute("BEGIN IMMEDIATE")
             try:
-                for row, vector in zip(rows, vectors):
+                for row, vector in zip(rows, vectors, strict=True):
                     if len(vector) != EMBEDDING_DIMENSIONS:
                         raise ValueError("embedding dimension mismatch")
                     blob = array("f", (float(value) for value in vector)).tobytes()
@@ -145,7 +147,7 @@ class HistoryEmbeddingIndexer:
                 WHERE embedding_state = 'ready'
                 """
             ).fetchall()
-            vectors = {
+            vectors: dict[int, Vector] = {
                 int(row[0]): self._decode_vector(row[1])
                 for row in vector_rows
             }
@@ -163,14 +165,15 @@ class HistoryEmbeddingIndexer:
             row_ids = [label for label, _ in neighbors]
             if not row_ids:
                 return cloud_request
-            placeholders = ",".join("?" for _ in row_ids)
+            # Bind the id list as one JSON array: the SQL text stays a
+            # static literal (no dynamic IN-clause construction).
             records = database.execute(
-                f"""
+                """
                 SELECT rowid, id, committed_text, bundle_id, committed_at_ms
                 FROM history_commits
-                WHERE rowid IN ({placeholders})
+                WHERE rowid IN (SELECT value FROM json_each(?))
                 """,
-                row_ids,
+                (json.dumps(row_ids),),
             ).fetchall()
         by_rowid = {int(row[0]): row for row in records}
         vector_snippets = []
@@ -252,7 +255,7 @@ class HistoryEmbeddingIndexer:
             if self.index_path.exists():
                 self.index_path.unlink()
             return
-        vectors = {
+        vectors: dict[int, Vector] = {
             int(row[0]): self._decode_vector(row[1]) for row in rows
         }
         index = HNSWGraphIndex.load(
@@ -267,10 +270,8 @@ class HistoryEmbeddingIndexer:
         # allow an old-generation graph to reappear after deletion.
         current_generation = self.generation()
         if current_generation is not None and current_generation != generation:
-            try:
+            with contextlib.suppress(FileNotFoundError):
                 self.index_path.unlink()
-            except FileNotFoundError:
-                pass
 
     @staticmethod
     def _decode_vector(blob: bytes) -> list[float]:

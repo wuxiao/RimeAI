@@ -154,6 +154,21 @@ Release builder 全流程已用 ONNX 路径重跑通过（preview-4-segment-focu
   该路线当前为评测产物，尚未接入 daemon 产品链；部署化与 SFT 见
   [TASKS.md](TASKS.md) 的 LM-001/LM-002。
 
+### 4.4 领域词库（schema v2）
+
+- 预置词库资产与学习型 L1 短语同库异表（`lexicons` /
+  `lexicon_entries`），词库可安装/替换/启停/卸载，多音字一词多行；
+  完整设计见 [docs/DOMAIN_LEXICON_DESIGN.md](docs/DOMAIN_LEXICON_DESIGN.md)。
+- 导入格式为 Rime `.dict.yaml`（兼容雾凇 cn_dicts 生态）；拼音规范化
+  小写去空格、ü→v，权重 w→w/10 钳制 1–99。
+- 词库短语只进独立建议位：快照融合排序为精确命中 > 本域 > 学习短语
+  > 词库短语 > 频次；屏蔽跨全部读音生效；不触碰 Rime 用户词典，
+  不影响冻结词典基线。
+- 构建工具 `tools/build_domain_lexicon.py`：人工只维护
+  `lexicons/<name>/source.tsv`，拼音由 luna_pinyin 词级+贪心最长匹配
+  自动注音，产出标准 dict.yaml + manifest；示例词库
+  `lexicons/it-programming`（215 词条，CC0）。
+
 ## 5. 可选云增强
 
 ### 5.1 固定合同

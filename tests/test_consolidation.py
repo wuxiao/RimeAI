@@ -275,6 +275,7 @@ def test_slow_trickle_domain_graduates_across_batches(tmp_path: Path):
         )
     pipeline = ConsolidationPipeline(paths)
 
+    report = ConsolidationReport()
     for round_index in range(5):
         for batch_index in range(10):
             insert_commit(
@@ -404,6 +405,73 @@ def test_semantic_consolidator_failure_is_fail_closed(tmp_path: Path):
     assert watermark == 0
 
 
+def test_failed_semantic_batch_is_retried_next_round(tmp_path: Path):
+    """L3 失败的批次下一轮必须重新进入语义阶段，且统计不得重复计数。"""
+    paths = make_layout(tmp_path)
+    insert_commit(paths, suffix="00000000000a", age_days=9, text="失败重试甲")
+    pipeline = ConsolidationPipeline(paths)
+
+    def failing(batch: Sequence[RawCommit]) -> bool:
+        del batch
+        raise RuntimeError("LLM unavailable")
+
+    with pytest.raises(ConsolidationError):
+        pipeline.run_once(semantic_consolidator=failing)
+    assert history_state(paths) == {"statistics_done": 1}
+
+    seen: list[str] = []
+    report = pipeline.run_once(
+        semantic_consolidator=lambda batch: bool(
+            seen.extend(c.committed_text for c in batch)
+        )
+        or True
+    )
+
+    assert seen == ["失败重试甲"]
+    assert report.semantic_done == 1
+    assert history_state(paths) == {}
+    with sqlite3.connect(paths.phrasebook_db) as db:
+        count = db.execute(
+            "SELECT count FROM phrasebook_entries WHERE text = '失败重试甲'"
+        ).fetchone()[0]
+    assert count == 1
+
+
+def test_poison_pill_batch_blocks_l3_but_never_leaks_to_prune(
+    tmp_path: Path,
+):
+    """毒丸批连坐后续批次一起失败，但未过 L3 的原文绝不被越级剪枝。"""
+    paths = make_layout(tmp_path)
+    insert_commit(paths, suffix="00000000000b", age_days=9, text="毒丸")
+    pipeline = ConsolidationPipeline(paths)
+
+    def poisoned(batch: Sequence[RawCommit]) -> bool:
+        if any(c.committed_text == "毒丸" for c in batch):
+            raise RuntimeError("bad domain")
+        return True
+
+    with pytest.raises(ConsolidationError):
+        pipeline.run_once(semantic_consolidator=poisoned)
+
+    insert_commit(paths, suffix="00000000000c", age_days=8, text="正常批")
+    with pytest.raises(ConsolidationError):
+        pipeline.run_once(semantic_consolidator=poisoned)
+
+    # 双删守卫回归锁：两轮后两行都未经 L3，必须全部存活。
+    assert history_state(paths) == {"statistics_done": 2}
+    with sqlite3.connect(paths.history_db) as db:
+        texts = {
+            row[0]
+            for row in db.execute("SELECT committed_text FROM history_commits")
+        }
+    assert texts == {"毒丸", "正常批"}
+
+    # 毒丸解除后下一轮全部完成并淘汰。
+    recovered = pipeline.run_once(semantic_consolidator=lambda batch: True)
+    assert recovered.semantic_done == 2
+    assert history_state(paths) == {}
+
+
 def test_repeated_runs_are_idempotent(tmp_path: Path):
     paths = make_layout(tmp_path)
     insert_commit(paths, suffix="000000000001", age_days=8, text="幂等")
@@ -489,7 +557,7 @@ def test_expired_claims_become_fetchable_again(tmp_path: Path):
 def test_scheduler_idle_gate_defers_rounds_while_activity_recent():
     # broker 的推理流量经 note_activity 刷新空闲期限：键盘活跃时不出轮，
     # 空闲与最小轮间隔同时满足才真正执行固化轮。
-    class StubPipeline:
+    class StubPipeline(ConsolidationPipeline):
         def __init__(self):
             self.rounds = 0
 

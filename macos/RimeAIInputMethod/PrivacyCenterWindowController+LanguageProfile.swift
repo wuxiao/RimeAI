@@ -64,9 +64,11 @@ extension PrivacyCenterWindowController {
             guard response == .OK, let url = panel.url else {
                 return
             }
-            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            RimeAIPhraseBookService.artifactOperationQueue.async { [weak self] in
                 do {
-                    try RimeAIPhraseBookService.shared.exportJSON(to: url)
+                    try RimeAIPhraseBookService.shared.exportLanguageProfile(
+                        to: url
+                    )
                 } catch {
                     DispatchQueue.main.async { [weak self] in
                         MainActor.assumeIsolated {
@@ -86,8 +88,8 @@ extension PrivacyCenterWindowController {
         let alert = NSAlert()
         alert.messageText = "永久清除全部语言画像？"
         alert.informativeText =
-            "将删除学习到的全部短语、风格画像与域映射，且不会移除"
-                + "明文历史或 API Key。此操作无法撤销。"
+            "将删除学习到的全部短语、接词习惯统计、风格画像与域映射，"
+                + "且不会移除明文历史或 API Key。此操作无法撤销。"
         alert.addButton(withTitle: "永久清除")
         alert.addButton(withTitle: "取消")
         alert.alertStyle = .critical
@@ -95,7 +97,7 @@ extension PrivacyCenterWindowController {
             guard response == .alertFirstButtonReturn else {
                 return
             }
-            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            RimeAIPhraseBookService.artifactOperationQueue.async { [weak self] in
                 do {
                     try RimeAIPhraseBookService.shared.clearAll()
                 } catch {
@@ -110,7 +112,7 @@ extension PrivacyCenterWindowController {
                     }
                     return
                 }
-                Self.removeStyleProfiles()
+                Self.removeLanguageProfileArtifacts()
                 DispatchQueue.main.async { [weak self] in
                     MainActor.assumeIsolated {
                         self?.refreshLanguageProfileStatus()
@@ -120,7 +122,11 @@ extension PrivacyCenterWindowController {
         }
     }
 
-    private nonisolated static func removeStyleProfiles() {
+    /// Removes every on-disk language-profile artifact: L3 style
+    /// profiles + revisions AND the L2 user LM (including stale tmp files
+    /// from interrupted atomic saves). Called after the L1 phrasebook has
+    /// been cleared so no layer of learned state survives (P1-4).
+    private nonisolated static func removeLanguageProfileArtifacts() {
         let layout = RimeAIProductDataLayout(
             homeDirectory: FileManager.default.homeDirectoryForCurrentUser
         )
@@ -130,8 +136,17 @@ extension PrivacyCenterWindowController {
                 at: directory,
                 includingPropertiesForKeys: nil
             )) ?? []
-        for item in items
-        where item.lastPathComponent.hasPrefix("profile-") {
+        for item in items {
+            let name = item.lastPathComponent
+            // L3 style profiles; L2 user LM and its atomic-save leftovers
+            // (".<base>.<uuid>.tmp").
+            let isStyleProfile = name.hasPrefix("profile-")
+            let isUserLM = name == "user-lm.json.gz"
+                || (name.hasPrefix(".user-lm.json.gz.")
+                    && name.hasSuffix(".tmp"))
+            guard isStyleProfile || isUserLM else {
+                continue
+            }
             try? FileManager.default.removeItem(at: item)
         }
         try? FileManager.default.removeItem(

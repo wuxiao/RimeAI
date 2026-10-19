@@ -53,10 +53,12 @@ extension RimeAIInputController {
         )
         voiceItem.target = self
         menu.addItem(voiceItem)
+        // 不得给 IMK 菜单项设置 keyEquivalent：输入法菜单的按键等效项
+        // 是系统级匹配，会抢占宿主应用自身的 ⌘，(Settings) 等快捷键。
         let settingsItem = NSMenuItem(
             title: "RimeAI 设置…",
             action: #selector(showPrivacyCenter(_:)),
-            keyEquivalent: ","
+            keyEquivalent: ""
         )
         settingsItem.target = self
         menu.addItem(settingsItem)

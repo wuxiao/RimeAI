@@ -120,6 +120,9 @@ public struct SemanticSuggestionDependencies: Sendable {
         @Sendable (_ bundleIdentifier: String) -> ContextPolicy
     public var cloudModelID: @Sendable () -> String
     public var characterSet: @Sendable () -> RimeAICharacterSetPreference
+    /// bundle→domain mapping from the phrasebook snapshot (P2-4); the
+    /// default keeps requests protocol-compatible with pre-domain daemons.
+    public var domainForBundle: @Sendable (_ bundleIdentifier: String) -> String? = { _ in nil }
 
     // Local daemon transport.
     public var sendLocalInference: @Sendable (
@@ -174,6 +177,7 @@ public struct SemanticSuggestionDependencies: Sendable {
         contextPolicy: @escaping @Sendable (String) -> ContextPolicy,
         cloudModelID: @escaping @Sendable () -> String,
         characterSet: @escaping @Sendable () -> RimeAICharacterSetPreference,
+        domainForBundle: @escaping @Sendable (String) -> String? = { _ in nil },
         sendLocalInference: @escaping @Sendable (
             SemanticInferenceRequest,
             @escaping @Sendable (SemanticInferenceResult?) -> Void
@@ -212,6 +216,7 @@ public struct SemanticSuggestionDependencies: Sendable {
         self.contextPolicy = contextPolicy
         self.cloudModelID = cloudModelID
         self.characterSet = characterSet
+        self.domainForBundle = domainForBundle
         self.sendLocalInference = sendLocalInference
         self.cancelLocalInference = cancelLocalInference
         self.rimeCandidates = rimeCandidates

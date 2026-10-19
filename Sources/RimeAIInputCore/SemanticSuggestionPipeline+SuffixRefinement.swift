@@ -169,7 +169,8 @@ extension SemanticSuggestionPipeline {
             candidates: candidates,
             deadlineMilliseconds: Self.localDeadlineMilliseconds,
             allowSentence: false,
-            segments: nil
+            segments: nil,
+            domain: dependencies.domainForBundle(batch.bundleIdentifier)
         )
         let step = SuffixRefinementStep(
             requestID: request.requestID,

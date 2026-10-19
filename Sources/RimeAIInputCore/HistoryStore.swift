@@ -324,6 +324,10 @@ public final class HistoryStore: @unchecked Sendable {
             """
         )
         if existingUserVersion < 2 {
+            // 迁移开关约定：user_version 只是下界标记；每一步迁移都以
+            // 内容探测（pragma_table_info 等）幂等执行，且打标永远发生
+            // 在该版本全部迁移成功之后——半成品库不会被盖上已迁移戳，
+            // 下次打开会重试未完成的步骤。
             try execute("PRAGMA user_version=2")
         }
     }

@@ -59,6 +59,8 @@ scratch/Xcode DerivedData 且启用 warnings-as-errors 的条件下保持内部�
 |---|---|---|---|
 | LP-001 | `DONE-INTERNAL` | HistoryStore 固化状态与淘汰 | `history_commits` 增加 `consolidation_state` 与固化水位线；满足“统计完成且（L3 完成或显式跳过）”的批次删除原文并 bump generation；崩溃后可由水位线续跑；单测覆盖双删条件与旧索引失效（9/9） |
 | LP-002 | `DONE-INTERNAL` | L1 短语库存储与管理 | 存储层、拼音/域查询、保护/删除、域映射、迁移 API（11/11）；设置页"语言画像"含学习状态、画像概要、短语管理（添加/切换保护/删除）、域映射编辑器（增删/改名合并/删除域）与云压缩开关 |
+| LX-001 | `DONE-INTERNAL` | 领域词库能力（schema v2） | `DomainLexiconStore`（安装/替换/启停/卸载/跨读音屏蔽/域迁移级联）+ Rime `.dict.yaml` 导入解析器 + 快照融合查询（学习短语优先于词库，12/12）；设置页"领域词库"面板（导入/启停/卸载/词条浏览/屏蔽）；构建工具 `tools/build_domain_lexicon.py`（6/6）与示例词库 `lexicons/it-programming`（215 词条 CC0）；设计见 [docs/DOMAIN_LEXICON_DESIGN.md](docs/DOMAIN_LEXICON_DESIGN.md) |
+| LX-002 | `PLANNED` | 领域词库后续 | 词库在线更新通道、更多预置领域（医学/金融/法律）、英文 token 融合进 `englishTokens`、真实用户导入雾凇 cn_dicts 冒烟 |
 | LP-003 | `DONE-INTERNAL` | L2 用户 LM 与融合插值 | 每域+global 计数、单 commit 频次上限；两层插值按有效样本量收缩自适应（MAX_USER_WEIGHT=0.35 经首评校准）；域/全局数据不足时退化为现基线（9/9） |
 | LP-004 | `DONE-INTERNAL` | 固化循环调度与本地统计 | 空闲≥10 分钟或每日触发、进程内单例锁、单轮分批（批间水位线）；仅处理窗口（7 天）外 `raw` 增量；幂等水位线 + 跨进程事务性领取；固化单属 broker（daemon 只消费产物）（8/8） |
 | LP-005 | `DONE-INTERNAL` | L3 风格画像与混合压缩 | 画像 JSON 版本化、merge、单调 rollback 与 `locked_fields`；云压缩走 broker（glm-5.3-flash），无凭据显式跳过且不阻塞统计；坏摘要保留旧版（9/9）；画像仅存储于 broker 本地（merge/rollback），不进入推理 prompt（2026-10-12 决策：prompt 只含 pinyin/recent_context/segments） |
@@ -97,6 +99,8 @@ scratch/Xcode DerivedData 且启用 warnings-as-errors 的条件下保持内部�
 | candidate-ID-only 云 broker 与明文历史控制 | `DONE-INTERNAL` | 真实云效果与发布未放行 |
 | 语音 V2 协议、UI、helper、XPC 代码、ASR 制品/评测/tracer | `DONE-INTERNAL` | 仍是默认关闭技术探针，不具备产品资格 |
 | iOS 离线 librime + 紧凑 n-gram 原型 | `DONE-INTERNAL` | fresh Simulator unit/UI 基线通过；非产品支持，最新真机验收未完成 |
+| 语言画像 reveal 对抗审查 P1 加固 | `DONE-INTERNAL` | 2026-10-19：跨轮固化水位契约（statistics_watermark 持久化 + 停用清除/首轮/恢复/开启-关闭-开启语义）；renameDomain 重算 id 且开库修复漂移；daemon/broker/Swift 三侧统一域名校验（`PhraseBookDomain.validate`）；停用降级即时生效（`_refresh_user_lm` OSError 无条件清空）；导出聚合三层（GzipCodec 字节级兼容 Python gzip + LanguageProfileExport）；清除补删 L2 user-lm；RimeAIPhraseBookService 按职责拆三 extension；Swift 488 + pytest 668 + macOS Xcode BUILD SUCCEEDED |
+| 语言画像 reveal 对抗审查 P1B/P2/P3 加固 | `DONE-INTERNAL` | 2026-10-19：L2 计数改为按 token 聚合（批内 SUM 语义稳定，不再每域 512 条触发聚合）；固化压缩改为连续 run 压缩（有界列表 ≤3 条/域）+ 前台/会话边界即时 drain + throttle 开关接线；L3 固化 statistics_watermark 每域语义化且与 L2 计数解耦；broker 单实例守卫（flock + pidfile 拒绝启动）+ 画像跨进程 locked() + 凭据每轮重评估（_semantic_consolidator 改 provider）；L3 ProfileStore 修订排序/裁剪/_archive 毫秒时间戳修复；域改名/删除级联 L2/L3 产物（LanguageProfileArtifacts + service 接线）；云端设置页补批量上云披露（≤24KB/域/轮）+ cloud-debug 只记元数据 + 凭据损坏区分「凭据无效」；快照 60 条改为保护优先；PhraseBookStore 缓存条数改 LIMIT 绑定 |
 
 ## 不在当前任务表
 

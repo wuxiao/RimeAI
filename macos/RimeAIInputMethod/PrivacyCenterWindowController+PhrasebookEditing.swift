@@ -27,6 +27,10 @@ final class PhrasebookEditorControls {
         action: nil
     )
     let editorStatusLabel = NSTextField(labelWithString: "")
+    /// Domain-lexicon controls (schema v2) ride on the same controls
+    /// container so the oversized controller class body stays untouched;
+    /// see `PrivacyCenterWindowController+DomainLexicon.swift`.
+    let lexicon = DomainLexiconEditorControls()
 
     func entry(at index: Int) -> PhraseBookEntry? {
         phraseEntries.indices.contains(index)
@@ -49,6 +53,7 @@ extension PrivacyCenterWindowController {
         appendDomainMappingSection(to: stack)
         appendDomainOperationSection(to: stack)
         appendConsolidationSection(to: stack)
+        buildDomainLexiconSection(stack)
     }
 
     // MARK: - 短语管理
@@ -481,6 +486,7 @@ extension PrivacyCenterWindowController {
     func reloadPhrasebookEditors() {
         phrasebookEditor.consolidationToggle.state =
             RimeAISettingsStore.shared.cloudConsolidationEnabled ? .on : .off
+        reloadDomainLexiconEditors()
         // 设置页不在击键路径上，但 SQLite 查询仍不下主线程：后台取
         // 数、主线程回填表格。
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -566,6 +572,12 @@ extension PrivacyCenterWindowController:
         if tableView === phrasebookEditor.phraseTable {
             return phrasebookEditor.phraseEntries.count
         }
+        if tableView === lexiconEditor.lexiconTable {
+            return lexiconEditor.lexicons.count
+        }
+        if tableView === lexiconEditor.entryTable {
+            return lexiconEditor.entries.count
+        }
         return phrasebookEditor.mappings.count
     }
 
@@ -577,23 +589,87 @@ extension PrivacyCenterWindowController:
         guard let identifier = tableColumn?.identifier.rawValue else {
             return nil
         }
-        if tableView === phrasebookEditor.phraseTable {
-            guard let entry = phrasebookEditor.entry(at: row) else {
-                return nil
-            }
-            switch identifier {
-            case "phrase.text":
-                return entry.text
-            case "phrase.domain":
-                return entry.domain
-            case "phrase.count":
-                return entry.count
-            case "phrase.protected":
-                return entry.isProtected ? "✓" : ""
-            default:
-                return nil
-            }
+        if tableView === lexiconEditor.lexiconTable {
+            return lexiconObjectValue(identifier: identifier, row: row)
         }
+        if tableView === lexiconEditor.entryTable {
+            return lexiconEntryObjectValue(identifier: identifier, row: row)
+        }
+        if tableView === phrasebookEditor.phraseTable {
+            return phraseObjectValue(identifier: identifier, row: row)
+        }
+        return mappingObjectValue(identifier: identifier, row: row)
+    }
+
+    private func lexiconObjectValue(
+        identifier: String,
+        row: Int
+    ) -> Any? {
+        guard let lexicon = lexiconEditor.lexicon(at: row) else {
+            return nil
+        }
+        switch identifier {
+        case "lexicon.name":
+            return lexicon.name
+        case "lexicon.domain":
+            return lexicon.domain
+        case "lexicon.version":
+            return lexicon.version
+        case "lexicon.count":
+            return lexicon.entryCount
+        case "lexicon.enabled":
+            return lexicon.isEnabled ? "启用" : "停用"
+        default:
+            return nil
+        }
+    }
+
+    private func lexiconEntryObjectValue(
+        identifier: String,
+        row: Int
+    ) -> Any? {
+        guard let entry = lexiconEditor.entry(at: row) else {
+            return nil
+        }
+        switch identifier {
+        case "lexicon-entry.text":
+            return entry.text
+        case "lexicon-entry.pinyin":
+            return entry.pinyinKeys
+        case "lexicon-entry.weight":
+            return entry.weight
+        case "lexicon-entry.blocked":
+            return entry.isBlocked ? "✓" : ""
+        default:
+            return nil
+        }
+    }
+
+    private func phraseObjectValue(
+        identifier: String,
+        row: Int
+    ) -> Any? {
+        guard let entry = phrasebookEditor.entry(at: row) else {
+            return nil
+        }
+        switch identifier {
+        case "phrase.text":
+            return entry.text
+        case "phrase.domain":
+            return entry.domain
+        case "phrase.count":
+            return entry.count
+        case "phrase.protected":
+            return entry.isProtected ? "✓" : ""
+        default:
+            return nil
+        }
+    }
+
+    private func mappingObjectValue(
+        identifier: String,
+        row: Int
+    ) -> Any? {
         guard let mapping = phrasebookEditor.mapping(at: row) else {
             return nil
         }

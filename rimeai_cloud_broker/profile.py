@@ -9,13 +9,14 @@ revisions so a bad summary can be rolled back.
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import json
 import os
 import re
 import shutil
 import tempfile
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -25,10 +26,11 @@ MAX_SIGNATURE_PHRASES = 32
 MAX_PHRASE_LENGTH = 64
 MAX_TRAIT_ITEMS = 64
 MAX_BATCH_CHARACTERS = 24_000
-# Mirrors the daemon request validator and Swift PhraseBookStore domain
-# validation; the domain is interpolated into file names, so its charset
-# must stay closed.
-DOMAIN_PATTERN = re.compile(r"[a-z0-9-]+")
+# Shared domain charset contract: [a-z0-9-]{1,64}; enforced identically by
+# the daemon request validator (rimeai_daemon.server.is_valid_domain) and
+# the Swift PhraseBookStore. The domain is interpolated into file names, so
+# its charset must stay closed; cross-layer agreement is locked by tests.
+DOMAIN_PATTERN = re.compile(r"[a-z0-9-]{1,64}")
 ALLOWED_TRAIT_KEYS = (
     "register",
     "cn_en_mixing",
@@ -37,6 +39,13 @@ ALLOWED_TRAIT_KEYS = (
     "vocabulary_domains",
     "signature_phrases",
 )
+# Per-key item caps — the single source both `_sanitize_traits` and
+# `merge_profile` consult, so the two paths can never drift apart.
+TRAIT_ITEM_LIMITS = {
+    key: MAX_SIGNATURE_PHRASES if key == "signature_phrases"
+    else MAX_TRAIT_ITEMS
+    for key in ALLOWED_TRAIT_KEYS
+}
 PROFILE_TIMEOUT_SECONDS = 60.0
 
 ChatTransport = Callable[..., dict[str, Any]]
@@ -46,9 +55,17 @@ class ProfileError(RuntimeError):
     pass
 
 
-def _validate_string_list(value: Any, *, maximum: int) -> list[str]:
-    if not isinstance(value, list) or len(value) > maximum:
+def _validate_string_list(
+    value: Any, *, maximum: int, clamp: bool = False
+) -> list[str]:
+    if not isinstance(value, list):
         raise ProfileError("trait value must be a bounded list")
+    if len(value) > maximum:
+        if not clamp:
+            raise ProfileError("trait value must be a bounded list")
+        # LLM-supplied lists get truncated to the cap; stored payloads
+        # stay strict so corruption surfaces instead of being hidden.
+        value = value[:maximum]
     items: list[str] = []
     for item in value:
         if not isinstance(item, str) or not item.strip():
@@ -59,7 +76,9 @@ def _validate_string_list(value: Any, *, maximum: int) -> list[str]:
     return items
 
 
-def _sanitize_traits(raw: Any) -> dict[str, list[str]]:
+def _sanitize_traits(
+    raw: Any, *, clamp: bool = False
+) -> dict[str, list[str]]:
     """Normalizes an LLM-supplied or stored traits object into the
     whitelist with bounded lists; unknown keys are dropped silently."""
     if raw is None:
@@ -71,9 +90,7 @@ def _sanitize_traits(raw: Any) -> dict[str, list[str]]:
         if key not in raw or raw[key] is None:
             continue
         items = _validate_string_list(
-            raw[key], maximum=MAX_SIGNATURE_PHRASES
-            if key == "signature_phrases"
-            else MAX_TRAIT_ITEMS
+            raw[key], maximum=TRAIT_ITEM_LIMITS[key], clamp=clamp
         )
         if items:
             traits[key] = items
@@ -94,8 +111,7 @@ class StyleProfile:
         locked_fields: list[str] | None = None,
     ) -> None:
         if (
-            not domain
-            or len(domain) > 64
+            not isinstance(domain, str)
             or DOMAIN_PATTERN.fullmatch(domain) is None
         ):
             raise ProfileError("profile domain is invalid")
@@ -172,16 +188,16 @@ def merge_profile(
     traits: dict[str, list[str]] = {}
     if previous is not None:
         traits.update(previous.traits)
-    fresh = _sanitize_traits(summary_traits)
+    fresh = _sanitize_traits(summary_traits, clamp=True)
     locked = set(previous.locked_fields if previous else [])
     for key, items in fresh.items():
         if key in locked:
             continue
         if key == "signature_phrases" and key in traits:
             merged = list(dict.fromkeys(items + traits[key]))
-            traits[key] = merged[:MAX_SIGNATURE_PHRASES]
+            traits[key] = merged[:TRAIT_ITEM_LIMITS[key]]
         else:
-            traits[key] = items
+            traits[key] = items[:TRAIT_ITEM_LIMITS[key]]
     return StyleProfile(
         domain=domain,
         revision=(previous.revision + 1) if previous else 1,
@@ -202,6 +218,27 @@ class ProfileStore:
     def _current_path(self, domain: str) -> Path:
         return self.directory / f"profile-{domain}.json"
 
+    @contextlib.contextmanager
+    def locked(self, domain: str) -> Iterator[None]:
+        """Cross-process per-domain mutex via flock on a sidecar file.
+
+        The broker's single-instance lock is the primary guard; this
+        per-domain lock additionally serializes any second process that
+        legitimately touches the profile directory (tests, tooling, a
+        future settings-page rollback), so load→merge→save can never
+        interleave into last-write-wins.
+        """
+        if DOMAIN_PATTERN.fullmatch(domain) is None:
+            raise ProfileError("profile domain is invalid")
+        self.directory.mkdir(parents=True, exist_ok=True)
+        lock_path = self.directory / f"profile-{domain}.lock"
+        with lock_path.open("a+b") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
     def load(self, domain: str) -> StyleProfile | None:
         path = self._current_path(domain)
         try:
@@ -215,15 +252,41 @@ class ProfileStore:
         return profile_from_payload(payload)
 
     def save(self, profile: StyleProfile) -> None:
+        with self.locked(profile.domain):
+            self._save_locked(profile)
+
+    def _save_locked(self, profile: StyleProfile) -> None:
+        """Caller holds the per-domain lock (see `save`/`update`)."""
         self.directory.mkdir(parents=True, exist_ok=True)
         current = self._current_path(profile.domain)
         if current.exists():
             self._archive(current, profile.domain)
         self._atomic_write(current, profile.to_payload())
 
+    def update(
+        self,
+        domain: str,
+        merge: Callable[[StyleProfile | None], StyleProfile],
+    ) -> StyleProfile:
+        """Atomic load→merge→save under the per-domain lock, so
+        concurrent consolidators can never interleave into a
+        last-write-wins lost revision."""
+        with self.locked(domain):
+            updated = merge(self.load(domain))
+            if updated.domain != domain:
+                raise ProfileError("update changed the profile domain")
+            self._save_locked(updated)
+            return updated
+
     def rollback(self, domain: str, steps: int = 1) -> StyleProfile | None:
         """Restores the most recent archived revision strictly older than
         the current one, `steps` times; None when nothing is archived."""
+        with self.locked(domain):
+            return self._rollback_locked(domain, steps)
+
+    def _rollback_locked(
+        self, domain: str, steps: int
+    ) -> StyleProfile | None:
         current = self.load(domain)
         for _ in range(max(1, steps)):
             if current is None:
@@ -241,9 +304,16 @@ class ProfileStore:
                 # stranding the domain without one.
                 archived = self._previous_revision(domain, current.revision)
                 if archived is None:
-                    shutil.move(
-                        str(just_archived), str(self._current_path(domain))
-                    )
+                    try:
+                        shutil.move(
+                            str(just_archived),
+                            str(self._current_path(domain)),
+                        )
+                    except OSError as error:
+                        raise ProfileError(
+                            "cannot restore profile revision:"
+                            f" {error}"
+                        ) from error
                     break
             try:
                 shutil.move(
@@ -349,10 +419,29 @@ class ProfileStore:
         return best[1] if best else None
 
     def _trim_revisions(self, domain: str) -> None:
-        candidates = sorted(
-            self.revisions_directory.glob(f"{domain}-*.json"), reverse=True
-        )
-        for stale in candidates[MAX_REVISIONS_KEPT:]:
+        # Order by the payload's `revision`, not the filename: millisecond
+        # stamps recycle after a trim (the freed base name gets reused by
+        # the newest archive), so name-based ordering — lexicographic or
+        # suffix-parsed — can delete the newest revision instead of the
+        # oldest. Unparseable leftovers sort oldest and trim first.
+        candidates: list[tuple[int, Path]] = []
+        for candidate in self.revisions_directory.glob(f"{domain}-*.json"):
+            try:
+                payload = json.loads(
+                    candidate.read_text(encoding="utf-8")
+                )
+                revision = int(payload["revision"])
+            except (
+                OSError,
+                ValueError,
+                KeyError,
+                TypeError,
+                json.JSONDecodeError,
+            ):
+                revision = -1
+            candidates.append((revision, candidate))
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        for _, stale in candidates[MAX_REVISIONS_KEPT:]:
             # A failed unlink must not abort the save/rollback in progress;
             # leftover revisions are bounded by disk, not correctness.
             with contextlib.suppress(OSError):
@@ -410,7 +499,24 @@ class CloudProfileSummarizer:
     ) -> dict[str, list[str]]:
         corpus = "\n".join(texts)
         if len(corpus) > MAX_BATCH_CHARACTERS:
-            corpus = corpus[-MAX_BATCH_CHARACTERS:]
+            # Line-aligned tail-keep truncation: drop whole oldest entries
+            # (never split a committed text mid-line into garbage
+            # fragments). Recency wins because previous_traits already
+            # carries the style of earlier batches forward.
+            kept: list[str] = []
+            total = 0
+            for line in reversed(texts):
+                added = len(line) + (1 if kept else 0)
+                if total + added > MAX_BATCH_CHARACTERS:
+                    if not kept and len(line) > MAX_BATCH_CHARACTERS:
+                        # A single entry larger than the whole budget:
+                        # keep its tail slice rather than sending an
+                        # empty corpus to the cloud.
+                        kept.append(line[-MAX_BATCH_CHARACTERS:])
+                    break
+                kept.append(line)
+                total += added
+            corpus = "\n".join(reversed(kept))
         messages = [
             {
                 "role": "system",
@@ -490,15 +596,25 @@ def make_semantic_consolidator(
             domain = domain_resolver(commit.bundle_id)
             groups.setdefault(domain, []).append(commit.committed_text)
         for domain, texts in sorted(groups.items()):
-            previous = store.load(domain)
-            fresh = summarizer.summarize(texts, previous)
-            merged = merge_profile(
-                previous,
-                fresh,
-                domain=domain,
-                generator=summarizer.generator,
-            )
-            store.save(merged)
+            fresh: dict[str, Any] | None = None
+
+            def fold(
+                previous: StyleProfile | None,
+                *,
+                texts: list[str] = texts,
+                domain: str = domain,
+            ) -> StyleProfile:
+                nonlocal fresh
+                if fresh is None:
+                    fresh = summarizer.summarize(texts, previous)
+                return merge_profile(
+                    previous,
+                    fresh,
+                    domain=domain,
+                    generator=summarizer.generator,
+                )
+
+            store.update(domain, fold)
         return True
 
     return consolidate

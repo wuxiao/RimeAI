@@ -111,21 +111,33 @@ extension PhraseBookStore {
         return try queue.sync {
             var moved = 0
             try transaction {
-                try run(
-                    """
-                    UPDATE phrasebook_entries AS src
-                    SET domain = ?
-                    WHERE src.domain = ?
-                      AND NOT EXISTS (
-                          SELECT 1 FROM phrasebook_entries AS dst
-                          WHERE dst.domain = ?
-                            AND dst.text = src.text
-                      )
-                    """,
-                    [targetDomain, sourceDomain, targetDomain]
+                // Move rows whose text is absent from the target domain,
+                // re-assigning content-addressed ids so the primary key
+                // always equals sha256(domain \u{1F} text). A bulk
+                // SET-domain UPDATE would leave stale ids behind, and
+                // relearning the same text under a recreated domain would
+                // then hit a primary-key collision (P1-2).
+                let movable = try movableEntries(
+                    from: sourceDomain,
+                    to: targetDomain
                 )
-                if let database {
-                    moved = Int(sqlite3_changes(database))
+                for row in movable {
+                    try run(
+                        """
+                        UPDATE phrasebook_entries
+                        SET domain = ?, id = ?
+                        WHERE id = ?
+                        """,
+                        [
+                            targetDomain,
+                            Self.entryIdentifier(
+                                domain: targetDomain,
+                                text: row.text
+                            ),
+                            row.oldId,
+                        ]
+                    )
+                    moved += 1
                 }
                 // Remaining rows collided with existing target phrases:
                 // fold their counts into the winners, then drop them.
@@ -152,6 +164,12 @@ extension PhraseBookStore {
                     SET domain = ?
                     WHERE domain = ?
                     """,
+                    [targetDomain, sourceDomain]
+                )
+                // Schema v2: lexicons mounted on the renamed domain
+                // follow it, so a domain rename never orphans a lexicon.
+                try run(
+                    "UPDATE lexicons SET domain = ? WHERE domain = ?",
                     [targetDomain, sourceDomain]
                 )
                 try run(
@@ -276,6 +294,43 @@ extension PhraseBookStore {
 
     // MARK: - Internals
 
+    /// Rows in `source` whose text has no counterpart in `target`; their
+    /// content-addressed ids must be recomputed when they move domains.
+    private func movableEntries(
+        from sourceDomain: String,
+        to targetDomain: String
+    ) throws -> [(oldId: String, text: String)] {
+        let statement = try prepare(
+            """
+            SELECT id, text FROM phrasebook_entries AS src
+            WHERE src.domain = ?
+              AND NOT EXISTS (
+                  SELECT 1 FROM phrasebook_entries AS dst
+                  WHERE dst.domain = ?
+                    AND dst.text = src.text
+              )
+            """
+        )
+        defer { sqlite3_finalize(statement) }
+        try bind(sourceDomain, to: statement, index: 1)
+        try bind(targetDomain, to: statement, index: 2)
+        var rows: [(oldId: String, text: String)] = []
+        while true {
+            let status = sqlite3_step(statement)
+            if status == SQLITE_DONE { break }
+            guard status == SQLITE_ROW else {
+                throw currentSQLiteError(code: status)
+            }
+            rows.append(
+                (
+                    columnText(statement, index: 0),
+                    columnText(statement, index: 1)
+                )
+            )
+        }
+        return rows
+    }
+
     /// Prepared-statement execute with bound string parameters, in
     /// order. Only call while holding `queue.sync`.
     func run(_ sql: String, _ values: [String]) throws {
@@ -312,9 +367,11 @@ extension PhraseBookStore {
     }
 }
 
-private extension Character {
+/// Shared domain-name character rule (used by `PhraseBookDomain.normalize`
+/// and `PhraseBookStore.validatedDomain`): [a-z0-9-], identical to the
+/// daemon request validator and the broker profile store.
+extension Character {
     var isLowercaseLetterOrDigitOrHyphen: Bool {
-        (isASCII && (isLetter && !isUppercase)) || (isASCII && isNumber)
-            || self == "-" || self == "_"
+        isASCII && ((isLetter && !isUppercase) || isNumber || self == "-")
     }
 }

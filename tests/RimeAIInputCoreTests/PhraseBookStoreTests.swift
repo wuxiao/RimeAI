@@ -17,6 +17,38 @@ struct PhraseBookStoreTests {
         )
     }
 
+    @Test("snapshot cap pins protected and user entries ahead of the long tail")
+    func snapshotEntriesPinProtected() throws {
+        let (store, directory) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        // 高频自动词条填满快照头部的长尾；用户短语 count=1 处于尾部。
+        for index in 0 ..< 5 {
+            try store.recordAutoPhrase(
+                text: "自动词条\(index)",
+                pinyinKeys: "zidongciti\(index)",
+                domain: "global"
+            )
+        }
+        for _ in 0 ..< 9 {
+            try store.recordAutoPhrase(
+                text: "高频自动",
+                pinyinKeys: "gaopinzidong",
+                domain: "global"
+            )
+        }
+        try store.addUserPhrase(
+            text: "我的口头禅",
+            pinyinKeys: "wodekoutouchan",
+            domain: "global"
+        )
+
+        let snapshot = try store.snapshotEntries(limit: 3)
+        // cap=3 时纯频次排序会截掉 count=1 的用户条目；钉住后必须在列。
+        #expect(snapshot.first?.text == "我的口头禅")
+        #expect(snapshot.count == 3)
+        #expect(snapshot.contains { $0.text == "高频自动" })
+    }
+
     @Test("user phrases surface via exact and prefix pinyin lookup")
     func lookupOrdering() throws {
         let (store, directory) = try makeStore()
@@ -191,6 +223,24 @@ struct PhraseBookStoreTests {
         #expect(try store.domain(for: "com.example.Work") == "global")
     }
 
+    @Test("renameDomain re-assigns content-addressed ids so relearning cannot collide")
+    func renameReassignsIdentifiers() throws {
+        let (store, directory) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try store.recordAutoPhrase(text: "行话", pinyinKeys: "hanghua", domain: "work")
+
+        try store.renameDomain(from: "work", to: "global")
+        // 复用域名重学同文本：新行的内容寻址 id 不得与改名残留行冲突。
+        try store.recordAutoPhrase(text: "行话", pinyinKeys: "hanghua", domain: "work")
+
+        let folded = try store.entries(domain: "global")
+        let relearned = try store.entries(domain: "work")
+        #expect(folded.count == 1)
+        #expect(relearned.count == 1)
+        #expect(relearned.first?.count == 1)
+        #expect(folded.first?.id != relearned.first?.id)
+    }
+
     @Test("adoptUserTokens is idempotent and protects entries")
     func tokenMigration() throws {
         let (store, directory) = try makeStore()
@@ -264,6 +314,26 @@ struct PhraseBookStoreTests {
                 domain: "Not Valid!"
             )
         }
+        // 域字符集与 daemon/broker 统一为 [a-z0-9-]：下划线与非 ASCII 拒绝。
+        #expect(throws: PhraseBookError.invalidDomain.self) {
+            try store.addUserPhrase(
+                text: "词",
+                pinyinKeys: "ci",
+                domain: "work_chat"
+            )
+        }
+        #expect(throws: PhraseBookError.invalidDomain.self) {
+            try store.setDomainMapping(
+                bundleIdentifier: "com.example.X",
+                domain: "中文域"
+            )
+        }
+        // 连字符与数字合法。
+        try store.setDomainMapping(
+            bundleIdentifier: "com.example.Ok",
+            domain: "dev-tools2"
+        )
+        #expect(try store.domain(for: "com.example.Ok") == "dev-tools2")
         #expect(throws: PhraseBookError.invalidDomain.self) {
             try store.setDomainMapping(
                 bundleIdentifier: "com.example.X",

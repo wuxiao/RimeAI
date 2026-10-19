@@ -26,10 +26,12 @@ from rimeai_runtime.neural_ranker import (
 )
 from rimeai_runtime.onnx_ranker import (
     ONNX_MODEL_TYPE,
-    OnnxNeuralListwiseRanker as RuntimeOnnxNeuralListwiseRanker,
     OnnxRankerArtifact,
     _canonical_json,
     _sha256_path,
+)
+from rimeai_runtime.onnx_ranker import (
+    OnnxNeuralListwiseRanker as RuntimeOnnxNeuralListwiseRanker,
 )
 
 from .evaluation import RankerError, Ranking
@@ -65,19 +67,22 @@ class OnnxNeuralListwiseRanker(RuntimeOnnxNeuralListwiseRanker):
 
 def adapt_runtime_ranker(
     runtime_ranker: RuntimeOnnxNeuralListwiseRanker,
-) -> OnnxNeuralListwiseRanker | RuntimeOnnxNeuralListwiseRanker:
+) -> OnnxNeuralListwiseRanker:
     """Re-home a runtime ONNX ranker into the eval adapter.
 
     The runtime loader returns the daemon contract (``rank_candidates``
     only, ``NeuralRankerError``); the evaluation harness expects the
     historical ``rank(sample)``/``RankerError`` shape. Re-homing reuses
-    the loaded session without a second cold start.
+    the loaded session without a second cold start. An instance that is
+    already an eval adapter passes through; every other runtime
+    (sub)class instance is re-homed so the returned object always
+    satisfies the Ranker protocol.
     """
-    if type(runtime_ranker) is RuntimeOnnxNeuralListwiseRanker:
-        adapted = OnnxNeuralListwiseRanker.__new__(OnnxNeuralListwiseRanker)
-        adapted.__dict__.update(runtime_ranker.__dict__)
-        return adapted
-    return runtime_ranker
+    if isinstance(runtime_ranker, OnnxNeuralListwiseRanker):
+        return runtime_ranker
+    adapted = OnnxNeuralListwiseRanker.__new__(OnnxNeuralListwiseRanker)
+    adapted.__dict__.update(runtime_ranker.__dict__)
+    return adapted
 
 
 def export_quantized_onnx_ranker(
@@ -93,9 +98,10 @@ def export_quantized_onnx_ranker(
     ):
         raise NeuralRankerError("ONNX output directory must be empty")
     try:
+        from importlib.metadata import version
+
         import onnx
         import torch
-        from importlib.metadata import version
         from onnxruntime.quantization import QuantType, quantize_dynamic
     except ImportError as error:
         raise NeuralRankerError(

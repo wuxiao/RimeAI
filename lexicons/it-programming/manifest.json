@@ -1,0 +1,8 @@
+{
+  "name": "it-programming",
+  "version": "1",
+  "license": "CC0-1.0",
+  "attribution": "RimeAI 自建术语表（公开领域奉献，无第三方版权依赖）",
+  "domain_hint": "it",
+  "description": "IT 与软件工程领域中文术语；构建期由 luna_pinyin 自动注音。"
+}

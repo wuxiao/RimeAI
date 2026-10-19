@@ -160,9 +160,11 @@ class LocalInferenceEngine:
         try:
             mtime = path.stat().st_mtime
         except OSError:
-            if force:
-                self._user_lm = None
-                self._user_lm_mtime = None
+            # Saves are atomic (os.replace), so a missing file is a genuine
+            # deletion (settings-page clear) — take effect live instead of
+            # waiting for an engine restart.
+            self._user_lm = None
+            self._user_lm_mtime = None
             return
         if not force and mtime == self._user_lm_mtime:
             return

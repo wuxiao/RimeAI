@@ -52,3 +52,4 @@ reports/
 # never commit a copy that contains a real key)
 secrets/cloud.env
 !secrets/cloud.env.example
+.build-voice/

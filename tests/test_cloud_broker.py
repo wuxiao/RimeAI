@@ -70,13 +70,24 @@ class StubCloudModelClient(CloudModelClient):
     def __init__(self, response: dict):
         super().__init__(api_key_loader=lambda: "secret")
         self.response = response
-        self.payload: dict | None = None
+        self._payload: dict | None = None
+
+    @property
+    def payload(self) -> dict:
+        """The last captured request payload; fails loudly when the stub
+        never saw a request instead of surfacing as None-subscript."""
+        assert self._payload is not None, "stub received no request"
+        return self._payload
+
+    def captured_payload(self) -> dict | None:
+        """Non-raising view for tests asserting nothing was captured."""
+        return self._payload
 
     # Emits JSON content: the continuation path parses JSON, and the
     # inference path's lenient unwrap reads {"text": ...} answers, so
     # one stub serves both contracts.
     def _post_json(self, path, payload, *, timeout, api_key=None):
-        self.payload = payload
+        self._payload = payload
         return {
             "choices": [
                 {
@@ -97,7 +108,7 @@ def test_lenient_unwrap_still_reads_a_model_that_answers_json():
     # JSON 字面量当成句子上屏；候选池不进 prompt，凭据也不进 prompt。
     class JsonAnsweringStub(StubCloudModelClient):
         def _post_json(self, path, payload, *, timeout, api_key=None):
-            self.payload = payload
+            self._payload = payload
             return {
                 "choices": [
                     {
@@ -253,7 +264,7 @@ def test_length_truncated_runaway_output_abstains_instead_of_erroring():
     # abstain，不消耗客户端的云错误预算。
     class TruncatedStub(StubGenerateRanker):
         def _post_json(self, path, payload, *, timeout, api_key=None):
-            self.payload = payload
+            self._payload = payload
             return {
                 "choices": [
                     {
@@ -364,7 +375,7 @@ def test_slow_keychain_lookup_cannot_start_a_late_network_request():
     cloud_request.pop("api_key")
     with pytest.raises(CloudBrokerError, match="deadline expired"):
         ranker.rank(cloud_request)
-    assert ranker.payload is None
+    assert ranker.captured_payload() is None
 
 
 def test_cloud_socket_is_private_and_echoes_all_identity_fields():
@@ -378,6 +389,10 @@ def test_cloud_socket_is_private_and_echoes_all_identity_fields():
                 "reason": "typo_match",
                 "text": "测试你好",
             }
+
+        def rank_continuation(self, cloud_request):
+            del cloud_request
+            return {"decision": "abstain", "reason": "capability_absent"}
 
         def embed_texts(self, texts):
             return [[] for _ in texts]
@@ -453,6 +468,10 @@ def test_interactive_cloud_calls_are_serialized_after_cancellation():
                 with self.lock:
                     self.active -= 1
 
+        def rank_continuation(self, cloud_request):
+            del cloud_request
+            return {"decision": "abstain", "reason": "capability_absent"}
+
         def embed_texts(self, texts):
             return [[] for _ in texts]
 
@@ -505,10 +524,17 @@ class StubGenerateRanker(CloudModelClient):
     def __init__(self, response: dict):
         super().__init__(api_key_loader=lambda: "secret")
         self.response = response
-        self.payload: dict | None = None
+        self._payload: dict | None = None
+
+    @property
+    def payload(self) -> dict:
+        """The last captured request payload; fails loudly when the stub
+        never saw a request instead of surfacing as None-subscript."""
+        assert self._payload is not None, "stub received no request"
+        return self._payload
 
     def _post_json(self, path, payload, *, timeout, api_key=None):
-        self.payload = payload
+        self._payload = payload
         return {
             "choices": [
                 {
@@ -722,7 +748,7 @@ def test_decision_survives_trailing_noise_after_the_json_object():
     # 宽松解包只取第一个对象，后续噪声不进句子。
     class NoisyStub(StubCloudModelClient):
         def _post_json(self, path, payload, *, timeout, api_key=None):
-            self.payload = payload
+            self._payload = payload
             return {
                 "choices": [
                     {
@@ -745,17 +771,17 @@ def test_decision_survives_trailing_noise_after_the_json_object():
     }
 
 
-def test_debug_flag_logs_request_and_response_without_credentials(
+def test_debug_flag_logs_metadata_only_never_payloads(
     monkeypatch, tmp_path, capsys
 ):
-    # 显式诊断开关：标记文件存在时把完整 prompt/响应写入 broker 日志，
-    # 凭据（Authorization 头）永不落盘；标记移除后恢复静默。
+    # P2-9：显式诊断开关只记录元数据（路径+字节数）；prompt/响应原文
+    # 与凭据一律不落盘——此前完整 payload 写入 broker stderr 日志。
     flag = tmp_path / "cloud-debug"
     monkeypatch.setattr(cloud_model_module, "DEBUG_FLAG", flag)
 
     class FakeResponse:
         def read(self, limit=-1):
-            return b'{"message": {"content": "{}"}}'
+            return b'{"message": {"content": "{}","usage": {}}}'
 
         def __enter__(self):
             return self
@@ -775,13 +801,20 @@ def test_debug_flag_logs_request_and_response_without_credentials(
 
     flag.touch()
     ranker._post_json(
-        "/api/chat", {"model": "m"}, timeout=1, api_key="secret"
+        "/api/chat",
+        {"model": "m", "messages": [{"role": "user", "content": "机密上下文"}]},
+        timeout=1,
+        api_key="secret",
     )
     err = capsys.readouterr().err
     assert "[cloud-debug] ->" in err
     assert "[cloud-debug] <-" in err
-    assert '"model":"m"' in err
+    assert "bytes=" in err
+    # 原文、payload 内容与凭据都不得出现在日志里。
+    assert '"model"' not in err
+    assert "机密上下文" not in err
     assert "secret" not in err
+    assert "usage" not in err
 
     flag.unlink()
     ranker._post_json(
@@ -962,6 +995,10 @@ def test_client_without_text_generation_capability_gets_keep():
                 "reason": "context_match",
                 "text": "测试你好",
             }
+
+        def rank_continuation(self, cloud_request):
+            del cloud_request
+            return {"decision": "abstain", "reason": "capability_absent"}
 
         def embed_texts(self, texts):
             return [[] for _ in texts]
@@ -1145,6 +1182,10 @@ def test_generated_segments_echoed_verbatim_in_response():
                 "reason": "context_match",
                 "text": "测试，你好",
             }
+
+        def rank_continuation(self, cloud_request):
+            del cloud_request
+            return {"decision": "abstain", "reason": "capability_absent"}
 
         def embed_texts(self, texts):
             return [[] for _ in texts]
@@ -1598,7 +1639,7 @@ def test_semantic_consolidator_skipped_when_credentials_unusable(
 
     assert (
         _semantic_consolidator(
-            ranker,
+            ranker.post_json,
             enabled=True,
             profile_directory=profile_directory,
             phrasebook_db=profile_directory / "phrasebook.sqlite3",
@@ -1609,7 +1650,7 @@ def test_semantic_consolidator_skipped_when_credentials_unusable(
     credential.write_text("broken line without equals\n", encoding="utf-8")
     assert (
         _semantic_consolidator(
-            ranker,
+            ranker.post_json,
             enabled=True,
             profile_directory=profile_directory,
             phrasebook_db=profile_directory / "phrasebook.sqlite3",
@@ -1620,7 +1661,7 @@ def test_semantic_consolidator_skipped_when_credentials_unusable(
     credential.write_text("RIMEAI_CLOUD_API_KEY=usable-key\n", encoding="utf-8")
     assert (
         _semantic_consolidator(
-            ranker,
+            ranker.post_json,
             enabled=True,
             profile_directory=profile_directory,
             phrasebook_db=profile_directory / "phrasebook.sqlite3",
@@ -1631,7 +1672,7 @@ def test_semantic_consolidator_skipped_when_credentials_unusable(
     # The --no-consolidation switch wins even with usable credentials.
     assert (
         _semantic_consolidator(
-            ranker,
+            ranker.post_json,
             enabled=False,
             profile_directory=profile_directory,
             phrasebook_db=profile_directory / "phrasebook.sqlite3",

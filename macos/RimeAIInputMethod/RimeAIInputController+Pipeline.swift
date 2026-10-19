@@ -33,6 +33,11 @@ extension RimeAIInputController {
                 characterSet: { [settings] in
                     settings.characterSet
                 },
+                domainForBundle: { bundleIdentifier in
+                    RimeAIPhraseBookService.shared.domain(
+                        forBundleIdentifier: bundleIdentifier
+                    )
+                },
                 sendLocalInference: { request, completion in
                     DaemonClient.shared.infer(
                         request,

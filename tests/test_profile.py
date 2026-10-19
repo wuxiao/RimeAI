@@ -10,6 +10,8 @@ from typing import Any
 import pytest
 
 from rimeai_cloud_broker.profile import (
+    DOMAIN_PATTERN,
+    MAX_BATCH_CHARACTERS,
     CloudProfileSummarizer,
     ProfileError,
     ProfileStore,
@@ -172,9 +174,6 @@ def test_profile_store_versions_and_rollback(tmp_path: Path):
 
 def test_revision_history_is_bounded(tmp_path: Path):
     store = ProfileStore(tmp_path / "language_profile")
-    profile = StyleProfile(
-        domain="global", revision=1, generated_at_ms=0, generator="t", traits={}
-    )
     for revision in range(1, 16):
         store.save(
             StyleProfile(
@@ -187,6 +186,45 @@ def test_revision_history_is_bounded(tmp_path: Path):
         )
     archived = list((tmp_path / "language_profile" / "revisions").glob("global-*.json"))
     assert len(archived) <= 11  # 10 kept plus rollback artifacts bound
+
+
+def test_summarizer_truncates_line_aligned_keeping_newest():
+    # 超批量预算时按整条丢弃最旧条目（行对齐），绝不把一条上屏原文
+    # 拦腰截成残片喂给模型；保留最新尾部（旧批次风格已由
+    # previous_traits 携带）。
+    captured: dict[str, Any] = {}
+
+    def transport(path: str, payload: dict[str, Any], *, timeout: float) -> dict[str, Any]:
+        captured["payload"] = payload
+        return _completion(json.dumps({"register": ["x"]}))
+
+    summarizer = CloudProfileSummarizer(transport)
+    oldest = "旧" * 500
+    middle = "中" * (MAX_BATCH_CHARACTERS - 120)
+    newest = "新" * 10
+    summarizer.summarize([oldest, middle, newest], None)
+    content = captured["payload"]["messages"][1]["content"]
+    corpus = json.loads(content)["committed_text"]
+    assert len(corpus) <= MAX_BATCH_CHARACTERS
+    assert corpus.split("\n") == [middle, newest]
+
+
+def test_summarizer_truncates_a_single_oversized_entry_to_its_tail():
+    # 单条原文超过整个批量预算时不能发出空 corpus；退化为该条尾部
+    # 截断（旧行为对该场景的语义），仍不超预算。
+    captured: dict[str, Any] = {}
+
+    def transport(path: str, payload: dict[str, Any], *, timeout: float) -> dict[str, Any]:
+        captured["payload"] = payload
+        return _completion(json.dumps({"register": ["x"]}))
+
+    summarizer = CloudProfileSummarizer(transport)
+    huge = "巨" * (MAX_BATCH_CHARACTERS + 500)
+    summarizer.summarize([huge], None)
+    content = captured["payload"]["messages"][1]["content"]
+    corpus = json.loads(content)["committed_text"]
+    assert len(corpus) == MAX_BATCH_CHARACTERS
+    assert corpus == huge[-MAX_BATCH_CHARACTERS:]
 
 
 def test_summarizer_parses_strict_and_embedded_json():
@@ -331,6 +369,29 @@ def test_rollback_never_strands_the_current_profile(tmp_path: Path):
         assert store.load("global") is not None
 
 
+def test_domain_charset_matches_daemon_validator():
+    # P1-3：三层域字符集必须一致（Swift 侧由 PhraseBookStoreTests 锁同一矩阵）。
+    from rimeai_daemon.server import is_valid_domain
+
+    valid = ("global", "work", "dev-tools", "a1", "-", "x" * 64)
+    invalid = (
+        "my_work",
+        "work_chat",
+        "中文域",
+        "UPPER",
+        "",
+        "x" * 65,
+        "../escape",
+        "work space",
+    )
+    for domain in valid:
+        assert is_valid_domain(domain), domain
+        assert DOMAIN_PATTERN.fullmatch(domain), domain
+    for domain in invalid:
+        assert not is_valid_domain(domain), domain
+        assert DOMAIN_PATTERN.fullmatch(domain) is None, domain
+
+
 def test_profile_domain_charset_is_validated(tmp_path: Path):
     # M7：domain 会插值进文件名，字符集必须封闭（镜像 daemon 请求校验
     # 与 Swift PhraseBookStore 的域校验）。
@@ -343,3 +404,109 @@ def test_profile_domain_charset_is_validated(tmp_path: Path):
                 generator="t",
                 traits={},
             )
+
+
+def _profile(domain: str, revision: int) -> StyleProfile:
+    return StyleProfile(
+        domain=domain,
+        revision=revision,
+        generated_at_ms=revision * 1_000,
+        generator="test@local",
+        traits={"register": ["casual"]},
+    )
+
+
+def test_trait_item_limits_single_source_covers_every_key():
+    # P2-merge：traits 上限必须来自同一张表，sanitize 与 merge 不得各写
+    # 各的常量后再漂移。
+    from rimeai_cloud_broker.profile import (
+        ALLOWED_TRAIT_KEYS,
+        MAX_SIGNATURE_PHRASES,
+        MAX_TRAIT_ITEMS,
+        TRAIT_ITEM_LIMITS,
+    )
+
+    assert set(TRAIT_ITEM_LIMITS) == set(ALLOWED_TRAIT_KEYS)
+    assert TRAIT_ITEM_LIMITS["signature_phrases"] == MAX_SIGNATURE_PHRASES
+    for key in ALLOWED_TRAIT_KEYS:
+        if key != "signature_phrases":
+            assert TRAIT_ITEM_LIMITS[key] == MAX_TRAIT_ITEMS
+
+
+def test_merge_clamps_every_trait_to_its_limit():
+    from rimeai_cloud_broker.profile import TRAIT_ITEM_LIMITS
+
+    over = {
+        key: [f"{key}-item-{index}" for index in range(limit + 5)]
+        for key, limit in TRAIT_ITEM_LIMITS.items()
+    }
+    merged = merge_profile(
+        None, over, domain="work", generator="test@local"
+    )
+    for key, limit in TRAIT_ITEM_LIMITS.items():
+        assert len(merged.traits[key]) <= limit
+
+
+def test_concurrent_saves_per_domain_never_lose_a_revision(tmp_path: Path):
+    # P2-lock：并发 save 同一域必须串行——最终 revision 等于写入次数，
+    # last-write-wins 交错会丢修订号。
+    import threading
+
+    store = ProfileStore(tmp_path)
+    writers = 6
+    saves_per_writer = 8
+
+    def write_all() -> None:
+        for _ in range(saves_per_writer):
+            store.update(
+                "work",
+                lambda current: _profile(
+                    "work", (current.revision if current else 0) + 1
+                ),
+            )
+
+    threads = [
+        threading.Thread(target=write_all) for _ in range(writers)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    final = store.load("work")
+    assert final is not None
+    assert final.revision == writers * saves_per_writer
+
+
+def test_domain_locks_are_scoped_per_domain(tmp_path: Path):
+    store = ProfileStore(tmp_path)
+    # 另一域不受同域临界区阻塞（不同锁文件，可嵌套持有）。
+    with store.locked("work"), store.locked("chat"):
+        pass
+
+
+def test_revision_trim_keeps_newest_under_stamp_collisions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # P3-nit：同一毫秒内的归档后缀 -10/-11 在字典序下排在 -2 之前，
+    # 裁剪必须按 (stamp, suffix) 数值序而不是文件名排序。
+    from rimeai_cloud_broker import profile as profile_module
+
+    monkeypatch.setattr(
+        profile_module.time, "time", lambda: 1_700_000_000.0
+    )
+    store = ProfileStore(tmp_path)
+    total = profile_module.MAX_REVISIONS_KEPT + 3
+    for revision in range(1, total + 1):
+        store.save(_profile("work", revision))
+    kept = sorted(
+        tmp_path.joinpath("revisions").glob("work-*.json")
+    )
+    assert len(kept) == profile_module.MAX_REVISIONS_KEPT
+    kept_revisions = []
+    for candidate in kept:
+        payload = json.loads(candidate.read_text(encoding="utf-8"))
+        kept_revisions.append(int(payload["revision"]))
+    expected = list(range(1, total + 1))[-profile_module.MAX_REVISIONS_KEPT:]
+    # 归档的是“被替换下来的上一版”，所以 revision 1..total-1 才进历史。
+    expected = list(range(1, total))[-profile_module.MAX_REVISIONS_KEPT:]
+    assert sorted(kept_revisions) == expected

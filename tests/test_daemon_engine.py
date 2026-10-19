@@ -2,6 +2,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from rimeai_daemon.engine import LocalInferenceEngine
+from rimeai_runtime.beam_decoder import BeamSentenceDecoder
 
 
 class _Ranker:
@@ -337,6 +338,28 @@ def _user_trained_engine(ranking, confidence, texts, domain=None):
     return engine
 
 
+def test_user_lm_refresh_clears_deleted_artifact(tmp_path):
+    # P1-4：设置页清除会删除 user-lm.json.gz；daemon 的 mtime 热重载必须
+    # 让删除即时生效，而不是等到进程重启才停用 L2。
+    from rimeai_daemon.user_lm import UserLanguageModel
+
+    path = tmp_path / "user-lm.json.gz"
+    model = UserLanguageModel()
+    model.update("global", ["接口设计"] * 50)
+    model.save(path)
+
+    engine = _engine(["命令", "明令"], 0.9)
+    engine._user_lm_path = path
+    engine._user_lm = None
+    engine._user_lm_mtime = None
+    engine._refresh_user_lm(force=True)
+    assert engine._user_lm is not None
+
+    path.unlink()
+    engine._refresh_user_lm()
+    assert engine._user_lm is None
+
+
 def test_user_lm_reranks_toward_learned_phrasing():
     request = {
         "context": "请执行这条",
@@ -452,7 +475,7 @@ def test_sentence_path_identical_with_empty_user_lm(tmp_path):
     )
 
 
-class _ScorerRecordingDecoder:
+class _ScorerRecordingDecoder(BeamSentenceDecoder):
     def __init__(self, inner):
         self.inner = inner
         self.scorers = []

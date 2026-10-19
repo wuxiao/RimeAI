@@ -27,6 +27,14 @@ from rimeai_runtime.localipc import (
 
 from .segment_policy import validate_pinyin_segments
 
+# Shared domain charset contract with the broker profile store and the
+# Swift PhraseBookStore: [a-z0-9-]{1,64} (locked by cross-layer tests).
+DOMAIN_PATTERN = re.compile(r"[a-z0-9-]{1,64}")
+
+
+def is_valid_domain(domain: object) -> bool:
+    return isinstance(domain, str) and DOMAIN_PATTERN.fullmatch(domain) is not None
+
 
 class InferenceEngine(Protocol):
     artifact_id: str
@@ -117,12 +125,7 @@ def _validate_inference_request(message: Any) -> dict[str, Any]:
     ):
         raise ValueError("request policy flags must be booleans")
     domain = message.get("domain")
-    if domain is not None and (
-        not isinstance(domain, str)
-        or len(domain) > 64
-        or not domain.replace("-", "").replace("_", "").isalnum()
-        or domain != domain.lower()
-    ):
+    if domain is not None and not is_valid_domain(domain):
         raise ValueError("domain must be a bounded lowercase identifier")
     segments = message.get("segments")
     if segments is not None:
@@ -444,7 +447,7 @@ class RimeAIDaemonServer:
                 self._all_tasks.add(task)
 
                 def cleanup(
-                    completed: "asyncio.Task[Any]",
+                    completed: asyncio.Task[Any],
                     *,
                     current_key: tuple[str, str] = key,
                     current_id: str = request_id,

@@ -30,7 +30,7 @@ public enum SemanticInferenceDecision: String, Codable, Sendable {
     case sentenceIncomplete = "sentence_incomplete"
 }
 
-public enum SemanticCandidatePresentation: Equatable, Sendable {
+public enum SemanticCandidatePresentation: Hashable, Sendable {
     case idle
     case analyzing
     case candidate(
@@ -60,54 +60,48 @@ public enum SemanticCandidatePresentation: Equatable, Sendable {
 
     public func title(mainCandidate: String?) -> String {
         switch self {
-        case .idle:
-            "✦ 本地模型待命"
-        case .analyzing:
-            "✦ 本地模型分析中…"
         case let .candidate(text, decision, _):
-            if decision == .mixedComposition {
-                "✦ 中英混输：\(text)"
-            } else if decision == .phraseBook {
-                "✦ 个人短语：\(text)"
-            } else {
-                "✦ \(text)"
+            switch decision {
+            case .mixedComposition:
+                return "✦ 中英混输：\(text)"
+            case .phraseBook:
+                return "✦ 个人短语：\(text)"
+            default:
+                return "✦ \(text)"
             }
         case .sameTopCandidate:
             if let mainCandidate, !mainCandidate.isEmpty {
-                "✦ AI 建议：\(mainCandidate)（与 Rime 首选一致）"
-            } else {
-                "✦ 本地模型：首选一致"
+                return "✦ AI 建议：\(mainCandidate)（与 Rime 首选一致）"
             }
-        case .insufficientCandidates:
-            "✦ 本地模型：完整候选不足，未执行重排"
-        case .belowConfidence:
-            "✦ 本地模型：置信度不足，保留 Rime"
-        case .noCandidate:
-            "✦ 本地模型：没有可用语义候选"
-        case .sentenceTooLong:
-            "✦ 本地模型：整句超过 30 字，请分段输入"
-        case .sentenceIncomplete:
-            "✦ 本地模型：候选未覆盖完整拼音，保留 Rime"
-        case .scriptMismatch:
-            "✦ 本地模型：整句字形与当前简繁设置不符，保留 Rime"
-        case .inputTooLong:
-            "✦ 本地模型：拼音输入过长，保留 Rime"
-        case .cloudAnalyzing:
-            "☁︎ 云端分析中…"
-        case .cloudSameTopCandidate:
-            "☁︎ 云端：首选一致"
-        case .cloudBelowConfidence:
-            "☁︎ 云端：置信度不足，保留 Rime"
-        case .cloudFailure:
-            "☁︎ 云端暂不可用，已回退 Rime"
+            return "✦ 本地模型：首选一致"
         case let .continuation(candidate):
-            "✦ 续写：\(candidate)"
-        case .unavailable:
-            "✦ 本地模型已停用"
-        case .failure:
-            "✦ 本地模型暂不可用，已回退 Rime"
+            return "✦ 续写：\(candidate)"
+        default:
+            return Self.fixedTitles[self]
+                ?? "✦ 本地模型暂不可用，已回退 Rime"
         }
     }
+
+    /// Constant titles for the payload-free cases; parameterized cases
+    /// (`.candidate`/`.sameTopCandidate`/`.continuation`) are formatted
+    /// inline in `title(mainCandidate:)`.
+    private static let fixedTitles: [SemanticCandidatePresentation: String] = [
+        .idle: "✦ 本地模型待命",
+        .analyzing: "✦ 本地模型分析中…",
+        .insufficientCandidates: "✦ 本地模型：完整候选不足，未执行重排",
+        .belowConfidence: "✦ 本地模型：置信度不足，保留 Rime",
+        .noCandidate: "✦ 本地模型：没有可用语义候选",
+        .sentenceTooLong: "✦ 本地模型：整句超过 30 字，请分段输入",
+        .sentenceIncomplete: "✦ 本地模型：候选未覆盖完整拼音，保留 Rime",
+        .scriptMismatch: "✦ 本地模型：整句字形与当前简繁设置不符，保留 Rime",
+        .inputTooLong: "✦ 本地模型：拼音输入过长，保留 Rime",
+        .cloudAnalyzing: "☁︎ 云端分析中…",
+        .cloudSameTopCandidate: "☁︎ 云端：首选一致",
+        .cloudBelowConfidence: "☁︎ 云端：置信度不足，保留 Rime",
+        .cloudFailure: "☁︎ 云端暂不可用，已回退 Rime",
+        .unavailable: "✦ 本地模型已停用",
+        .failure: "✦ 本地模型暂不可用，已回退 Rime",
+    ]
 
     public var isSelectable: Bool {
         switch self {
@@ -493,6 +487,10 @@ public struct SemanticInferenceRequest: Codable, Sendable {
     /// protocol identical to before. When present the last segment is the
     /// active pinyin echoed by `pinyin`.
     public let segments: [PinyinSegment]?
+    /// Caller-resolved domain (bundle→domain mapping, P2-4). nil omits
+    /// the key entirely, which old daemons parse as the pre-domain
+    /// protocol (engine treats a missing/invalid value as global).
+    public let domain: String?
 
     public init(
         requestID: String,
@@ -503,7 +501,8 @@ public struct SemanticInferenceRequest: Codable, Sendable {
         candidates: [String],
         deadlineMilliseconds: Int,
         allowSentence: Bool,
-        segments: [PinyinSegment]? = nil
+        segments: [PinyinSegment]? = nil,
+        domain: String? = nil
     ) {
         self.requestID = requestID
         compositionID = token.compositionID.uuidString
@@ -519,6 +518,7 @@ public struct SemanticInferenceRequest: Codable, Sendable {
         )
         self.allowSentence = allowSentence
         self.segments = segments
+        self.domain = domain
     }
 
     enum CodingKeys: String, CodingKey {
@@ -536,6 +536,7 @@ public struct SemanticInferenceRequest: Codable, Sendable {
         case allowSentence = "allow_sentence"
         case sensitive
         case segments
+        case domain
     }
 }
 

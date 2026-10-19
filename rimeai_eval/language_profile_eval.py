@@ -22,6 +22,7 @@ import time
 from collections.abc import Sequence
 from pathlib import Path
 
+from rimeai_cloud_broker.profile import MAX_BATCH_CHARACTERS
 from rimeai_daemon.user_lm import UserLanguageModel
 from rimeai_runtime.ngram_ranker import NGramRankerModel, load_ngram_model
 
@@ -231,6 +232,14 @@ def evaluate(
         if test_prob is not None and baseline_test_prob is not None
         else None
     )
+    # L3 云压缩预算对照：评测用的训练语料若存在单条即超批量预算的
+    # 上屏文本，生产端会走尾部截断路径；在报告里显式计数，避免评测
+    # 结论建立在生产端根本不会原样发送的数据形态上。
+    oversized_commits = sum(
+        1
+        for commit in train_commits
+        if len(str(commit["committed_text"])) > MAX_BATCH_CHARACTERS
+    )
 
     return {
         "schema_version": REPORT_SCHEMA_VERSION,
@@ -268,6 +277,8 @@ def evaluate(
             if learning_gain_nats is not None
             else None
         ),
+        "l3_batch_budget_characters": MAX_BATCH_CHARACTERS,
+        "train_commits_exceeding_l3_budget": oversized_commits,
         "elapsed_ms": round((time.monotonic() - started) * 1000, 3),
     }
 

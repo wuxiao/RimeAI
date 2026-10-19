@@ -16,7 +16,6 @@ from urllib import error, request
 
 from rimeai_daemon.segment_policy import split_segmented_text
 
-
 LOCAL_ENDPOINT = "http://localhost:11434/v1"
 # Official Zhipu Coding Plan, direct connection (product decision
 # 2026-10-12): replaces the local Ollama endpoint. The Swift client
@@ -120,9 +119,7 @@ def continuation_text_allows(text: str, context: str, confidence: float) -> bool
         return False
     if context and text in context[-CONTINUATION_DEDUP_TAIL:]:
         return False
-    if _tail_overlap(context, text) > CONTINUATION_MAX_TAIL_OVERLAP:
-        return False
-    return True
+    return _tail_overlap(context, text) <= CONTINUATION_MAX_TAIL_OVERLAP
 
 
 def _debug_enabled() -> bool:
@@ -633,11 +630,16 @@ class CloudModelClient:
         if not url.startswith("https://") and self._endpoint != LOCAL_ENDPOINT:
             raise CloudBrokerError("cloud requests must stay on https")
         if _debug_enabled():
+            # Debug logging stays metadata-only: request/response bodies
+            # contain the user's typed pinyin and context (plaintext),
+            # so sizes and paths are logged, never the payloads (P2-9).
             sys.stderr.write(
-                f"[cloud-debug] -> {path} "
-                f"{encoded.decode('utf-8', 'replace')}\n"
+                f"[cloud-debug] -> {path} bytes={len(encoded)}\n"
             )
-        cloud_request = request.Request(
+        # The scheme allowlist above guarantees https (or the explicit
+        # local Ollama endpoint) before this point; redirects are refused
+        # by _RejectRedirects below, so the audited scheme set is closed.
+        cloud_request = request.Request(  # nosemgrep: python.urlopen-scheme-audit
             url,
             data=encoded,
             headers={
@@ -666,8 +668,7 @@ class CloudModelClient:
             raise CloudBrokerError("cloud response is not an object")
         if _debug_enabled():
             sys.stderr.write(
-                f"[cloud-debug] <- {path} "
-                f"{body.decode('utf-8', 'replace')}\n"
+                f"[cloud-debug] <- {path} bytes={len(body)}\n"
             )
         return value
 

@@ -35,6 +35,22 @@ def test_learned_phrase_outranks_unrelated_candidates():
     assert confidence > 0.0
 
 
+def test_rerank_is_a_pure_permutation_of_the_input_list():
+    # D-2 回归：daemon 只重排请求携带的原始候选列表，不得产出列表之外
+    # 的条目（注入位/混合列表不进 rerank 输入，rerank 也不能自造候选）。
+    model = UserLanguageModel()
+    model.update(None, ["接口设计文档"] * 200)
+    candidates = ["接口设计图", "接口设计", "接口测试", "接口"]
+    ranked, _ = model.rerank("接口", candidates)
+    assert sorted(ranked) == sorted(candidates)
+    assert len(ranked) == len(candidates)
+    # 无证据时原样返回，置信度为 0。
+    cold = UserLanguageModel()
+    unchanged, cold_confidence = cold.rerank("接口", candidates)
+    assert unchanged == candidates
+    assert cold_confidence == 0.0
+
+
 def test_per_commit_gram_cap_bounds_single_phrase_influence():
     capped = UserLanguageModel()
     capped.update(None, ["重复短语"] * 5)
@@ -150,7 +166,10 @@ def test_mean_log_prob_unchanged_semantics():
         for index, character in enumerate(candidate)
     ]
     assert all(prob is not None for prob in per_position)
-    expected = sum(math.log(prob) for prob in per_position) / len(candidate)
+    probabilities = [prob for prob in per_position if prob is not None]
+    expected = sum(math.log(prob) for prob in probabilities) / len(
+        candidate
+    )
     assert counts.mean_log_prob(context, candidate) == pytest.approx(expected)
 
     # A trained domain with zero relevant counts still yields a finite

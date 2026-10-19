@@ -7,7 +7,11 @@ and finally prunes raw text that satisfied the double-delete guard. Steps
 are idempotent across completed rounds via the consolidation watermarks
 maintained in the history database; a mid-round crash (claim expires while
 the rows are still 'raw') re-fetches the batch and may re-count phrase
-frequencies, domain stats, and user-LM statistics.
+frequencies, domain stats, and user-LM statistics. Rows whose statistics
+phase completed but whose semantic phase failed stay 'statistics_done' and
+are re-fetched for the semantic pass on later rounds without re-counting
+statistics; only rows in a terminal state ('consolidated' or explicitly
+'skipped') at or below the semantic watermark are ever pruned.
 """
 
 from __future__ import annotations
@@ -59,6 +63,7 @@ class RawCommit:
     bundle_id: str
     pinyin: str
     committed_text: str
+    state: str = "raw"
 
 
 @dataclass(frozen=True)
@@ -115,19 +120,24 @@ class ConsolidationPipeline:
             # Still honor explicit skip + prune for earlier batches.
             _, pruned = self._semantic_phase([], semantic_consolidator)
             return ConsolidationReport(pruned=pruned)
-        effective, mapped = self._resolve_domains(batch)
-        self._update_phrasebook(batch, effective, mapped)
-        self._update_user_lm(batch, effective)
-        self._mark_statistics(batch)
+        # Statistics run only for fresh 'raw' rows; 'statistics_done' rows
+        # are a semantic-retry backlog whose L1/L2 counts already happened.
+        fresh = [commit for commit in batch if commit.state == "raw"]
+        effective: dict[str, str] = {}
+        if fresh:
+            effective, mapped = self._resolve_domains(fresh)
+            self._update_phrasebook(fresh, effective, mapped)
+            self._update_user_lm(fresh, effective)
+            self._mark_statistics(fresh)
         semantic_done, pruned = self._semantic_phase(
             batch, semantic_consolidator
         )
         return ConsolidationReport(
             considered=len(batch),
-            statistics_done=len(batch),
+            statistics_done=len(fresh),
             semantic_done=semantic_done,
             pruned=pruned,
-            domains=dict(_count_domains(batch, effective)),
+            domains=dict(_count_domains(fresh, effective)) if fresh else {},
         )
 
     # -- phase 1: fetch ------------------------------------------------------
@@ -153,10 +163,10 @@ class ConsolidationPipeline:
                     "DELETE FROM consolidation_claims WHERE claimed_at_ms < ?",
                     (now_ms - CLAIM_LEASE_MILLISECONDS,),
                 )
-                rows = db.execute(
+                fresh_rows = db.execute(
                     """
                     SELECT id, rowid, committed_at_ms, bundle_id, pinyin,
-                           committed_text
+                           committed_text, consolidation_state
                     FROM history_commits
                     WHERE consolidation_state = 'raw'
                       AND committed_at_ms <= ?
@@ -168,6 +178,26 @@ class ConsolidationPipeline:
                     """,
                     (cutoff_ms, self.batch_limit),
                 ).fetchall()
+                # L3 retry backlog: statistics already counted, only the
+                # semantic pass is re-attempted for these rows.
+                retry_rows = []
+                remaining = self.batch_limit - len(fresh_rows)
+                if remaining > 0:
+                    retry_rows = db.execute(
+                        """
+                        SELECT id, rowid, committed_at_ms, bundle_id, pinyin,
+                               committed_text, consolidation_state
+                        FROM history_commits
+                        WHERE consolidation_state = 'statistics_done'
+                          AND id NOT IN (
+                              SELECT commit_id FROM consolidation_claims
+                          )
+                        ORDER BY rowid ASC
+                        LIMIT ?
+                        """,
+                        (remaining,),
+                    ).fetchall()
+                rows = [*fresh_rows, *retry_rows]
                 db.executemany(
                     """
                     INSERT OR REPLACE INTO consolidation_claims(
@@ -188,6 +218,7 @@ class ConsolidationPipeline:
                 bundle_id=row[3],
                 pinyin=row[4],
                 committed_text=row[5],
+                state=row[6],
             )
             for row in rows
         ]
@@ -361,6 +392,10 @@ class ConsolidationPipeline:
             try:
                 succeeded = bool(consolidator(list(batch)))
             except Exception as error:
+                # Clean failure: release claims immediately so the next
+                # round can retry instead of waiting out the lease. Rows
+                # stay 'statistics_done' and are re-fetched for L3 only.
+                self._release_claims(batch)
                 raise ConsolidationError(
                     "semantic consolidator failed; batch kept for retry"
                 ) from error
@@ -369,6 +404,22 @@ class ConsolidationPipeline:
         pruned = self._skip_or_prune(consolidator)
         return semantic_done, pruned
 
+    def _release_claims(self, batch: Sequence[RawCommit]) -> None:
+        ids = [commit.id for commit in batch]
+        if not ids:
+            return
+        with contextlib.closing(_connect(self.paths.history_db)) as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                db.executemany(
+                    "DELETE FROM consolidation_claims WHERE commit_id = ?",
+                    [(commit_id,) for commit_id in ids],
+                )
+                db.commit()
+            except BaseException:
+                db.rollback()
+                raise
+
     def _skip_or_prune(
         self, consolidator: SemanticConsolidator | None
     ) -> int:
@@ -376,15 +427,26 @@ class ConsolidationPipeline:
             db.execute("BEGIN IMMEDIATE")
             try:
                 if consolidator is None:
+                    # Explicit skip: no L3 will ever run for these rows, so
+                    # they move to the terminal 'skipped' state and become
+                    # prunable below the semantic watermark.
                     db.execute(
                         """
-                        UPDATE consolidation_state
-                        SET semantic_watermark = statistics_watermark,
-                            updated_at_ms = ?
-                        WHERE id = 1
-                        """,
-                        (int(time.time() * 1000),),
+                        UPDATE history_commits
+                        SET consolidation_state = 'skipped'
+                        WHERE consolidation_state = 'statistics_done'
+                        """
                     )
+                    db.execute(
+                        """
+                        DELETE FROM consolidation_claims
+                        WHERE commit_id IN (
+                            SELECT id FROM history_commits
+                            WHERE consolidation_state = 'skipped'
+                        )
+                        """
+                    )
+                    self._advance_watermark(db, "semantic_watermark")
                 pruned = self._prune(db)
                 db.commit()
             except BaseException:
@@ -403,6 +465,10 @@ class ConsolidationPipeline:
                     SET consolidation_state = 'consolidated'
                     WHERE id = ? AND consolidation_state = 'statistics_done'
                     """,
+                    [(commit_id,) for commit_id in ids],
+                )
+                db.executemany(
+                    "DELETE FROM consolidation_claims WHERE commit_id = ?",
                     [(commit_id,) for commit_id in ids],
                 )
                 self._advance_watermark(db, "semantic_watermark")
@@ -442,7 +508,9 @@ class ConsolidationPipeline:
                         (
                             SELECT IFNULL(MAX(rowid), 0)
                             FROM history_commits
-                            WHERE consolidation_state = 'consolidated'
+                            WHERE consolidation_state IN (
+                                'consolidated', 'skipped'
+                            )
                         )
                     ),
                     updated_at_ms = ?
@@ -463,7 +531,7 @@ class ConsolidationPipeline:
             DELETE FROM history_fts
             WHERE commit_id IN (
                 SELECT id FROM history_commits
-                WHERE consolidation_state != 'raw'
+                WHERE consolidation_state IN ('consolidated', 'skipped')
                   AND rowid <= ?
             )
             """,
@@ -472,7 +540,7 @@ class ConsolidationPipeline:
         cursor = db.execute(
             """
             DELETE FROM history_commits
-            WHERE consolidation_state != 'raw'
+            WHERE consolidation_state IN ('consolidated', 'skipped')
               AND rowid <= ?
             """,
             (watermark,),
@@ -526,6 +594,9 @@ class IdleConsolidationScheduler:
         min_round_interval: float = 21_600.0,
         poll_seconds: float = 30.0,
         semantic_consolidator: SemanticConsolidator | None = None,
+        semantic_consolidator_provider: (
+            Callable[[], SemanticConsolidator | None] | None
+        ) = None,
         clock: Callable[[], float] | None = None,
         sleeper: Callable[[float], None] | None = None,
     ) -> None:
@@ -536,6 +607,10 @@ class IdleConsolidationScheduler:
         self._min_round_interval = min_round_interval
         self._poll_seconds = poll_seconds
         self._semantic_consolidator = semantic_consolidator
+        # Evaluated at the start of every round (P2-1/P3-3): credentials
+        # and domain mappings change at runtime, so the consolidator must
+        # be re-resolved per round instead of once at process start.
+        self._semantic_consolidator_provider = semantic_consolidator_provider
         self._clock = clock or time.monotonic
         self._sleeper = sleeper or time.sleep
         self._last_activity = self._clock()
@@ -573,6 +648,12 @@ class IdleConsolidationScheduler:
             since_round >= self._min_round_interval
         )
 
+    def _current_consolidator(self) -> SemanticConsolidator | None:
+        provider = self._semantic_consolidator_provider
+        if provider is not None:
+            return provider()
+        return self._semantic_consolidator
+
     def run_round(
         self,
         *,
@@ -582,6 +663,8 @@ class IdleConsolidationScheduler:
         if not self._round_lock.acquire(blocking=False):
             return None
         try:
+            if semantic_consolidator is None:
+                semantic_consolidator = self._current_consolidator()
             report = self._pipeline.run_once(
                 semantic_consolidator=semantic_consolidator
             )

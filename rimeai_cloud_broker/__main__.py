@@ -14,13 +14,15 @@ from rimeai_daemon.consolidation import (
     IdleConsolidationScheduler,
 )
 
+from .cloud_model import CloudModelClient
 from .history_index import HistoryEmbeddingIndexer
+from .instance_lock import SingleInstanceLock
 from .profile import (
+    ChatTransport,
     CloudProfileSummarizer,
     ProfileStore,
     make_semantic_consolidator,
 )
-from .cloud_model import CloudModelClient
 from .server import CloudBrokerServer
 
 CREDENTIAL_KEY = "RIMEAI_CLOUD_API_KEY"
@@ -71,7 +73,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-consolidation",
         action="store_true",
-        help="disable the idle language-profile consolidation loop",
+        help=(
+            "skip the L3 cloud LLM profile pass on each idle "
+            "consolidation round (statistics and eviction still run)"
+        ),
     )
     return parser
 
@@ -111,34 +116,67 @@ def _usable_cloud_api_key() -> str:
         return _cloud_env_loader()
     except ValueError:
         logging.getLogger(__name__).exception(
-            "cloud credential file is malformed; consolidation starts "
-            "without the semantic pass"
+            "cloud credential file is malformed; the semantic pass is "
+            "skipped until the file parses"
         )
         return ""
 
 
 def _semantic_consolidator(
-    ranker: CloudModelClient,
+    transport: ChatTransport,
     *,
     enabled: bool,
     profile_directory: Path,
     phrasebook_db: Path,
 ):
     """Builds the L3 cloud-compression consolidator, or None when the
-    semantic pass must be skipped (disabled, no credential file, or an
-    unusable one) so eviction still proceeds."""
-    credential = Path.home() / ".config" / "rimeai" / "cloud.env"
-    has_credentials = credential.exists() and credential.stat().st_size > 0
-    if not (enabled and has_credentials):
+    semantic pass must be skipped this round (disabled, no credential
+    file, or an unusable one) so eviction still proceeds. Called once
+    per consolidation round via the provider below."""
+    if not enabled:
         return None
     if not _usable_cloud_api_key():
         return None
-    summarizer = CloudProfileSummarizer(ranker.post_json)
+    summarizer = CloudProfileSummarizer(transport)
     return make_semantic_consolidator(
         ProfileStore(profile_directory),
         summarizer,
+        # Fresh resolver per round: the per-bundle cache must not outlive
+        # the round, or settings-page domain edits never reach L3 (P2-1).
         domain_resolver=_phrasebook_domain_resolver(phrasebook_db),
     )
+
+
+def _semantic_consolidator_provider(
+    transport: ChatTransport,
+    *,
+    enabled: bool,
+    profile_directory: Path,
+    phrasebook_db: Path,
+):
+    """Per-round consolidator factory (P2-1/P3-3): credentials and
+    bundle→domain mappings are re-evaluated every round, so editing
+    cloud.env or the phrasebook mapping takes effect at the next idle
+    round instead of requiring a broker restart."""
+    last_state: dict[str, bool] = {"active": False}
+
+    def provide():
+        consolidator = _semantic_consolidator(
+            transport,
+            enabled=enabled,
+            profile_directory=profile_directory,
+            phrasebook_db=phrasebook_db,
+        )
+        active = consolidator is not None
+        if active != last_state["active"]:
+            last_state["active"] = active
+            logging.getLogger(__name__).info(
+                "semantic consolidation %s for the upcoming rounds",
+                "enabled" if active else "disabled",
+            )
+        return consolidator
+
+    return provide
 
 
 def _maybe_start_consolidation(
@@ -160,8 +198,8 @@ def _maybe_start_consolidation(
     )
     scheduler = IdleConsolidationScheduler(
         ConsolidationPipeline(paths),
-        semantic_consolidator=_semantic_consolidator(
-            ranker,
+        semantic_consolidator_provider=_semantic_consolidator_provider(
+            ranker.post_json,
             enabled=enabled,
             profile_directory=profile_directory,
             phrasebook_db=paths.phrasebook_db,
@@ -217,12 +255,25 @@ async def _run(
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    asyncio.run(
-        _run(
-            args.socket,
-            consolidation_enabled=not args.no_consolidation,
-        )
+    # P2-7：进程级单例——launchd 双起窗口内两个 broker 会并发跑固化轮，
+    # last-write-wins 损坏画像修订链。flock 随进程消亡自动释放。
+    instance_lock = SingleInstanceLock(
+        args.socket.parent, name="rimeai-cloud"
     )
+    if not instance_lock.acquire():
+        logging.getLogger(__name__).error(
+            "another rimeai cloud broker already holds the instance lock"
+        )
+        return 2
+    try:
+        asyncio.run(
+            _run(
+                args.socket,
+                consolidation_enabled=not args.no_consolidation,
+            )
+        )
+    finally:
+        instance_lock.release()
     return 0
 
 

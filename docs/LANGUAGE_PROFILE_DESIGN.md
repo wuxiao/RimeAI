@@ -72,6 +72,12 @@ entries(
 )
 ```
 
+- id 为 `SHA256(domain/text/pinyin)` 确定性内容寻址哈希：域改名会重算
+  id（与文本编辑冲突归并同口径），打开数据库时检测并修复历史漂移。
+- 域名校验三侧统一：`PhraseBookDomain.validate`（Swift）为唯一入口，
+  与 daemon `VALIDATE_DOMAIN`、broker `ProfileStore` 同规则（字母开头、
+  kebab-case、≤32 字符）。
+
 - 无条目数上限。设计口径为带时间衰减的频次淘汰；当前实现只做 count
   upsert，`protected=1` 与 `source='user'` 豁免字段已就位，自动衰减淘汰
   尚未实现（后续项）。
@@ -163,10 +169,19 @@ entries(
 - 继承：Secure Input 不写入、不固化；凭据不落历史/诊断；generation
   失效机制。
 - 新增：L3 云压缩会把滚动窗口外的批量原文发送至已配置网关；请求不带
-  凭据字段之外的数据。当前 broker 侧实际门控只有云凭据与
-  `--no-consolidation` 旗标；设计口径的设置页"云压缩"开关（默认开，
-  关闭后退化为纯本地统计固化 + 不更新画像）尚未接通 broker，待实现。
+  凭据字段之外的数据。设置页「语言画像」页的云压缩开关已接通 broker
+  （`CloudBrokerConsolidationPreference` 改写 LaunchAgent plist 增删
+  `--no-consolidation`，默认开，关闭后退化为纯本地统计固化 + 不更新
+  画像）；broker 侧该旗标只跳过 L3 云画像段，统计与 evict 仍运行，
+  凭据每轮重读（无需重启生效）。
 - 画像、短语库、L2 计数全部可一键导出 JSON 与永久清除（bump generation）。
+  导出为单一聚合文件（`format: rimeai-language-profile-export`，
+  version 2）：`phrasebook` 子节含 L1 条目与域映射，`user_lm` 内联
+  gzip 解码后的 L2 载荷（缺失为 `null`），`style_profiles` 按域键控；
+  修订史不随导出携带（回滚链留在本地）。Swift 侧 `GzipCodec` 与
+  Python `gzip` 字节级兼容。永久清除覆盖三层产物：L1 库、L2
+  `user-lm.json.gz`（含原子落盘 tmp 残留）与 L3 画像/修订史，
+  daemon 侧 L2 失活即时生效（mtime 探测到删除即清内存模型）。
 - 用户编辑与锁定优先于任何自动学习结果。
 
 ## 8. 评估方案

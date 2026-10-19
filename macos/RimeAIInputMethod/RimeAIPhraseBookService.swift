@@ -14,7 +14,8 @@ final class RimeAIPhraseBookService: @unchecked Sendable {
     /// 吸收其他进程（固化循环）写入的变化。
     private static let snapshotStalenessSeconds: TimeInterval = 30
     private static let snapshotEntryLimit = 100_000
-    private static let englishTokenLimit = 512
+    private static let snapshotLexiconEntryLimit = 100_000
+    static let englishTokenLimit = 512
 
     private let lock = NSLock()
     private let refreshQueue = DispatchQueue(
@@ -23,21 +24,36 @@ final class RimeAIPhraseBookService: @unchecked Sendable {
     )
     private let databaseURL: URL
     private var store: PhraseBookStore?
+    private var lexiconStore: DomainLexiconStore?
 
-    private struct ReadSnapshot: Sendable {
+    struct ReadSnapshot: Sendable {
         let domainMappings: [String: String]
         let entries: [PhraseBookEntry]
+        /// Enabled lexicon entries (unblocked, all mounted domains),
+        /// wrapped for fusion. Queried with the same domain rule as
+        /// learned entries: caller's domain or `global`.
+        let lexiconEntries: [PhraseBookEntry]
         let loadedAt: TimeInterval
 
         static let cold = ReadSnapshot(
             domainMappings: [:],
             entries: [],
+            lexiconEntries: [],
             loadedAt: -.infinity
         )
     }
 
     private var snapshot = ReadSnapshot.cold
     private var isRefreshing = false
+
+    /// Serial queue for whole-artifact operations (aggregate export vs
+    /// permanent clear). Both touch the same files across L1/L2/L3, and
+    /// both are user-triggered from the settings UI — running them on the
+    /// global concurrent queue would let a clear interleave with an
+    /// in-flight export and produce a half-cleared export file.
+    static let artifactOperationQueue = DispatchQueue(
+        label: "rimeai.phrasebook.artifact-operations"
+    )
 
     private init() {
         let layout = RimeAIProductDataLayout(
@@ -63,8 +79,9 @@ final class RimeAIPhraseBookService: @unchecked Sendable {
         }
         let domain = snap.domainMappings[bundleIdentifier]
             ?? PhraseBookDomain.global
-        // 与 PhraseBookStore.phrases 的 SQL 排序一致：精确命中 > 本域 >
-        // 使用次数 > 最近使用。
+        // 与设计文档 §4 的融合排序一致：精确命中 > 本域 > 学习短语
+        // （auto/user/llm）优先于词库短语 > 频次（学习 count vs 词库
+        // weight）> 最近使用。
         func precedes(_ lhs: PhraseBookEntry, _ rhs: PhraseBookEntry) -> Bool {
             let lhsExact = lhs.pinyinKeys == trimmed
             let rhsExact = rhs.pinyinKeys == trimmed
@@ -76,21 +93,31 @@ final class RimeAIPhraseBookService: @unchecked Sendable {
             if lhsDomain != rhsDomain {
                 return lhsDomain
             }
+            let lhsLearned = lhs.source != .lexicon
+            let rhsLearned = rhs.source != .lexicon
+            if lhsLearned != rhsLearned {
+                return lhsLearned
+            }
             if lhs.count != rhs.count {
                 return lhs.count > rhs.count
             }
             return lhs.lastUsedAt > rhs.lastUsedAt
         }
-        let matched = snap.entries.filter { entry in
-            // 镜像 SQL 的 `pinyin_keys = ? OR pinyin_keys LIKE ?%'：这里
-            // 的前缀匹配是大小写敏感的精确比较，而 SQL LIKE 对 ASCII 大
-            // 小写不敏感——存储侧 pinyin_keys 一律为小写（[a-z']）时两者
-            // 等价，仅手工导入的大写键才可能分叉。
+        func matches(_ entry: PhraseBookEntry) -> Bool {
             (entry.domain == domain || entry.domain == PhraseBookDomain.global)
                 && (entry.pinyinKeys == trimmed
                     || entry.pinyinKeys.hasPrefix(trimmed))
         }
+        let matched = snap.entries.filter(matches)
+            + snap.lexiconEntries.filter(matches)
         return Array(matched.sorted(by: precedes).prefix(5))
+    }
+
+    /// Current bundle→domain mapping from the in-memory snapshot
+    /// (typing-path safe, P2-4). nil = unmapped → daemon treats the
+    /// request as global, identical to the pre-domain protocol.
+    func domain(forBundleIdentifier bundleIdentifier: String) -> String? {
+        currentSnapshot().domainMappings[bundleIdentifier]
     }
 
     func entries(
@@ -199,6 +226,13 @@ final class RimeAIPhraseBookService: @unchecked Sendable {
             )
         }
         let moved = try store.renameDomain(from: source, to: target)
+        // P2-16：域改名必须联动 L2/L3 产物，否则旧域名下的 user-lm
+        // 计数与风格画像永远残留。
+        try LanguageProfileArtifacts.renameDomain(
+            from: source,
+            to: target,
+            in: languageProfileDirectory()
+        )
         refreshSnapshotAsync()
         return moved
     }
@@ -211,8 +245,18 @@ final class RimeAIPhraseBookService: @unchecked Sendable {
             )
         }
         let folded = try store.deleteDomain(source)
+        try LanguageProfileArtifacts.deleteDomain(
+            source,
+            in: languageProfileDirectory()
+        )
         refreshSnapshotAsync()
         return folded
+    }
+
+    private func languageProfileDirectory() -> URL {
+        RimeAIProductDataLayout(
+            homeDirectory: FileManager.default.homeDirectoryForCurrentUser
+        ).languageProfileDirectory
     }
 
     @discardableResult
@@ -239,76 +283,6 @@ final class RimeAIPhraseBookService: @unchecked Sendable {
         return generation
     }
 
-    func exportJSON(to destination: URL) throws {
-        guard let store = activeStore() else {
-            throw PhraseBookError.fileSystem(
-                "phrasebook store unavailable"
-            )
-        }
-        try store.exportJSON(to: destination)
-    }
-
-    /// One-shot adoption of the legacy personal English tokens.
-    @discardableResult
-    func adoptPersonalEnglishTokens(_ tokens: Set<String>) -> Int {
-        guard let store = activeStore() else {
-            return 0
-        }
-        return (try? store.adoptUserTokens(tokens)) ?? 0
-    }
-
-    /// Personalized ASCII tokens for the mixed-composition resolver
-    /// (LP-006), across all domains, most frequent first. Memory-only:
-    /// serves the process snapshot, ordered like the store's
-    /// `englishTokens(limit:)`.
-    func allEnglishTokens(
-        limit: Int = RimeAIPhraseBookService.englishTokenLimit
-    ) -> Set<String> {
-        guard limit > 0 else {
-            return []
-        }
-        var best: [String: (count: Int, lastUsedAt: Date)] = [:]
-        for entry in currentSnapshot().entries
-        where entry.text.isLowercaseASCIIToken {
-            if let existing = best[entry.text] {
-                if (entry.count, entry.lastUsedAt)
-                    > (existing.count, existing.lastUsedAt)
-                {
-                    best[entry.text] = (entry.count, entry.lastUsedAt)
-                }
-            } else {
-                best[entry.text] = (entry.count, entry.lastUsedAt)
-            }
-        }
-        return Set(
-            best
-                .sorted { $0.value.count > $1.value.count
-                    || $0.value.count == $1.value.count
-                        && $0.value.lastUsedAt > $1.value.lastUsedAt
-                }
-                .prefix(limit)
-                .map(\.key)
-        )
-    }
-
-    /// Records ASCII tokens accepted through mixed composition as auto
-    /// phrases so they are immediately available to the resolver.
-    func recordMixedEnglishTokens(_ tokens: Set<String>) {
-        guard let store = activeStore(), !tokens.isEmpty else {
-            return
-        }
-        DispatchQueue.global(qos: .utility).async {
-            for token in tokens.sorted() {
-                try? store.recordAutoPhrase(
-                    text: token,
-                    pinyinKeys: token,
-                    domain: PhraseBookDomain.global
-                )
-            }
-            self.refreshSnapshotAsync()
-        }
-    }
-
     /// Synchronously rebuilds the read snapshot on the caller's queue.
     /// Only background callers: the typing path uses `currentSnapshot()`.
     func refreshSnapshotNow() {
@@ -316,9 +290,15 @@ final class RimeAIPhraseBookService: @unchecked Sendable {
             return
         }
         let mappings = (try? store.domainMappings()) ?? []
-        let entries = (try? store.entries(
+        let entries = (try? store.snapshotEntries(
             limit: Self.snapshotEntryLimit
         )) ?? []
+        let lexiconEntries = activeLexiconStore()
+            .flatMap {
+                try? $0.snapshotEntries(
+                    limit: Self.snapshotLexiconEntryLimit
+                )
+            } ?? []
         lock.lock()
         snapshot = ReadSnapshot(
             domainMappings: Dictionary(
@@ -326,12 +306,13 @@ final class RimeAIPhraseBookService: @unchecked Sendable {
                 uniquingKeysWith: { first, _ in first }
             ),
             entries: entries,
+            lexiconEntries: lexiconEntries,
             loadedAt: ProcessInfo.processInfo.systemUptime
         )
         lock.unlock()
     }
 
-    private func refreshSnapshotAsync() {
+    func refreshSnapshotAsync() {
         lock.lock()
         let alreadyRefreshing = isRefreshing
         isRefreshing = true
@@ -350,7 +331,7 @@ final class RimeAIPhraseBookService: @unchecked Sendable {
         }
     }
 
-    private func currentSnapshot() -> ReadSnapshot {
+    func currentSnapshot() -> ReadSnapshot {
         lock.lock()
         let snap = snapshot
         let refreshing = isRefreshing
@@ -364,7 +345,7 @@ final class RimeAIPhraseBookService: @unchecked Sendable {
         return snap
     }
 
-    private func activeStore() -> PhraseBookStore? {
+    func activeStore() -> PhraseBookStore? {
         lock.lock()
         defer { lock.unlock() }
         if let store {
@@ -374,19 +355,17 @@ final class RimeAIPhraseBookService: @unchecked Sendable {
         store = opened
         return opened
     }
-}
 
-private extension String {
-    /// `englishTokens(limit:)` 的内存等价：首字符为小写字母、其余为
-    /// 小写字母或数字（SQL `GLOB '[a-z][a-z0-9]*'`）。
-    var isLowercaseASCIIToken: Bool {
-        guard let first = unicodeScalars.first,
-              ("a" ... "z").contains(first)
-        else {
-            return false
+    /// Same lazy-open pattern as `activeStore()`, for the asset-side
+    /// lexicon store sharing the same database file.
+    func activeLexiconStore() -> DomainLexiconStore? {
+        lock.lock()
+        defer { lock.unlock() }
+        if let lexiconStore {
+            return lexiconStore
         }
-        return unicodeScalars.dropFirst().allSatisfy {
-            ("a" ... "z").contains($0) || ("0" ... "9").contains($0)
-        }
+        let opened = try? DomainLexiconStore(databaseURL: databaseURL)
+        lexiconStore = opened
+        return opened
     }
 }

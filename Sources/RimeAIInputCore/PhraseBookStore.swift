@@ -5,6 +5,9 @@ public enum PhraseEntrySource: String, Codable, Sendable {
     case auto
     case user
     case llm
+    /// 查询侧包装：词库命中从不写入 `phrasebook_entries`，只在融合
+    /// 查询里以 `PhraseBookEntry` 形态返回给既有 pipeline。
+    case lexicon
 }
 
 /// One learned (or user-curated) phrase in the L1 phrasebook. `pinyinKeys`
@@ -71,6 +74,27 @@ public enum PhraseBookError: Error, Equatable, Sendable {
 public enum PhraseBookDomain {
     public static let global = "global"
     public static let maximumNameLength = 64
+
+    /// Single source of truth for domain-name rules, shared by the
+    /// phrasebook store, the lexicon store and the settings UI:
+    /// trimmed, lowercased, `[a-z0-9_-]`, at most 64 characters. Empty
+    /// input resolves to `global`; anything malformed throws
+    /// `PhraseBookError.invalidDomain`.
+    public static func normalize(
+        _ raw: String
+    ) throws -> String {
+        let domain = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard !domain.isEmpty else {
+            return PhraseBookDomain.global
+        }
+        guard domain.count <= PhraseBookDomain.maximumNameLength,
+              domain.allSatisfy(\.isLowercaseLetterOrDigitOrHyphen)
+        else {
+            throw PhraseBookError.invalidDomain
+        }
+        return domain
+    }
 }
 
 /// L1 phrasebook storage shared by the input method (candidate lookup and
@@ -78,7 +102,9 @@ public enum PhraseBookDomain {
 /// All Swift access is serialized through one queue; concurrent writers
 /// from the daemon are handled by SQLite's busy timeout.
 public final class PhraseBookStore: @unchecked Sendable {
-    public static let schemaVersion = 1
+    /// v2：新增领域词库表（`lexicons` / `lexicon_entries`，见
+    /// `LexiconSchema`）。学习表结构不变。
+    public static let schemaVersion = 2
 
     public let databaseURL: URL
 
@@ -211,15 +237,41 @@ public final class PhraseBookStore: @unchecked Sendable {
             if domain != nil {
                 sql += " WHERE domain = ?"
             }
+            // LIMIT is bound, never interpolated (P2-12); the dynamic
+            // fragment above is a fixed literal chosen by `domain != nil`.
             sql += """
                  ORDER BY count DESC, last_used_ms DESC
-                LIMIT \(max(0, limit))
+                LIMIT ?
                 """
             let statement = try prepare(sql)
             defer { sqlite3_finalize(statement) }
+            var index: Int32 = 1
             if let domain {
-                try bind(try normalizedDomain(domain), to: statement, index: 1)
+                try bind(try normalizedDomain(domain), to: statement, index: index)
+                index += 1
             }
+            sqlite3_bind_int64(statement, index, Int64(max(0, limit)))
+            return try readEntries(statement)
+        }
+    }
+
+    /// Typing-path snapshot (P2-13): protected and user-added entries are
+    /// pinned ahead of the frequency ordering so the snapshot cap can
+    /// never cut them, no matter how long the auto-learned tail grows.
+    public func snapshotEntries(limit: Int) throws -> [PhraseBookEntry] {
+        try queue.sync {
+            let statement = try prepare(
+                """
+                SELECT id, domain, text, pinyin_keys, count,
+                       first_seen_ms, last_used_ms, source, protected
+                FROM phrasebook_entries
+                ORDER BY (protected = 1 OR source = 'user') DESC,
+                         count DESC, last_used_ms DESC
+                LIMIT ?
+                """
+            )
+            defer { sqlite3_finalize(statement) }
+            sqlite3_bind_int64(statement, 1, Int64(max(0, limit)))
             return try readEntries(statement)
         }
     }
@@ -312,5 +364,52 @@ public final class PhraseBookStore: @unchecked Sendable {
             )
             """
         )
+        // Schema v2: domain-lexicon asset tables (shared DDL with
+        // `DomainLexiconStore`; every statement is idempotent).
+        for ddl in LexiconSchema.install() {
+            try execute(ddl)
+        }
+        try repairEntryIdentifiers()
+    }
+
+    /// Re-assigns content-addressed ids for rows whose id drifted from
+    /// sha256(domain \u{1F} text) — pre-fix domain renames moved rows
+    /// without recomputing ids, which later caused primary-key collisions
+    /// when a recreated domain relearned the same text. Idempotent.
+    private func repairEntryIdentifiers() throws {
+        let statement = try prepare(
+            "SELECT id, domain, text FROM phrasebook_entries"
+        )
+        var stale: [(oldId: String, domain: String, text: String)] = []
+        while true {
+            let status = sqlite3_step(statement)
+            if status == SQLITE_DONE { break }
+            guard status == SQLITE_ROW else {
+                sqlite3_finalize(statement)
+                throw currentSQLiteError(code: status)
+            }
+            let id = columnText(statement, index: 0)
+            let domain = columnText(statement, index: 1)
+            let text = columnText(statement, index: 2)
+            if id != Self.entryIdentifier(domain: domain, text: text) {
+                stale.append((id, domain, text))
+            }
+        }
+        sqlite3_finalize(statement)
+        guard !stale.isEmpty else { return }
+        try transaction {
+            for row in stale {
+                try run(
+                    "UPDATE phrasebook_entries SET id = ? WHERE id = ?",
+                    [
+                        Self.entryIdentifier(
+                            domain: row.domain,
+                            text: row.text
+                        ),
+                        row.oldId,
+                    ]
+                )
+            }
+        }
     }
 }

@@ -70,7 +70,8 @@ extension SemanticSuggestionPipeline {
                     pinyin: sentenceScopePinyin,
                     characterSet: dependencies.characterSet()
                 ),
-                segments: segments
+                segments: segments,
+                domain: dependencies.domainForBundle(bundleIdentifier)
             )
         } else {
             localRequest = nil
