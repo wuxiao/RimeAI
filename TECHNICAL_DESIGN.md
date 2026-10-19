@@ -151,8 +151,33 @@ Release builder 全流程已用 ONNX 路径重跑通过（preview-4-segment-focu
   thinking、无 chat template）。prompt 生成路线在 0.5B 冻结集上证伪
   （910/974 空建议，准确率等于词典兜底）；对照基线与错误归类冻结于
   [docs/baselines/constrained-qwen-v2.json](docs/baselines/constrained-qwen-v2.json)。
-  该路线当前为评测产物，尚未接入 daemon 产品链；部署化与 SFT 见
-  [TASKS.md](TASKS.md) 的 LM-001/LM-002。
+
+#### 4.3.1 双延迟档整句架构（LM-001 部署化，2026-10-19）
+
+零 prompt 约束解码已部署进产品链，与同步 n-gram beam 构成双延迟档：
+
+- **引擎**：Qwen2.5-0.5B base 的 MLX 8-bit 制品（隔离 venv
+  `.rimeai/mlx-venv`，mlx 0.32.4 / mlx-lm 0.32.2；lock 见
+  `models/qwen2.5-0.5b-mlx-8bit.lock.json`）。4-bit 被证据否决：种子边界
+  分布場塌（P(今天|。) 1.2e-3→3.4e-6），8-bit 与 fp16 逐样本一致率
+  99.8%、净准确率差 0；冻结基线 `docs/baselines/constrained-qwen-v3-mlx.json`（974 样本句准确率 0.921971，p50 115ms vs fp16 252ms）。
+- **KV 管理**：单一持久 prompt cache，beam 路径与跨请求共 prefix 均
+  回退到最长公共前缀只喂增量（constrained-v2 的 per-path 正确性保持，
+  cross-path 共享为已知优化）；确定性测试钉在 `tests/test_mlx_worker.py`。
+- **协议**：daemon hello 通告 `sentence-late` capability（仅当客户端
+  也通告时才发迟到帧，旧客户端永不会收到未知帧）；迟到帧
+  `sentence_late` 携带 composition_id/revision/app_session_id 绑定与
+  elapsed_ms。超时/失活/结构违规全部 fail-closed 静默弃权。
+- **仲裁规则（冻结）**：同步 n-gram 句建议先出（同步 infer 响应内）；
+  神经整句 100-300ms 后经迟到帧按 latest-request-wins 接管同一建议位
+  （击键/选词推进 revision 旧帧即 stale，云端已占槽则丢弃，Secure
+  Input fail-closed）；Tab 接受路径与同步句一致；展示门 min_confidence
+  =0.0（校准证据：置信度对精度区分度弱，见基线 confidence_gate 段）；
+  多段（跨标点）请求 v1 不走神经臂，仍由同步 beam 与 KBD-006/007 分段
+  机制服务。
+- **部署边界**：daemon 本机 LaunchAgent 路径（`--neural-sentence-config`，
+  安装脚本自动生成绝对路径配置）；Release builder/PyInstaller 打包
+  未包含 MLX 依赖，属后续任务。LM-002 SFT 未开始。
 
 ### 4.4 领域词库（schema v2）
 
