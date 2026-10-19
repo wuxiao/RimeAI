@@ -1,0 +1,123 @@
+{
+  "schema_version": 1,
+  "status": "frozen_test_baseline",
+  "recorded_at": "2026-10-19",
+  "task": "LM-001 Phase 2 deployment",
+  "dataset": {
+    "path": ".rimeai/datasets/p0-librime-1.17.0-luna-simp.jsonl",
+    "sha256": "f0d46219a334d9d408518e387899c57b4881da27e8388d721827ebc86087b35d",
+    "split": "test",
+    "samples": 974,
+    "candidate_limit": 10
+  },
+  "deployment": {
+    "engine": "mlx-8bit (mlx 0.32.4, mlx-lm 0.32.2, isolated venv .rimeai/mlx-venv)",
+    "worker": "script/constrained_mlx_service.sh -> rimeai_runtime.mlx_worker",
+    "model_artifact_id": "qwen2.5-0.5b@060db649:sha256-9bc6f756079b:mlx-8bit:constrained-v3-mlx",
+    "model_lock": "models/qwen2.5-0.5b-mlx-8bit.lock.json",
+    "model_dir": ".rimeai/models/qwen2.5-0.5b-mlx-8bit-v1 (525MB)",
+    "decoding": "identical semantics to constrained-v2: seed '。' + context, pinyin-constrained beam width 4 with fuzzy pairs, raw-softmax geometric-mean confidence, final fuzzy gate",
+    "kv_management": "one persistent prompt cache; every read rolls back to the longest common prefix and feeds only the delta (cross-path beam sharing AND cross-request base persistence)",
+    "eval_decoder_config": "examples/constrained_mlx_decoder.json"
+  },
+  "comparison": {
+    "constrained-v3-mlx": {
+      "sentence_accuracy": 0.921971,
+      "baseline_sentence_accuracy": 0.726899,
+      "domain_slices": {
+        "developer": 0.990783,
+        "general": 0.865854
+      },
+      "valid_suggestions": 955,
+      "empty_suggestions": 0,
+      "pinyin_rejections": 19,
+      "errors": 0,
+      "latency_ms": {
+        "p50": 115.329,
+        "p95": 232.872,
+        "note": "974 mixed-context requests through the persistent worker; each request's context differs from the previous one, which is the WORST case for the cross-request prefix cache (full context re-feed every request). Same-hardware torch rerun below; the frozen v2 doc recorded p50 280.5 / p95 568.8."
+      },
+      "cold_start_ms": 2499.7,
+      "peak_rss_bytes": 887001088
+    },
+    "constrained-v2-fp16-rerun-same-day": {
+      "model_artifact_id": "qwen2.5-0.5b@060db649:sha256-88c142557820:mps:fp16:constrained-v2",
+      "sentence_accuracy": 0.921971,
+      "valid_suggestions": 955,
+      "pinyin_rejections": 19,
+      "errors": 0,
+      "latency_ms": {
+        "p50": 252.013,
+        "p95": 477.502
+      }
+    }
+  },
+  "equivalence_vs_fp16": {
+    "suggestion_agreement": 0.997947,
+    "agreement_count": "972/974",
+    "both_correct": 897,
+    "mlx_only_wrong": 1,
+    "fp16_only_wrong": 1,
+    "flips": [
+      {
+        "id": "developer-018c642be235f104",
+        "fp16": "一致",
+        "mlx": "一直",
+        "fp16_correct": false,
+        "mlx_correct": true
+      },
+      {
+        "id": "general-01de2c7522580a30",
+        "fp16": "勢力",
+        "mlx": "失力",
+        "fp16_correct": true,
+        "mlx_correct": false
+      }
+    ],
+    "verdict": "net-zero accuracy delta (both engines 898/974); the 8-bit artifact reproduces the fp16 route within quantization noise."
+  },
+  "precision_decision_4bit": {
+    "finding": "4-bit affine quantization collapses the seed-boundary next-token distribution: after seed '。', P(今天) drops 1.2e-3 (fp16) -> 3.4e-6 (4-bit) while P(禁) rises 1.3e-4 -> 1.05e-3, flipping the reference decode from 今天天气很好 to 禁天天起很好. MLX fp16 (unquantized) and 8-bit both reproduce the torch distribution.",
+    "verdict": "8-bit is the deployment precision. 4-bit rejected on quality grounds despite its latency/size advantage."
+  },
+  "prefix_cache_evidence": {
+    "deterministic_unit_tests": "tests/test_mlx_worker.py: rollback-cache distributions are bit-identical to naive full-refeed across beam-shaped call patterns (including revisits and divergences); identical repeated requests feed zero new tokens; context extension feeds only the delta (recorded feed deltas, e.g. [13, 4] instead of the full sequence); a diverging beam path re-feeds only its new suffix ([1773,4,7] then [9]).",
+    "growing_context_probe": "12 sequential requests with growing/repeating contexts (typing-session shape): per-request feed delta 0-4 tokens versus naive seed+context re-prefill of 5-12+ tokens; wall time for the whole probe including cold start 3.0s.",
+    "steady_state_latency": "in product form consecutive revisions of one composition share the context exactly, so every request after the first pays only beam-step feeds (~9-12ms/token measured in docs/baselines/phase2-4bit-mlx-latency-spike.json; the 8-bit step cost is within the same order - the frozen-set p50 115ms already includes the worst-case full-context-refill path)."
+  },
+  "confidence_gate_calibration": {
+    "method": "precision vs shown-coverage on the frozen test set at absolute geometric-mean-confidence thresholds",
+    "data": {
+      "0.0": {
+        "shown": 974,
+        "precision": 0.922
+      },
+      "1e-05": {
+        "shown": 940,
+        "precision": 0.9245
+      },
+      "0.0001": {
+        "shown": 870,
+        "precision": 0.9322
+      },
+      "0.001": {
+        "shown": 727,
+        "precision": 0.9409
+      },
+      "0.01": {
+        "shown": 481,
+        "precision": 0.9543
+      }
+    },
+    "verdict": "confidence is weakly informative: raising the gate to 0.01 drops half the coverage for +3.2pp precision. Deployment min_confidence stays 0.0 (abstain only on empty/shape-invalid suggestions); revisit after LM-002 SFT sharpens the distribution."
+  },
+  "reproduce": {
+    "worker_smoke": "python3 - <<'PY' (see git history: /tmp/mlx_smoke.py pattern) or drive script/constrained_mlx_service.sh with schema_version-1 generate_sentence JSONL lines",
+    "frozen_eval": ".venv/bin/python -m rimeai_eval evaluate-sentence .rimeai/datasets/p0-librime-1.17.0-luna-simp.jsonl --decoder-config examples/constrained_mlx_decoder.json --rime-dictionary .rimeai/rime/shared/luna_pinyin.dict.yaml --split test --details-output <details.jsonl>",
+    "fp16_equivalence_rerun": "env PATH=\".venv/bin:$PATH\" .venv/bin/python -m rimeai_eval evaluate-sentence .rimeai/datasets/p0-librime-1.17.0-luna-simp.jsonl --decoder-config examples/constrained_qwen_decoder.json --rime-dictionary .rimeai/rime/shared/luna_pinyin.dict.yaml --split test --details-output <details.jsonl>",
+    "stored_details": [
+      ".rimeai/reports/constrained-mlx-v3-test-details.jsonl",
+      ".rimeai/reports/constrained-qwen-v2-test-details-rerun.jsonl"
+    ]
+  }
+}

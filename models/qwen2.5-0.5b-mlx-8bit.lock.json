@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "model": "Qwen/Qwen2.5-0.5B",
+  "revision": "060db6499f32faf8b98477b0a26969ef7d8b9987",
+  "license": "Apache-2.0",
+  "format": "mlx-8bit",
+  "source": {
+    "lock": "models/qwen2.5-0.5b.lock.json",
+    "weights_sha256": "88c142557820ccad55bb59756bfcfcf891de9cc6202816bd346445188a0ed342",
+    "local_dir": ".rimeai/models/qwen2.5-0.5b-base-060db64"
+  },
+  "conversion": {
+    "tool": "mlx_lm.convert",
+    "mlx_lm_version": "0.32.2",
+    "mlx_version": "0.32.4",
+    "quantize": true,
+    "quantization": {
+      "bits": 8,
+      "group_size": 64,
+      "mode": "affine",
+      "measured_bits_per_weight": 8.501
+    },
+    "dtype": "float16",
+    "command": "mlx_lm.convert --hf-path .rimeai/models/qwen2.5-0.5b-base-060db64 -q --q-bits 8 --dtype float16 --mlx-path .rimeai/models/qwen2.5-0.5b-mlx-8bit-v1",
+    "isolated_venv": ".rimeai/mlx-venv (torch/transformers of the repo stay untouched)"
+  },
+  "files": {
+    "model.safetensors": {
+      "bytes": 525045782,
+      "sha256": "9bc6f756079b502d08409edd09e24ad439429756e22fb6b9a15ae90f518e0d66"
+    },
+    "config.json": {
+      "quantization": {
+        "bits": 8,
+        "group_size": 64,
+        "mode": "affine"
+      }
+    },
+    "tokenizer.json": {
+      "source": "identical tokenizer files copied from the fp16 source model"
+    }
+  },
+  "precision_decision": {
+    "recorded_at": "2026-10-19",
+    "finding": "4-bit affine quantization collapses the seed-boundary next-token distribution that constrained decoding depends on: after the invariant seed '。', P(今天) drops 1.2e-3 -> 3.4e-6 while P(禁) rises 8x, flipping the r1 reference decode from 今天天气很好 (fp16) to 禁天天起很好. MLX fp16 (unquantized) and 8-bit both reproduce the torch fp16 distribution (今天 1.2e-3 / 1.3e-3). The MLX implementation itself is not at fault; 4-bit on this 0.5B is simply too lossy for the constrained route.",
+    "verdict": "Deploy the 8-bit artifact. Model size 276MB -> 525MB, still half of fp16 (988MB), load and step latency re-measured in docs/baselines/constrained-qwen-v3-mlx.json."
+  },
+  "prompt_version": "constrained-v3-mlx",
+  "recorded_at": "2026-10-19"
+}

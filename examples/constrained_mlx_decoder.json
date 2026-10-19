@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "name": "constrained-mlx-v3",
+  "command": ["./script/constrained_mlx_service.sh"],
+  "timeout_ms": 60000,
+  "budget_ms": 1200,
+  "min_confidence": 0.0,
+  "model_type": "qwen2.5-0.5b-mlx-8bit-constrained-v3"
+}
