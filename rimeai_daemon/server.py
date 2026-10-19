@@ -25,6 +25,7 @@ from rimeai_runtime.localipc import (
     prepare_unix_listener_socket,
 )
 
+from .neural_sentence import NeuralSentenceService
 from .segment_policy import validate_pinyin_segments
 
 # Shared domain charset contract with the broker profile store and the
@@ -155,6 +156,22 @@ def _validate_inference_request(message: Any) -> dict[str, Any]:
     return result
 
 
+BASE_CAPABILITIES = [
+    "rerank",
+    "sentence",
+    "cancel",
+    "deadline",
+    "latest-request-wins",
+    "offline-lock",
+    "decision-reasons",
+    "long-input-reasons",
+]
+NEURAL_LATE_CAPABILITY = "sentence-late"
+# Daemon shutdown is bounded: a wedged client handler (e.g. a peer that
+# vanishes mid-teardown) must never block close() forever.
+CLOSE_TEARDOWN_TIMEOUT_SECONDS = 5.0
+
+
 class RimeAIDaemonServer:
     def __init__(
         self,
@@ -162,14 +179,20 @@ class RimeAIDaemonServer:
         engine: InferenceEngine,
         *,
         activity_notifier: Callable[[], None] | None = None,
+        neural_sentence: NeuralSentenceService | None = None,
     ):
         self.socket_path = socket_path
         self.engine = engine
         self._activity_notifier = activity_notifier
+        self.neural_sentence = neural_sentence
         self._server: asyncio.AbstractServer | None = None
         self._inference_executor = ThreadPoolExecutor(
             max_workers=1,
             thread_name_prefix="rimeai-inference",
+        )
+        self._neural_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="rimeai-neural-sentence",
         )
         self._all_tasks: set[asyncio.Task[Any]] = set()
         self._consecutive_failures = 0
@@ -215,7 +238,15 @@ class RimeAIDaemonServer:
         for task in list(self._all_tasks):
             task.cancel()
         if self._all_tasks:
-            await asyncio.gather(*self._all_tasks, return_exceptions=True)
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(
+                    asyncio.gather(
+                        *self._all_tasks, return_exceptions=True
+                    ),
+                    timeout=CLOSE_TEARDOWN_TIMEOUT_SECONDS,
+                )
+        if self.neural_sentence is not None:
+            self.neural_sentence.close()
         if self.socket_path.exists():
             mode = self.socket_path.lstat().st_mode
             if stat.S_ISSOCK(mode):
@@ -224,6 +255,7 @@ class RimeAIDaemonServer:
         # here would block the event loop up to the request deadline. The
         # interpreter joins the worker at exit (bounded by that deadline).
         self._inference_executor.shutdown(wait=False, cancel_futures=True)
+        self._neural_executor.shutdown(wait=False, cancel_futures=True)
 
     async def serve_forever(self) -> None:
         if self._server is None:
@@ -272,8 +304,11 @@ class RimeAIDaemonServer:
 
         write_lock = asyncio.Lock()
         hello_complete = False
+        client_wants_late_sentences = False
         pending_by_key: dict[tuple[str, str], asyncio.Task[Any]] = {}
         pending_by_id: dict[str, asyncio.Task[Any]] = {}
+        neural_by_key: dict[tuple[str, str], asyncio.Task[Any]] = {}
+        neural_by_id: dict[str, asyncio.Task[Any]] = {}
         latest_revision: dict[tuple[str, str], int] = {}
         try:
             while not reader.at_eof():
@@ -317,6 +352,21 @@ class RimeAIDaemonServer:
                         )
                         break
                     hello_complete = True
+                    client_capabilities = message["capabilities"]
+                    client_wants_late_sentences = (
+                        self.neural_sentence is not None
+                        and isinstance(client_capabilities, list)
+                        and NEURAL_LATE_CAPABILITY in client_capabilities
+                    )
+                    capabilities = list(BASE_CAPABILITIES)
+                    model_artifacts = list(
+                        getattr(self.engine, "artifacts", [])
+                    )
+                    if self.neural_sentence is not None:
+                        capabilities.append(NEURAL_LATE_CAPABILITY)
+                        model_artifacts.extend(
+                            self.neural_sentence.artifacts()
+                        )
                     await self._write(
                         writer,
                         write_lock,
@@ -325,23 +375,10 @@ class RimeAIDaemonServer:
                             "type": "hello",
                             "status": "ok",
                             "protocol_version": 1,
-                            "capabilities": [
-                                "rerank",
-                                "sentence",
-                                "cancel",
-                                "deadline",
-                                "latest-request-wins",
-                                "offline-lock",
-                                "decision-reasons",
-                                "long-input-reasons",
-                            ],
+                            "capabilities": capabilities,
                             "offline_lock": True,
                             "model_artifact_id": self.engine.artifact_id,
-                            "model_artifacts": getattr(
-                                self.engine,
-                                "artifacts",
-                                [],
-                            ),
+                            "model_artifacts": model_artifacts,
                         },
                     )
                     continue
@@ -354,6 +391,13 @@ class RimeAIDaemonServer:
                     )
                     if task is not None:
                         task.cancel()
+                    neural_task = (
+                        neural_by_id.get(request_id)
+                        if isinstance(request_id, str)
+                        else None
+                    )
+                    if neural_task is not None:
+                        neural_task.cancel()
                     await self._write(
                         writer,
                         write_lock,
@@ -459,8 +503,43 @@ class RimeAIDaemonServer:
                         pending_by_id.pop(current_id, None)
 
                 task.add_done_callback(cleanup)
+                if (
+                    client_wants_late_sentences
+                    and request["allow_sentence"]
+                ):
+                    previous_neural = neural_by_key.get(key)
+                    if previous_neural is not None:
+                        previous_neural.cancel()
+                    neural_task = asyncio.create_task(
+                        self._run_neural_sentence(
+                            request,
+                            key,
+                            latest_revision,
+                            writer,
+                            write_lock,
+                        )
+                    )
+                    neural_by_key[key] = neural_task
+                    neural_by_id[request_id] = neural_task
+                    self._all_tasks.add(neural_task)
+
+                    def neural_cleanup(
+                        completed: asyncio.Task[Any],
+                        *,
+                        current_key: tuple[str, str] = key,
+                        current_id: str = request_id,
+                    ) -> None:
+                        self._all_tasks.discard(completed)
+                        if neural_by_key.get(current_key) is completed:
+                            neural_by_key.pop(current_key, None)
+                        if neural_by_id.get(current_id) is completed:
+                            neural_by_id.pop(current_id, None)
+
+                    neural_task.add_done_callback(neural_cleanup)
         finally:
             for task in list(pending_by_id.values()):
+                task.cancel()
+            for task in list(neural_by_id.values()):
                 task.cancel()
             writer.close()
             with contextlib.suppress(BrokenPipeError, ConnectionResetError):
@@ -610,5 +689,80 @@ class RimeAIDaemonServer:
                 "confidence": float(confidence),
                 "model_artifact_id": self.engine.artifact_id,
                 "elapsed_ms": round((monotonic() - started_at) * 1000, 3),
+            },
+        )
+
+    async def _run_neural_sentence(
+        self,
+        request: dict[str, Any],
+        key: tuple[str, str],
+        latest_revision: dict[tuple[str, str], int],
+        writer: asyncio.StreamWriter,
+        write_lock: asyncio.Lock,
+    ) -> None:
+        """Async neural sentence tier: decode off the sync executor and
+        deliver a `sentence_late` frame bound to the request, but only
+        while that revision is still the latest for the key and within
+        the configured budget. Failures never surface as errors — the
+        tier simply abstains."""
+        service = self.neural_sentence
+        if service is None:
+            return
+        loop = asyncio.get_running_loop()
+        started_at = monotonic()
+        try:
+            future = loop.run_in_executor(
+                self._neural_executor,
+                service.decode,
+                request,
+            )
+            payload = await asyncio.wait_for(
+                future,
+                timeout=service.budget_ms / 1000,
+            )
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            return
+        except Exception:
+            return
+        if payload is None:
+            return
+        if latest_revision.get(key) != request["revision"]:
+            return
+        suggestion = payload.get("suggestion")
+        confidence = payload.get("confidence")
+        artifact_id = payload.get("model_artifact_id")
+        if (
+            not isinstance(suggestion, str)
+            or not suggestion
+            or len(suggestion) > 30
+            or "\n" in suggestion
+            or "\r" in suggestion
+            or not isinstance(confidence, (int, float))
+            or isinstance(confidence, bool)
+            or not math.isfinite(confidence)
+            or not 0 <= confidence <= 1
+        ):
+            return
+        await self._write(
+            writer,
+            write_lock,
+            {
+                "schema_version": 1,
+                "type": "sentence_late",
+                "status": "ok",
+                "request_id": request["request_id"],
+                "composition_id": request["composition_id"],
+                "revision": request["revision"],
+                "app_session_id": request["app_session_id"],
+                "sentence_suggestion": suggestion,
+                "confidence": float(confidence),
+                "model_artifact_id": (
+                    artifact_id
+                    if isinstance(artifact_id, str) and artifact_id
+                    else self.engine.artifact_id
+                ),
+                "elapsed_ms": round(
+                    (monotonic() - started_at) * 1000, 3
+                ),
             },
         )

@@ -1,4 +1,5 @@
 #!/bin/zsh
+# shellcheck disable=SC1071
 
 set -euo pipefail
 
@@ -129,6 +130,37 @@ rsync -a --delete --exclude='._*' \
   "${source_neural_model}/" "${neural_model}/"
 install -m 600 "${source_fusion_config}" "${fusion_config}"
 
+# Neural sentence arm: stage the decoder config with an absolute worker
+# command (the bundled daemon cannot resolve repo-relative paths).
+neural_sentence_config="${daemon_bundle_dir}/neural_sentence.json"
+if ! /usr/bin/python3 - "${project_root}" "${neural_sentence_config}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+project_root = Path(sys.argv[1]).resolve()
+config = json.loads(
+    (project_root / "examples/constrained_mlx_decoder.json").read_text(
+        encoding="utf-8"
+    )
+)
+service = project_root / "script/constrained_mlx_service.sh"
+if not service.is_file():
+    raise SystemExit(
+        f"missing neural sentence worker: {service}"
+    )
+config["command"] = [str(service)]
+Path(sys.argv[2]).write_text(
+    json.dumps(config, ensure_ascii=False, indent=2) + "\n",
+    encoding="utf-8",
+)
+PY
+then
+  print -u2 "error: cannot stage the neural sentence config"
+  exit 2
+fi
+chmod 600 "${neural_sentence_config}"
+
 cp "${template}" "${staged_plist}"
 /usr/libexec/PlistBuddy -c \
   "Set :ProgramArguments:0 ${python_path}" "${staged_plist}"
@@ -144,6 +176,8 @@ cp "${template}" "${staged_plist}"
   "Set :ProgramArguments:12 ${neural_model}" "${staged_plist}"
 /usr/libexec/PlistBuddy -c \
   "Set :ProgramArguments:14 ${fusion_config}" "${staged_plist}"
+/usr/libexec/PlistBuddy -c \
+  "Set :ProgramArguments:18 ${neural_sentence_config}" "${staged_plist}"
 /usr/libexec/PlistBuddy -c \
   "Set :WorkingDirectory ${daemon_bundle_dir}" "${staged_plist}"
 /usr/libexec/PlistBuddy -c \

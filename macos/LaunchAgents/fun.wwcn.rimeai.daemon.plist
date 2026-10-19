@@ -24,6 +24,8 @@
 		<string>__FUSION_CONFIG__</string>
 		<string>--neural-device</string>
 		<string>cpu</string>
+		<string>--neural-sentence-config</string>
+		<string>__NEURAL_SENTENCE_CONFIG__</string>
 	</array>
   <key>WorkingDirectory</key>
   <string>__PROJECT_ROOT__</string>
