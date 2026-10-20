@@ -199,3 +199,29 @@ def test_mean_log_prob_public_scorer_prefers_domain_then_global():
     # trained one answers with its own (smoothed) evidence.
     fallback = model.mean_log_prob("接口", "接口设计", domain="chat")
     assert fallback == pytest.approx(global_score, rel=1e-12)
+
+
+def test_swift_encoded_user_lm_is_readable_by_python_gzip():
+    """Swift 写入的 L2 产物必须能被 daemon（Python gzip）读回。
+
+    固件（Sources/RimeAIInputCore/GzipCodec.swift）用 zlib 的
+    deflate+gzip 包装写产物，daemon 用 Python 的 gzip 读。两侧
+    共享同一份字节固件：Swift 侧 GzipCodecTests 解同一份字节，
+    这里用 Python gzip 解同一份字节——「字节级兼容」因此是被测
+    的事实，而不是一句声明。
+    """
+    import base64
+    import gzip
+
+    swift_encoded = base64.b64decode(
+        "H4sIAAAAAAAAExXMSwqAIBRG4b38Yx0UjdyM3PSigo9QC0Lcezk7g48z0Izn"
+        "RPrh2kLJUJtAKpaj7u/FULgbV2k8VZldpQQBWxKF3KAGXCwnxVVLkOn/BerY5"
+        "5wfDRBsRloAAAA="
+    )
+    decoded = gzip.decompress(swift_encoded)
+    assert decoded.decode("utf-8") == (
+        '{"schema_version":1,"model_type":"user-char-ngram",'
+        '"domains":{"global":{"characters":42}}}'
+    )
+    # 同一份字节也必须能被 Swift 侧读回（见 GzipCodecTests）。
+    assert decoded.startswith(b"{")

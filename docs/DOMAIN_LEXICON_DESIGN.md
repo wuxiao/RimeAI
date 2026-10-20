@@ -28,7 +28,7 @@ L1 短语库（LP-002）只覆盖**自动学习**（auto）、**用户手工单�
 ```sql
 -- 词库清单：一个词库挂一个域，整体安装/替换/启停/卸载
 CREATE TABLE lexicons (
-    id             TEXT PRIMARY KEY NOT NULL,   -- dict.yaml name 字段规范化（[a-z0-9_-]）
+    id             TEXT PRIMARY KEY NOT NULL,   -- dict.yaml name 字段规范化（[a-z0-9-]）
     name           TEXT NOT NULL,               -- 显示名
     domain         TEXT NOT NULL,               -- 挂载域，默认 global
     version        TEXT NOT NULL,
@@ -41,7 +41,7 @@ CREATE TABLE lexicons (
 
 -- 词库词条：主键含注音，一词多行 = 多音字（如「重载」chongzhai/zhongzai）
 CREATE TABLE lexicon_entries (
-    lexicon_id  TEXT NOT NULL REFERENCES lexicons(id) ON DELETE CASCADE,
+    lexicon_id  TEXT NOT NULL,                    -- 无外键约束
     text        TEXT NOT NULL,
     pinyin_keys TEXT NOT NULL,                  -- 规范化：小写、去空格、ü→v
     weight      INTEGER NOT NULL DEFAULT 50,    -- 1–99，词频级
@@ -52,6 +52,12 @@ CREATE TABLE lexicon_entries (
 
 要点：
 
+- **无外键、无 CASCADE**：实现不建 `REFERENCES … ON DELETE CASCADE`，也
+  不开 `PRAGMA foreign_keys`；词条随词库删除由 `DomainLexiconStore`
+  显式完成（`uninstall` 先删 entries 再删 lexicon 行）。依赖外键级联会
+  在未开 `foreign_keys` 时静默失效，文档必须写明真实机制。
+- 挂载域的字符集与 L1 学习表一致：`[a-z0-9-]`、≤64 字符
+  （`PhraseBookDomain.validate` 为唯一入口）。
 - `phrasebook_entries.source` 枚举新增 `lexicon`，仅用于**查询侧**把词库命中
   包装成 `PhraseBookEntry` 返回给既有 pipeline；词库词条永不写入学习表，
   不参与 consolidation prune / 统计 / 导出。
@@ -85,6 +91,8 @@ version: "1"
   invalid（整行拒绝），解析报告返回 accepted / rejected 明细。
 - 同词库重复 (text, pinyin) 行合并取最大权重。
 - 单词库词条上限 200,000（防御性，雾凇全量 cn_dicts 也在限内）。
+  超限抛 `DomainLexiconError.tooManyEntries(count:)`（**不是**
+  `emptyDictionary`——设置页会把「词库太大」显示成「词库为空」）。
 
 无注音词条不在导入端注音：注音在**构建期**完成（见 §6 工具链），导入端
 要求词条自带拼音键，保持 Swift 侧零词典依赖。
@@ -122,9 +130,13 @@ PrivacyCenter「语言画像」页新增「领域词库」节（NSStackView 程�
 
 `tools/build_domain_lexicon.py`：`source.tsv`（词 [\t权重]，人工只写词）
 → 用 `luna_pinyin.dict.yaml` 自动注音（词级优先，逐字回退取首音，未覆盖
-词条输出报告人工补）→ `dist/entries.jsonl` + `manifest.json`（name、
-version、license、attribution）。示例词库 `lexicons/it-programming/`
+词条输出报告人工补）→ `dist/<name>.dict.yaml` + `dist/manifest.json`
+（name、version、license、attribution）。示例词库 `lexicons/it-programming/`
 （自建，CC0-1.0），后续领域按同一管线扩展。
+
+注意：`lexicons/it-programming/dist/` 里的产物**已预构建并入库**；重跑构建
+需要本地准备 `luna_pinyin.dict.yaml`（仓库内没有，需从 luna_pinyin 上游取），
+没有它时 `--annotate` 无法完成。
 
 ## 7. 许可证边界
 

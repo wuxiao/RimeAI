@@ -5,13 +5,16 @@ import asyncio
 import logging
 import signal
 import sqlite3
+import stat
 from collections.abc import Callable, Sequence
+from enum import Enum
 from pathlib import Path
 
 from rimeai_daemon.consolidation import (
     ConsolidationPaths,
     ConsolidationPipeline,
     IdleConsolidationScheduler,
+    SemanticPass,
 )
 
 from .cloud_model import CloudModelClient
@@ -27,6 +30,21 @@ from .server import CloudBrokerServer
 
 CREDENTIAL_KEY = "RIMEAI_CLOUD_API_KEY"
 
+# One-shot warning for a group/world-readable credential file.
+_CREDENTIAL_PERMISSION_WARNING_EMITTED = False
+
+
+class CredentialPermissionError(ValueError):
+    """The credential file is readable by other local accounts."""
+
+
+class CloudCredentialState(Enum):
+    """Why the L3 semantic pass can or cannot run this round."""
+
+    OK = "ok"
+    ABSENT = "absent"
+    BROKEN = "broken"
+
 
 def _cloud_env_loader() -> str:
     """Reads the API key from ~/.config/rimeai/cloud.env with the same
@@ -35,6 +53,27 @@ def _cloud_env_loader() -> str:
     whitespace and one pair of quotes stripped, and a non-comment line
     without `=` raises — a typo must not silently disable the cloud."""
     path = Path.home() / ".config" / "rimeai" / "cloud.env"
+    try:
+        mode = path.stat().st_mode
+    except FileNotFoundError:
+        return ""
+    if mode & (stat.S_IRWXG | stat.S_IRWXO):
+        # The Swift credential store forces 0o600 on this file; a
+        # group/world-readable copy means the key is exposed to every
+        # local account. Refuse to use it rather than uploading with an
+        # exposed credential — the L3 pass retries until the user
+        # tightens the permissions (statistics and eviction keep running).
+        global _CREDENTIAL_PERMISSION_WARNING_EMITTED
+        if not _CREDENTIAL_PERMISSION_WARNING_EMITTED:
+            _CREDENTIAL_PERMISSION_WARNING_EMITTED = True
+            logging.getLogger(__name__).warning(
+                "cloud credential file is group/world accessible; "
+                "refusing to use it until its permissions are 0600 "
+                "(expected at ~/.config/rimeai/cloud.env)"
+            )
+        raise CredentialPermissionError(
+            "cloud credential file is group/world accessible"
+        )
     try:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -54,6 +93,13 @@ def _cloud_env_loader() -> str:
         }:
             value = value[1:-1]
         if key == CREDENTIAL_KEY:
+            if not value:
+                # The key line exists but carries no value: the user
+                # meant to configure the cloud but the file is
+                # incomplete. That is a transient fault (the backlog
+                # is kept and retried), not "cloud compression was
+                # never enabled" (which would discard the backlog).
+                raise ValueError("cloud credential file is malformed")
             return value
     return ""
 
@@ -108,18 +154,34 @@ def _phrasebook_domain_resolver(
 
 
 def _usable_cloud_api_key() -> str:
-    """Scheduler-side credential decision: a malformed file or a missing
-    key means "no usable credentials" for the L3 pass (logged once at
-    startup), not a broken scheduler — the statistics phase and raw-text
-    eviction keep running with the semantic pass explicitly skipped."""
+    """Scheduler-side credential decision.
+
+    Returns the key when it is usable, and "" when no credential is
+    configured at all — the user never opted into cloud compression, so
+    the L3 pass is off for good and the raw-text eviction keeps running
+    with the semantic pass explicitly skipped.
+
+    Raises when a credential file exists but cannot be used (malformed,
+    or readable by other local accounts): those faults are transient,
+    so the caller keeps the L3 backlog and retries instead of dropping
+    it.
+    """
+    return _cloud_env_loader()
+
+
+def _cloud_credential_state() -> CloudCredentialState:
+    """Classifies the cloud credential for this round.
+
+    - OK: a usable key is configured.
+    - ABSENT: no credential is configured at all — the user opted out.
+    - BROKEN: a credential file exists but cannot be parsed, or it is
+      exposed to other local accounts (transient: the pass retries).
+    """
     try:
-        return _cloud_env_loader()
+        key = _usable_cloud_api_key()
     except ValueError:
-        logging.getLogger(__name__).exception(
-            "cloud credential file is malformed; the semantic pass is "
-            "skipped until the file parses"
-        )
-        return ""
+        return CloudCredentialState.BROKEN
+    return CloudCredentialState.OK if key else CloudCredentialState.ABSENT
 
 
 def _semantic_consolidator(
@@ -128,23 +190,37 @@ def _semantic_consolidator(
     enabled: bool,
     profile_directory: Path,
     phrasebook_db: Path,
-):
-    """Builds the L3 cloud-compression consolidator, or None when the
-    semantic pass must be skipped this round (disabled, no credential
-    file, or an unusable one) so eviction still proceeds. Called once
-    per consolidation round via the provider below."""
+) -> SemanticPass:
+    """Builds the L3 cloud-compression consolidator for this round, or a
+    `SemanticPass` that says why it cannot run.
+
+    Called once per consolidation round via the provider below."""
     if not enabled:
-        return None
-    if not _usable_cloud_api_key():
-        return None
+        # The user turned the semantic pass off explicitly.
+        return SemanticPass(None, permanently_unavailable=True)
+    state = _cloud_credential_state()
+    if state is CloudCredentialState.ABSENT:
+        # No credential configured: the user never opted into cloud
+        # compression, so the L3 backlog is closed for good and the raw
+        # text is evicted (statistics keep running).
+        return SemanticPass(None, permanently_unavailable=True)
+    if state is CloudCredentialState.BROKEN:
+        # A credential file exists but cannot be used right now. Keep
+        # the backlog so the pending summaries are still produced once
+        # the file parses or its permissions are tightened.
+        logging.getLogger(__name__).warning(
+            "cloud credential is unusable; the semantic pass retries"
+        )
+        return SemanticPass(None, permanently_unavailable=False)
     summarizer = CloudProfileSummarizer(transport)
-    return make_semantic_consolidator(
+    consolidator = make_semantic_consolidator(
         ProfileStore(profile_directory),
         summarizer,
         # Fresh resolver per round: the per-bundle cache must not outlive
         # the round, or settings-page domain edits never reach L3 (P2-1).
         domain_resolver=_phrasebook_domain_resolver(phrasebook_db),
     )
+    return SemanticPass(consolidator, permanently_unavailable=False)
 
 
 def _semantic_consolidator_provider(
@@ -160,21 +236,21 @@ def _semantic_consolidator_provider(
     round instead of requiring a broker restart."""
     last_state: dict[str, bool] = {"active": False}
 
-    def provide():
-        consolidator = _semantic_consolidator(
+    def provide() -> SemanticPass:
+        state = _semantic_consolidator(
             transport,
             enabled=enabled,
             profile_directory=profile_directory,
             phrasebook_db=phrasebook_db,
         )
-        active = consolidator is not None
+        active = state.consolidator is not None
         if active != last_state["active"]:
             last_state["active"] = active
             logging.getLogger(__name__).info(
                 "semantic consolidation %s for the upcoming rounds",
                 "enabled" if active else "disabled",
             )
-        return consolidator
+        return state
 
     return provide
 

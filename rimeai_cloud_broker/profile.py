@@ -25,6 +25,11 @@ MAX_REVISIONS_KEPT = 10
 MAX_SIGNATURE_PHRASES = 32
 MAX_PHRASE_LENGTH = 64
 MAX_TRAIT_ITEMS = 64
+# Cloud upload budget for the L3 semantic pass: 24 KB per domain per
+# round, measured in UTF-8 bytes — the unit the settings page discloses
+# ("每域每轮最多约 24KB"). The character cap stays as a secondary guard
+# for pathological inputs, but bytes are what the budget promises.
+MAX_BATCH_BYTES = 24 * 1024
 MAX_BATCH_CHARACTERS = 24_000
 # Shared domain charset contract: [a-z0-9-]{1,64}; enforced identically by
 # the daemon request validator (rimeai_daemon.server.is_valid_domain) and
@@ -472,6 +477,48 @@ class ProfileStore:
 _JSON_OBJECT_PATTERN = re.compile(r"\{.*\}", re.DOTALL)
 
 
+def _tail_slice(text: str) -> str:
+    """Tail of `text` that fits both budgets without splitting a
+    multi-byte character."""
+    raw = text.encode("utf-8")
+    if len(raw) > MAX_BATCH_BYTES:
+        raw = raw[-MAX_BATCH_BYTES:]
+    tail = raw.decode("utf-8", errors="ignore")
+    if len(tail) > MAX_BATCH_CHARACTERS:
+        tail = tail[-MAX_BATCH_CHARACTERS:]
+    return tail
+
+
+def _truncate_to_budget(texts: Sequence[str]) -> str:
+    """Keeps the newest entries, line-aligned, inside the cloud budget.
+
+    The budget is the disclosed per-domain, per-round upload size
+    (24 KB of UTF-8 bytes); the character cap is a secondary guard.
+    Whole committed texts are dropped from the oldest end — a committed
+    text is never split mid-line into garbage fragments — and a single
+    oversized entry keeps its tail slice instead of sending an empty
+    corpus to the cloud. Recency wins because `previous_traits` already
+    carries the style of earlier batches forward.
+    """
+    kept: list[str] = []
+    total_bytes = 0
+    total_characters = 0
+    for line in reversed(texts):
+        added_bytes = len(line.encode("utf-8")) + (1 if kept else 0)
+        added_characters = len(line) + (1 if kept else 0)
+        if (
+            total_bytes + added_bytes > MAX_BATCH_BYTES
+            or total_characters + added_characters > MAX_BATCH_CHARACTERS
+        ):
+            if not kept:
+                kept.append(_tail_slice(line))
+            break
+        kept.append(line)
+        total_bytes += added_bytes
+        total_characters += added_characters
+    return "\n".join(reversed(kept))
+
+
 class CloudProfileSummarizer:
     """Compresses a consolidation batch into trait summaries via the
     fixed cloud gateway. The transport is injected so tests never touch
@@ -497,26 +544,7 @@ class CloudProfileSummarizer:
         texts: Sequence[str],
         previous: StyleProfile | None,
     ) -> dict[str, list[str]]:
-        corpus = "\n".join(texts)
-        if len(corpus) > MAX_BATCH_CHARACTERS:
-            # Line-aligned tail-keep truncation: drop whole oldest entries
-            # (never split a committed text mid-line into garbage
-            # fragments). Recency wins because previous_traits already
-            # carries the style of earlier batches forward.
-            kept: list[str] = []
-            total = 0
-            for line in reversed(texts):
-                added = len(line) + (1 if kept else 0)
-                if total + added > MAX_BATCH_CHARACTERS:
-                    if not kept and len(line) > MAX_BATCH_CHARACTERS:
-                        # A single entry larger than the whole budget:
-                        # keep its tail slice rather than sending an
-                        # empty corpus to the cloud.
-                        kept.append(line[-MAX_BATCH_CHARACTERS:])
-                    break
-                kept.append(line)
-                total += added
-            corpus = "\n".join(reversed(kept))
+        corpus = _truncate_to_budget(texts)
         messages = [
             {
                 "role": "system",

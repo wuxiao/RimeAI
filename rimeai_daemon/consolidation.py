@@ -84,6 +84,30 @@ class ConsolidationReport:
         }
 
 
+@dataclass(frozen=True)
+class SemanticPass:
+    """State of the L3 semantic pass for one consolidation round.
+
+    `permanently_unavailable` separates the two reasons a round can run
+    without a consolidator:
+
+    - True: the semantic pass will never run here — the user opted out
+      of cloud compression (no credential configured, or the pass is
+      switched off), or this process does not run L3 at all. The L3
+      backlog can be closed for good: its rows become terminal
+      ('skipped') and the raw text is evicted, so the history database
+      stays bounded.
+    - False: the cloud is only temporarily unusable (a credential file
+      that cannot be parsed, or one that is exposed to other local
+      accounts). The backlog must survive so pending summaries are still
+      produced once the cloud works again — a transient fault must not
+      silently drop the user's L3 backlog.
+    """
+
+    consolidator: SemanticConsolidator | None = None
+    permanently_unavailable: bool = True
+
+
 def phrase_entry_id(domain: str, text: str) -> str:
     """Must match PhraseBookStore.entryIdentifier in Swift."""
     payload = f"{domain}{DOMAIN_SEPARATOR}{text}".encode()
@@ -114,11 +138,23 @@ class ConsolidationPipeline:
         self,
         *,
         semantic_consolidator: SemanticConsolidator | None = None,
+        semantic_permanently_unavailable: bool = True,
     ) -> ConsolidationReport:
+        """Runs one consolidation round.
+
+        `semantic_permanently_unavailable` says whether the missing
+        semantic pass is final (the user opted out — the backlog is
+        closed and the raw text evicted) or transient (a broken cloud
+        credential — the backlog is kept for a later retry).
+        """
         batch = self._fetch_batch()
         if not batch:
             # Still honor explicit skip + prune for earlier batches.
-            _, pruned = self._semantic_phase([], semantic_consolidator)
+            _, pruned = self._semantic_phase(
+                [],
+                semantic_consolidator,
+                semantic_permanently_unavailable,
+            )
             return ConsolidationReport(pruned=pruned)
         # Statistics run only for fresh 'raw' rows; 'statistics_done' rows
         # are a semantic-retry backlog whose L1/L2 counts already happened.
@@ -130,7 +166,9 @@ class ConsolidationPipeline:
             self._update_user_lm(fresh, effective)
             self._mark_statistics(fresh)
         semantic_done, pruned = self._semantic_phase(
-            batch, semantic_consolidator
+            batch,
+            semantic_consolidator,
+            semantic_permanently_unavailable,
         )
         return ConsolidationReport(
             considered=len(batch),
@@ -382,6 +420,7 @@ class ConsolidationPipeline:
         self,
         batch: Sequence[RawCommit],
         consolidator: SemanticConsolidator | None,
+        permanently_unavailable: bool = True,
     ) -> tuple[int, int]:
         """Runs (or skips) the L3 pass, then prunes prunable rows.
 
@@ -401,7 +440,12 @@ class ConsolidationPipeline:
                 ) from error
             if succeeded:
                 semantic_done = self._mark_semantic(batch)
-        pruned = self._skip_or_prune(consolidator)
+        elif batch:
+            # No consolidator this round: release the claims so the same
+            # rows are picked up again by the next round instead of
+            # waiting out the claim lease.
+            self._release_claims(batch)
+        pruned = self._skip_or_prune(consolidator, permanently_unavailable)
         return semantic_done, pruned
 
     def _release_claims(self, batch: Sequence[RawCommit]) -> None:
@@ -421,13 +465,15 @@ class ConsolidationPipeline:
                 raise
 
     def _skip_or_prune(
-        self, consolidator: SemanticConsolidator | None
+        self,
+        consolidator: SemanticConsolidator | None,
+        permanently_unavailable: bool = True,
     ) -> int:
         with contextlib.closing(_connect(self.paths.history_db)) as db:
             db.execute("BEGIN IMMEDIATE")
             try:
-                if consolidator is None:
-                    # Explicit skip: no L3 will ever run for these rows, so
+                if consolidator is None and permanently_unavailable:
+                    # The semantic pass will never run for these rows, so
                     # they move to the terminal 'skipped' state and become
                     # prunable below the semantic watermark.
                     db.execute(
@@ -447,6 +493,15 @@ class ConsolidationPipeline:
                         """
                     )
                     self._advance_watermark(db, "semantic_watermark")
+                elif consolidator is None:
+                    # The cloud is only temporarily unusable (a broken or
+                    # world-readable credential file). The L3 backlog
+                    # stays 'statistics_done' and the semantic watermark
+                    # does not advance, so nothing is pruned and the rows
+                    # are retried once the cloud works again — a transient
+                    # credential fault must not silently drop the user's
+                    # pending summaries.
+                    pass
                 pruned = self._prune(db)
                 db.commit()
             except BaseException:
@@ -595,7 +650,7 @@ class IdleConsolidationScheduler:
         poll_seconds: float = 30.0,
         semantic_consolidator: SemanticConsolidator | None = None,
         semantic_consolidator_provider: (
-            Callable[[], SemanticConsolidator | None] | None
+            Callable[[], SemanticConsolidator | SemanticPass | None] | None
         ) = None,
         clock: Callable[[], float] | None = None,
         sleeper: Callable[[float], None] | None = None,
@@ -648,11 +703,20 @@ class IdleConsolidationScheduler:
             since_round >= self._min_round_interval
         )
 
-    def _current_consolidator(self) -> SemanticConsolidator | None:
+    def _current_semantic(self) -> tuple[SemanticConsolidator | None, bool]:
+        """Resolves this round's consolidator and whether its absence is
+        permanent (the pass will never run here) or transient (the cloud
+        is temporarily unusable)."""
         provider = self._semantic_consolidator_provider
         if provider is not None:
-            return provider()
-        return self._semantic_consolidator
+            result = provider()
+        else:
+            result = self._semantic_consolidator
+        if isinstance(result, SemanticPass):
+            return result.consolidator, result.permanently_unavailable
+        # A bare provider result keeps the historic contract: no
+        # consolidator means the semantic pass will not run here.
+        return result, True
 
     def run_round(
         self,
@@ -663,10 +727,15 @@ class IdleConsolidationScheduler:
         if not self._round_lock.acquire(blocking=False):
             return None
         try:
+            permanently_unavailable = False
             if semantic_consolidator is None:
-                semantic_consolidator = self._current_consolidator()
+                (
+                    semantic_consolidator,
+                    permanently_unavailable,
+                ) = self._current_semantic()
             report = self._pipeline.run_once(
-                semantic_consolidator=semantic_consolidator
+                semantic_consolidator=semantic_consolidator,
+                semantic_permanently_unavailable=permanently_unavailable,
             )
         finally:
             self._last_round = self._clock()

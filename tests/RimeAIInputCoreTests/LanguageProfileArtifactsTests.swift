@@ -199,4 +199,44 @@ struct LanguageProfileArtifactsTests {
             ))?.isEmpty == true
         )
     }
+
+    @Test("a malformed L2 artifact surfaces an error instead of a silent skip")
+    func malformedUserLMRaises() throws {
+        // user-lm.json.gz 存在但结构不对时静默 return 会让 L2 计数留在
+        // 旧域名下（L1/L3 已改名），域级联不变量被静默破坏。
+        let directory = try makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let payload: [String: Any] = [
+            "schema_version": 1,
+            "model_type": "user-char-ngram",
+            "domains": "not-an-object",
+        ]
+        let data = try JSONSerialization.data(
+            withJSONObject: payload,
+            options: [.sortedKeys]
+        )
+        try GzipCodec.encode(data).write(
+            to: directory.appendingPathComponent("user-lm.json.gz")
+        )
+
+        #expect(throws: LanguageProfileArtifactsError.self) {
+            try LanguageProfileArtifacts.renameDomain(
+                from: "work",
+                to: "office",
+                in: directory
+            )
+        }
+    }
+
+    @Test("a missing L2 artifact stays a no-op")
+    func missingUserLMIsNoOp() throws {
+        // 还没固化过的域没有 L2 产物是正常状态，不该报错。
+        let directory = try makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try LanguageProfileArtifacts.renameDomain(
+            from: "work",
+            to: "office",
+            in: directory
+        )
+    }
 }

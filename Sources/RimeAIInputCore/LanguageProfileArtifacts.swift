@@ -1,5 +1,15 @@
 import Foundation
 
+/// Errors raised while cascading phrasebook domain operations to the
+/// other two learning layers.
+public enum LanguageProfileArtifactsError: Error, Equatable, Sendable {
+    /// The L2 user-LM artifact exists but does not have the expected
+    /// shape. Surfacing it keeps the rename/delete cascade honest: a
+    /// silent skip would leave the L2 counts under the old domain name
+    /// while L1 and L3 already moved on.
+    case malformedUserLM(String)
+}
+
 /// Cascades phrasebook domain operations to the other two learning
 /// layers (P2-16): renaming or deleting a domain in the L1 phrasebook
 /// must move/remove the same domain's L2 user-LM counts and L3 style
@@ -80,17 +90,40 @@ public enum LanguageProfileArtifacts {
         mutate: (inout [String: Any]) -> Void
     ) throws {
         let url = directory.appendingPathComponent("user-lm.json.gz")
-        guard let compressed = try? Data(contentsOf: url),
-              !compressed.isEmpty
-        else {
+        // A missing artifact is the normal state for a layer that never
+        // ran: there is nothing to update. A present but malformed
+        // artifact is an error — returning silently would leave the L2
+        // counts under the old domain name while L1 and L3 already
+        // moved on, breaking the cascade invariant.
+        let compressed: Data
+        do {
+            compressed = try Data(contentsOf: url)
+        } catch let error as CocoaError
+            where error.code == .fileReadNoSuchFile
+        {
             return
+        }
+        guard !compressed.isEmpty else {
+            // A zero-byte artifact is damage (the daemon writes through
+            // a temporary file and renames it), not "no artifact yet":
+            // skipping it silently would leave the L2 counts under the
+            // old domain name.
+            throw LanguageProfileArtifactsError.malformedUserLM(
+                "user-lm artifact is empty"
+            )
         }
         let decoded = try GzipCodec.decode(compressed)
         guard var payload = try JSONSerialization.jsonObject(with: decoded)
-            as? [String: Any],
-            var domains = payload["domains"] as? [String: Any]
+            as? [String: Any]
         else {
-            return
+            throw LanguageProfileArtifactsError.malformedUserLM(
+                "user-lm payload is not a JSON object"
+            )
+        }
+        guard var domains = payload["domains"] as? [String: Any] else {
+            throw LanguageProfileArtifactsError.malformedUserLM(
+                "user-lm payload has no 'domains' object"
+            )
         }
         mutate(&domains)
         payload["domains"] = domains

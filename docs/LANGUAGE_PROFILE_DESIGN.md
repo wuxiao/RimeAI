@@ -72,11 +72,16 @@ entries(
 )
 ```
 
-- id 为 `SHA256(domain/text/pinyin)` 确定性内容寻址哈希：域改名会重算
-  id（与文本编辑冲突归并同口径），打开数据库时检测并修复历史漂移。
+- id 为 `SHA256(domain ␟ text)` 确定性内容寻址哈希（`␟` = U+001F
+  分隔符，与实现 `PhraseBookStore.entryIdentifier` 一致；**不含
+  pinyin**）：域改名会重算 id（与文本编辑冲突归并同口径），打开数据库
+  时检测并修复历史漂移。
 - 域名校验三侧统一：`PhraseBookDomain.validate`（Swift）为唯一入口，
-  与 daemon `VALIDATE_DOMAIN`、broker `ProfileStore` 同规则（字母开头、
-  kebab-case、≤32 字符）。
+  与 daemon `VALIDATE_DOMAIN`、broker `ProfileStore` 同规则——小写
+  字母、数字、连字符（`[a-z0-9-]`），≤64 字符（**不要求字母开头**）。
+  收紧字符集前写入的 `_` 域名（如 `work_chat`）在开库时自动折为
+  `work-chat`（`PhraseBookStore.migrateLegacyDomainNames`），否则其
+  学习行会变成不可触达的孤儿数据。
 
 - 无条目数上限。设计口径为带时间衰减的频次淘汰；当前实现只做 count
   upsert，`protected=1` 与 `source='user'` 豁免字段已就位，自动衰减淘汰
@@ -141,15 +146,19 @@ entries(
 | 触发 | broker 进程内空闲调度：≥10 分钟无活动且距上一轮 ≥6h；进程内单例锁（broker 感知不到键盘组合态；无每日定时） |
 | 执行者 | 统计固化（L1/L2）与 L3 LLM 压缩都在 cloud broker 进程内；daemon 只消费产物（LP-004 决策） |
 | 范围 | 仅处理 `raw` 且早于滚动窗口（7 天）的增量 |
-| 预算 | 分批处理（批 512）；L3 summarizer 单次超时 60s，无凭据显式跳过且不阻塞统计 |
+| 预算 | 分批处理（批 512）；L3 summarizer 单次超时 60s，无凭据显式跳过且不阻塞统计；每域每轮云端上传 **≤24KB（按 UTF-8 字节计）**，超出时按整条丢弃最旧条目（行对齐）并保留最新尾部 |
 
 流水线：
 
 1. **统计固化**（本地必跑、幂等）：增量更新 L1 频次与 L2 计数。
-2. **语义固化**（可选）：无云凭据或用户关闭时显式跳过；否则批量摘要
+2. **语义固化**（可选）：云压缩被用户关闭、或根本没配凭据（永久不
+   会跑 L3）时显式跳过；凭据文件暂时不可用（解析失败、权限过宽）时
+   **不**跳过，积压保留到下一轮重试；否则批量摘要
    → merge 画像 → 回灌 `signature_phrases`。
-3. **淘汰**：仅当该批完成统计固化 **且**（完成 L3 或 L3 显式跳过）才
-   删除原文行并 bump generation，防止旧索引或在途结果复活。
+3. **淘汰**：仅当该批完成统计固化 **且**（完成 L3 或 L3 永久显式跳过）才
+   删除原文行并 bump generation，防止旧索引或在途结果复活。凭据临时
+   故障时**不**淘汰（原文与 L3 积压一起等下一轮），避免一次瞬时故障
+   永久丢掉待摘要的历史。
 
 失败处理：LLM 失败不阻塞统计，但该批保留原文等待下轮；任何一步崩溃由
 水位线保证下轮续跑。Secure Event Input 期间不触发固化。
@@ -168,20 +177,26 @@ entries(
 
 - 继承：Secure Input 不写入、不固化；凭据不落历史/诊断；generation
   失效机制。
-- 新增：L3 云压缩会把滚动窗口外的批量原文发送至已配置网关；请求不带
-  凭据字段之外的数据。设置页「语言画像」页的云压缩开关已接通 broker
+- 新增：L3 云压缩会把滚动窗口外的批量原文发送至已配置网关；请求体
+  **不含任何凭据字段**（L3 请求体只含上一版画像特征与本轮原文段落；
+  整句候选请求才含 pinyin / 上下文）。设置页「语言画像」页的云压缩开关已接通 broker
   （`CloudBrokerConsolidationPreference` 改写 LaunchAgent plist 增删
   `--no-consolidation`，默认开，关闭后退化为纯本地统计固化 + 不更新
   画像）；broker 侧该旗标只跳过 L3 云画像段，统计与 evict 仍运行，
-  凭据每轮重读（无需重启生效）。
+  凭据每轮重读（无需重启生效）。凭据文件必须 owner-only（0600）——
+  group/world 可读的副本直接拒绝使用（凭据暴露面），此类故障算临时
+  故障：L3 积压保留重试，不做终态淘汰。
 - 画像、短语库、L2 计数全部可一键导出 JSON 与永久清除（bump generation）。
   导出为单一聚合文件（`format: rimeai-language-profile-export`，
-  version 2）：`phrasebook` 子节含 L1 条目与域映射，`user_lm` 内联
+  version 2）：`phrasebook` 子节含 L1 条目与域映射（超上限时截断到
+  50,000 条并标 `truncated: true` + `availableEntries`），`user_lm` 内联
   gzip 解码后的 L2 载荷（缺失为 `null`），`style_profiles` 按域键控；
   修订史不随导出携带（回滚链留在本地）。Swift 侧 `GzipCodec` 与
-  Python `gzip` 字节级兼容。永久清除覆盖三层产物：L1 库、L2
+  Python `gzip` 兼容（已测：Python 产物 → Swift 解码、Swift 自往返；
+  Swift 编码 → Python 解码以固件夹具验证）。导出文件以 **0600**
+  写入（owner-only），因为它含用户全部学习短语与画像。永久清除覆盖三层产物：L1 库、L2
   `user-lm.json.gz`（含原子落盘 tmp 残留）与 L3 画像/修订史，
-  daemon 侧 L2 失活即时生效（mtime 探测到删除即清内存模型）。
+  daemon 侧 L2 失活即时生效（mtime + size 探测到删除即清内存模型）。
 - 用户编辑与锁定优先于任何自动学习结果。
 
 ## 8. 评估方案

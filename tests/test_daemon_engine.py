@@ -75,6 +75,7 @@ def _engine(
     engine._user_lm_path = None
     engine._user_lm = None
     engine._user_lm_mtime = None
+    engine._user_lm_size = None
     return engine
 
 
@@ -358,6 +359,40 @@ def test_user_lm_refresh_clears_deleted_artifact(tmp_path):
     path.unlink()
     engine._refresh_user_lm()
     assert engine._user_lm is None
+
+
+def test_user_lm_refresh_detects_rewrite_with_same_mtime(tmp_path):
+    # 同一 mtime 刻度内的原子重写（gzip 输出大小变了）必须被探测到：
+    # 只比 mtime 会让 daemon 继续用旧模型跑（size 是第二把钥匙）。
+    import os
+
+    from rimeai_daemon.user_lm import UserLanguageModel
+
+    path = tmp_path / "user-lm.json.gz"
+    model = UserLanguageModel()
+    model.update("global", ["接口设计"] * 50)
+    model.save(path)
+    before = path.stat()
+
+    engine = _engine(["命令", "明令"], 0.9)
+    engine._user_lm_path = path
+    engine._user_lm = None
+    engine._user_lm_mtime = None
+    engine._user_lm_size = None
+    engine._refresh_user_lm(force=True)
+    assert engine._user_lm is not None
+    first = engine._user_lm
+
+    # 内容变多 → 产物体积变化；再把 mtime 拨回原值，模拟同一时间刻度
+    # 内的重写。
+    bigger = UserLanguageModel()
+    bigger.update("global", ["接口设计"] * 200)
+    bigger.save(path)
+    os.utime(path, (before.st_mtime, before.st_mtime))
+    assert path.stat().st_size != before.st_size
+
+    engine._refresh_user_lm()
+    assert engine._user_lm is not first
 
 
 def test_user_lm_reranks_toward_learned_phrasing():

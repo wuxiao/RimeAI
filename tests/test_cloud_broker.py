@@ -1,11 +1,11 @@
 import asyncio
 import json
-from pathlib import Path
 import stat
 import tempfile
 import threading
 import time
 import typing
+from pathlib import Path
 
 import pytest
 
@@ -1570,7 +1570,11 @@ def test_cloud_env_loader_matches_swift_semantics(tmp_path, monkeypatch):
     # ~/.config/rimeai/cloud.env，解析语义与 Swift CloudCredentialStore
     # 对齐：整行 # 注释、KEY=VALUE、成对引号剥离、行内 # 属于值、
     # 缺 = 的行视为文件损坏（显式报错而非静默无凭据）。
-    from rimeai_cloud_broker.__main__ import _cloud_env_loader
+    # 凭据文件还必须 owner-only（Swift 侧写 0600）：group/world 可读的
+    # 副本等于把 key 暴露给本机所有账号，loader 直接拒绝使用。
+    from rimeai_cloud_broker.__main__ import (
+        _cloud_env_loader,
+    )
 
     credential = tmp_path / ".config" / "rimeai" / "cloud.env"
     credential.parent.mkdir(parents=True)
@@ -1581,13 +1585,16 @@ def test_cloud_env_loader_matches_swift_semantics(tmp_path, monkeypatch):
         "OTHER=value\n",
         encoding="utf-8",
     )
+    credential.chmod(0o600)
     monkeypatch.setenv("HOME", str(tmp_path))
     assert _cloud_env_loader() == "key-with-#"
 
     credential.write_text("RIMEAI_CLOUD_API_KEY=no-quotes\n", encoding="utf-8")
+    credential.chmod(0o600)
     assert _cloud_env_loader() == "no-quotes"
 
     credential.write_text("broken line without equals\n", encoding="utf-8")
+    credential.chmod(0o600)
     with pytest.raises(ValueError, match="malformed"):
         _cloud_env_loader()
 
@@ -1595,27 +1602,68 @@ def test_cloud_env_loader_matches_swift_semantics(tmp_path, monkeypatch):
     assert _cloud_env_loader() == ""
 
 
-def test_usable_cloud_api_key_treats_malformed_file_as_absent(
+def test_cloud_env_loader_refuses_world_readable_credentials(
     tmp_path, monkeypatch
 ):
-    # The scheduler-side decision must not inherit the loader's raise: a
-    # malformed file means "no usable credentials" (logged, semantic pass
-    # skipped) so raw-text eviction keeps running instead of failing every
-    # round.
-    from rimeai_cloud_broker.__main__ import _usable_cloud_api_key
+    # 凭据文件被其他本机账号可读时不得使用：key 已经在共享目录或同步
+    # 工具里裸奔，用它上云等于扩大泄露面。
+    from rimeai_cloud_broker.__main__ import (
+        CredentialPermissionError,
+        _cloud_env_loader,
+    )
+
+    credential = tmp_path / ".config" / "rimeai" / "cloud.env"
+    credential.parent.mkdir(parents=True)
+    credential.write_text(
+        "RIMEAI_CLOUD_API_KEY=leaky-key\n", encoding="utf-8"
+    )
+    credential.chmod(0o644)
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    with pytest.raises(CredentialPermissionError):
+        _cloud_env_loader()
+
+    credential.chmod(0o600)
+    assert _cloud_env_loader() == "leaky-key"
+
+
+def test_usable_cloud_api_key_separates_absent_from_broken(
+    tmp_path, monkeypatch
+):
+    # 调度侧凭据决策分两类：
+    # - absent（根本没配凭据）→ L3 永久关闭，积压按终态清理，统计与
+    #   evict 照常运行；
+    # - broken（有凭据文件但解析不了）→ 临时故障，保留 L3 积压重试，
+    #   不得让一次手滑就永久丢掉待摘要的历史。
+    from rimeai_cloud_broker.__main__ import (
+        CloudCredentialState,
+        _cloud_credential_state,
+        _usable_cloud_api_key,
+    )
 
     credential = tmp_path / ".config" / "rimeai" / "cloud.env"
     credential.parent.mkdir(parents=True)
     monkeypatch.setenv("HOME", str(tmp_path))
 
     credential.write_text("broken line without equals\n", encoding="utf-8")
-    assert _usable_cloud_api_key() == ""
+    credential.chmod(0o600)
+    with pytest.raises(ValueError, match="malformed"):
+        _usable_cloud_api_key()
+    assert (
+        _cloud_credential_state() is CloudCredentialState.BROKEN
+    )
 
     credential.write_text("RIMEAI_CLOUD_API_KEY=usable-key\n", encoding="utf-8")
+    credential.chmod(0o600)
     assert _usable_cloud_api_key() == "usable-key"
+    assert _cloud_credential_state() is CloudCredentialState.OK
 
     credential.write_text("# only comments\nOTHER=value\n", encoding="utf-8")
+    credential.chmod(0o600)
     assert _usable_cloud_api_key() == ""
+    assert (
+        _cloud_credential_state() is CloudCredentialState.ABSENT
+    )
 
     credential.unlink()
     assert _usable_cloud_api_key() == ""
@@ -1626,7 +1674,7 @@ def test_semantic_consolidator_skipped_when_credentials_unusable(
 ):
     # 固化循环的 L3 云压缩只在凭据文件存在且可解析时启用；损坏的
     # cloud.env 不得让每轮固化都抛 ConsolidationError 并阻塞原文清理
-    # ——语义阶段显式跳过（semantic=None），统计阶段与 prune 照常运行。
+    # ——语义阶段本轮不跑，但积压保留（临时故障）而不是被判终态丢弃。
     from rimeai_cloud_broker.__main__ import _semantic_consolidator
 
     credential = tmp_path / ".config" / "rimeai" / "cloud.env"
@@ -1637,48 +1685,35 @@ def test_semantic_consolidator_skipped_when_credentials_unusable(
         api_key_loader=lambda: ""
     )
 
-    assert (
-        _semantic_consolidator(
+    def build(*, enabled: bool):
+        return _semantic_consolidator(
             ranker.post_json,
-            enabled=True,
+            enabled=enabled,
             profile_directory=profile_directory,
             phrasebook_db=profile_directory / "phrasebook.sqlite3",
         )
-        is None
-    )
+
+    # 没有凭据文件 = 用户没开启云压缩 = 永久关闭。
+    absent = build(enabled=True)
+    assert absent.consolidator is None
+    assert absent.permanently_unavailable is True
 
     credential.write_text("broken line without equals\n", encoding="utf-8")
-    assert (
-        _semantic_consolidator(
-            ranker.post_json,
-            enabled=True,
-            profile_directory=profile_directory,
-            phrasebook_db=profile_directory / "phrasebook.sqlite3",
-        )
-        is None
-    )
+    credential.chmod(0o600)
+    broken = build(enabled=True)
+    assert broken.consolidator is None
+    assert broken.permanently_unavailable is False
 
     credential.write_text("RIMEAI_CLOUD_API_KEY=usable-key\n", encoding="utf-8")
-    assert (
-        _semantic_consolidator(
-            ranker.post_json,
-            enabled=True,
-            profile_directory=profile_directory,
-            phrasebook_db=profile_directory / "phrasebook.sqlite3",
-        )
-        is not None
-    )
+    credential.chmod(0o600)
+    usable = build(enabled=True)
+    assert usable.consolidator is not None
+    assert usable.permanently_unavailable is False
 
     # The --no-consolidation switch wins even with usable credentials.
-    assert (
-        _semantic_consolidator(
-            ranker.post_json,
-            enabled=False,
-            profile_directory=profile_directory,
-            phrasebook_db=profile_directory / "phrasebook.sqlite3",
-        )
-        is None
-    )
+    disabled = build(enabled=False)
+    assert disabled.consolidator is None
+    assert disabled.permanently_unavailable is True
 
 
 def test_broker_activity_notifier_fires_on_valid_traffic_only():

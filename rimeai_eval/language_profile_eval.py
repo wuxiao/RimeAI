@@ -22,7 +22,10 @@ import time
 from collections.abc import Sequence
 from pathlib import Path
 
-from rimeai_cloud_broker.profile import MAX_BATCH_CHARACTERS
+from rimeai_cloud_broker.profile import (
+    MAX_BATCH_BYTES,
+    MAX_BATCH_CHARACTERS,
+)
 from rimeai_daemon.user_lm import UserLanguageModel
 from rimeai_runtime.ngram_ranker import NGramRankerModel, load_ngram_model
 
@@ -232,14 +235,31 @@ def evaluate(
         if test_prob is not None and baseline_test_prob is not None
         else None
     )
-    # L3 云压缩预算对照：评测用的训练语料若存在单条即超批量预算的
-    # 上屏文本，生产端会走尾部截断路径；在报告里显式计数，避免评测
-    # 结论建立在生产端根本不会原样发送的数据形态上。
+    # L3 云压缩预算对照：生产端按「域」分组、每轮每域截断到 24KB
+    # (UTF-8 字节)，因此「有多少组会被生产端截断」才是有效指标。
+    # 评测侧拿不到 bundle→domain 映射，用 bundle 作代理分组；单条
+    # 超预算的计数几乎恒为 0，却不能代表生产端不会截断。
     oversized_commits = sum(
         1
         for commit in train_commits
         if len(str(commit["committed_text"])) > MAX_BATCH_CHARACTERS
     )
+    bundle_corpora: dict[str, list[str]] = {}
+    for commit in train_commits:
+        bundle_corpora.setdefault(commit["bundle_id"], []).append(
+            str(commit["committed_text"])
+        )
+    truncated_bundles = 0
+    commits_in_truncated_bundles = 0
+    for texts in bundle_corpora.values():
+        # 生产端的 corpus 是 "\n".join(texts)：n 条文本之间只有 n-1 个
+        # 换行符，按 n 算会多报一个字节（边界上多判为“被截断”）。
+        corpus_bytes = sum(
+            len(text.encode("utf-8")) for text in texts
+        ) + max(len(texts) - 1, 0)
+        if corpus_bytes > MAX_BATCH_BYTES:
+            truncated_bundles += 1
+            commits_in_truncated_bundles += len(texts)
 
     return {
         "schema_version": REPORT_SCHEMA_VERSION,
@@ -277,8 +297,11 @@ def evaluate(
             if learning_gain_nats is not None
             else None
         ),
+        "l3_batch_budget_bytes": MAX_BATCH_BYTES,
         "l3_batch_budget_characters": MAX_BATCH_CHARACTERS,
         "train_commits_exceeding_l3_budget": oversized_commits,
+        "train_bundles_exceeding_l3_budget": truncated_bundles,
+        "train_commits_in_truncated_bundles": commits_in_truncated_bundles,
         "elapsed_ms": round((time.monotonic() - started) * 1000, 3),
     }
 

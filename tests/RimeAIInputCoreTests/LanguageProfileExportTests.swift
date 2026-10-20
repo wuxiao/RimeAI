@@ -119,4 +119,80 @@ struct LanguageProfileExportTests {
             as? [String: Any]
         #expect(object?["version"] as? Int == 2)
     }
+
+    @Test("exported file is owner-only (0600)")
+    func exportWritesOwnerOnlyFile() throws {
+        // 导出文件含用户全部学习短语、L2 计数与 L3 画像；Foundation 的
+        // .atomic 写会沿用进程 umask（默认 0644），本机任何账号可读。
+        let directory = try makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try makeStore(directory)
+        try store.addUserPhrase(
+            text: "口径",
+            pinyinKeys: "koujing",
+            domain: "global"
+        )
+        let destination = directory.appendingPathComponent("export.json")
+        try LanguageProfileExporter.export(
+            phrasebook: store,
+            languageProfileDirectory: directory,
+            to: destination
+        )
+        let attributes = try FileManager.default.attributesOfItem(
+            atPath: destination.path
+        )
+        let permissions = (attributes[.posixPermissions] as? NSNumber)?
+            .intValue ?? 0
+        #expect(permissions == 0o600)
+    }
+
+    @Test("export over an existing file keeps the owner-only mode")
+    func exportReplacesExistingFileOwnerOnly() throws {
+        let directory = try makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try makeStore(directory)
+        let destination = directory.appendingPathComponent("export.json")
+        try Data("stale".utf8).write(to: destination)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o644],
+            ofItemAtPath: destination.path
+        )
+        try LanguageProfileExporter.export(
+            phrasebook: store,
+            languageProfileDirectory: directory,
+            to: destination
+        )
+        let attributes = try FileManager.default.attributesOfItem(
+            atPath: destination.path
+        )
+        let permissions = (attributes[.posixPermissions] as? NSNumber)?
+            .intValue ?? 0
+        #expect(permissions == 0o600)
+    }
+
+    @Test("export caps the entry count and says so")
+    func exportCapsEntriesAndMarksTruncation() throws {
+        // 学习表没有自动淘汰（设计 §4.1），导出必须有上限，否则长期用户
+        // 会得到 GB 级 JSON；截断必须在文档里显式标注。
+        let directory = try makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try makeStore(directory)
+        for index in 0..<3 {
+            try store.addUserPhrase(
+                text: "短语\(index)",
+                pinyinKeys: "duan\(index)",
+                domain: "global"
+            )
+        }
+        let payload = try LanguageProfileExporter.payload(
+            phrasebook: store,
+            languageProfileDirectory: directory,
+            maximumEntries: 2
+        )
+        let phrasebook = payload["phrasebook"] as? [String: Any]
+        let entries = phrasebook?["entries"] as? [[String: Any]]
+        #expect(entries?.count == 2)
+        #expect(phrasebook?["truncated"] as? Bool == true)
+        #expect(phrasebook?["availableEntries"] as? Int == 3)
+    }
 }

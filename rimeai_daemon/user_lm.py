@@ -45,6 +45,27 @@ class UserLMError(ValueError):
     pass
 
 
+def _fsync_directory(directory: Path) -> None:
+    """Persists a rename inside `directory` (best effort).
+
+    `os.replace` is atomic, but the directory entry is only durable
+    after the directory itself is fsynced; without it a power cut can
+    lose the new name even though the file data was fsynced. Failures
+    are ignored: some filesystems refuse to open a directory for
+    fsync, and the artifact bytes are already durable.
+    """
+    try:
+        descriptor = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        pass
+    finally:
+        os.close(descriptor)
+
+
 @dataclass
 class DomainCounts:
     ngram_counts: dict[int, Counter] = field(
@@ -309,6 +330,10 @@ class UserLanguageModel:
                 raw_file.flush()
                 os.fsync(raw_file.fileno())
             os.replace(temporary, path)
+            # fsync the directory entry too: os.replace is atomic, but
+            # without a directory fsync the rename itself can be lost on
+            # a power cut, leaving the previous artifact (or no file).
+            _fsync_directory(path.parent)
         except BaseException:
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(temporary)

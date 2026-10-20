@@ -512,6 +512,53 @@ def test_empty_rounds_do_not_bump_history_generation(tmp_path: Path):
     assert generation == 1
 
 
+def test_transient_semantic_failure_keeps_backlog_and_retries(
+    tmp_path: Path,
+):
+    # 凭据临时故障（语义阶段本轮不可用）不得把 L3 积压判成终态：
+    # 原文不删、语义水位线不推进，统计照常；凭据恢复后的下一轮补做
+    # L3 摘要并清掉原文。
+    paths = make_layout(tmp_path)
+    insert_commit(paths, suffix="000000000001", age_days=8, text="待摘要")
+
+    pipeline = ConsolidationPipeline(paths)
+    report = pipeline.run_once(semantic_permanently_unavailable=False)
+
+    assert report.statistics_done == 1
+    assert report.semantic_done == 0
+    assert report.pruned == 0
+    # 原文仍在，状态停在 statistics_done（可重试），没有被判终态。
+    assert history_state(paths) == {"statistics_done": 1}
+    with sqlite3.connect(paths.phrasebook_db) as db:
+        entries = db.execute(
+            "SELECT COUNT(*) FROM phrasebook_entries"
+        ).fetchone()[0]
+    # 统计固化仍然发生（L1 已学到）。
+    assert entries == 1
+
+    recovered = pipeline.run_once(
+        semantic_consolidator=lambda batch: True
+    )
+    assert recovered.semantic_done == 1
+    assert history_state(paths) == {}
+
+
+def test_permanent_semantic_unavailability_marks_backlog_terminal(
+    tmp_path: Path,
+):
+    # 永久不可用（用户未开启云压缩 / 显式 --no-consolidation）：L3 积压
+    # 判终态（skipped）并随原文一起清理，历史库不会无限增长。
+    paths = make_layout(tmp_path)
+    insert_commit(paths, suffix="000000000001", age_days=8, text="永久跳过")
+
+    report = ConsolidationPipeline(paths).run_once(
+        semantic_permanently_unavailable=True
+    )
+
+    assert report.pruned == 1
+    assert history_state(paths) == {}
+
+
 def test_fetch_batch_claims_exclusively_across_processes(tmp_path: Path):
     paths = make_layout(tmp_path)
     insert_commit(paths, suffix="000000000001", age_days=8, text="独占")
@@ -561,7 +608,7 @@ def test_scheduler_idle_gate_defers_rounds_while_activity_recent():
         def __init__(self):
             self.rounds = 0
 
-        def run_once(self, *, semantic_consolidator=None):
+        def run_once(self, *, semantic_consolidator=None, **_kwargs):
             self.rounds += 1
             return ConsolidationReport()
 

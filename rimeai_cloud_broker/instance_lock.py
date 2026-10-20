@@ -33,9 +33,16 @@ class SingleInstanceLock:
             handle.close()
             return False
         self._handle = handle
+        # The lock file holds no secret, but it is diagnostic state in
+        # the user's own Application Support directory: keep it
+        # owner-only instead of inheriting the process umask.
+        with contextlib.suppress(OSError):
+            os.chmod(self._lock_path, 0o600)
         self._pid_path.write_text(
             f"{os.getpid()}\n", encoding="utf-8"
         )
+        with contextlib.suppress(OSError):
+            os.chmod(self._pid_path, 0o600)
         return True
 
     def release(self) -> None:
@@ -44,7 +51,10 @@ class SingleInstanceLock:
         self._handle = None
         if handle is None:
             return
-        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        handle.close()
+        # Remove the diagnostic pidfile while the lock is still held:
+        # unlinking it after the unlock would let a new holder write its
+        # own pid and then have it deleted by this process.
         with contextlib.suppress(FileNotFoundError):
             self._pid_path.unlink()
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()

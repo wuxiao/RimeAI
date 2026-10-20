@@ -6,11 +6,20 @@ import Foundation
 public enum LanguageProfileExporter {
     public static let formatIdentifier = "rimeai-language-profile-export"
 
+    /// Upper bound on exported L1 entries. The learning table has no
+    /// eviction yet (design §4.1: time-decayed eviction is planned), so
+    /// a long-lived profile can hold hundreds of thousands of phrases; a
+    /// single JSON document plus its gzip payload would then be
+    /// gigabytes and fully resident in memory. Exports are capped and
+    /// say so explicitly instead of silently producing a huge file.
+    public static let maximumExportEntries = 50_000
+
     /// Builds the aggregate payload as a JSON object tree. `userLM` is
     /// `NSNull` when the artifact has never been written.
     public static func payload(
         phrasebook: PhraseBookStore,
-        languageProfileDirectory: URL
+        languageProfileDirectory: URL,
+        maximumEntries: Int = LanguageProfileExporter.maximumExportEntries
     ) throws -> [String: Any] {
         [
             "format": formatIdentifier,
@@ -18,7 +27,10 @@ public enum LanguageProfileExporter {
             "exported_at_ms": Int(
                 Date().timeIntervalSince1970 * 1000
             ),
-            "phrasebook": try phrasebookPayload(phrasebook),
+            "phrasebook": try phrasebookPayload(
+                phrasebook,
+                maximumEntries: maximumEntries
+            ),
             "user_lm": try userLMPayload(languageProfileDirectory),
             "style_profiles": try styleProfilePayloads(
                 languageProfileDirectory
@@ -29,32 +41,94 @@ public enum LanguageProfileExporter {
     public static func export(
         phrasebook: PhraseBookStore,
         languageProfileDirectory: URL,
-        to destination: URL
+        to destination: URL,
+        maximumEntries: Int = LanguageProfileExporter.maximumExportEntries
     ) throws {
         let object = try payload(
             phrasebook: phrasebook,
-            languageProfileDirectory: languageProfileDirectory
+            languageProfileDirectory: languageProfileDirectory,
+            maximumEntries: maximumEntries
         )
         let data = try JSONSerialization.data(
             withJSONObject: object,
             options: [.sortedKeys, .prettyPrinted]
         )
-        try data.write(to: destination, options: .atomic)
+        try writeOwnerOnly(data, to: destination)
+    }
+
+    /// Writes the export so only its owner can read it.
+    ///
+    /// Foundation's `.atomic` write creates the file with the process
+    /// umask (0644 in a default macOS session), which would expose the
+    /// user's complete typing profile — L1 phrases, L2 n-gram counts and
+    /// the L3 style profile — to every local account. Write an
+    /// owner-only temporary file next to the destination and move it
+    /// into place instead, the same way the credential store writes
+    /// `cloud.env`.
+    private static func writeOwnerOnly(
+        _ data: Data,
+        to destination: URL
+    ) throws {
+        let manager = FileManager.default
+        let temporary = destination.deletingLastPathComponent()
+            .appendingPathComponent(
+                ".rimeai-language-profile-export-\(UUID().uuidString).tmp",
+                isDirectory: false
+            )
+        let created = manager.createFile(
+            atPath: temporary.path,
+            contents: data,
+            attributes: [.posixPermissions: 0o600]
+        )
+        guard created else {
+            throw PhraseBookError.fileSystem(
+                "language profile export could not be created"
+            )
+        }
+        do {
+            _ = try manager.replaceItemAt(
+                destination,
+                withItemAt: temporary
+            )
+        } catch {
+            _ = try? manager.removeItem(at: temporary)
+            throw error
+        }
+        // Replacing an existing destination can keep that file's own
+        // permissions; re-assert the owner-only mode. A failure here
+        // means the export is readable by other local accounts, so it
+        // must not be swallowed.
+        try manager.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: destination.path
+        )
     }
 
     private static func phrasebookPayload(
-        _ store: PhraseBookStore
+        _ store: PhraseBookStore,
+        maximumEntries: Int
     ) throws -> [String: Any] {
         struct PhrasebookSection: Encodable {
             let entries: [PhraseBookEntry]
             let domainMappings: [PhraseDomainMapping]
+            let truncated: Bool
+            let availableEntries: Int
         }
+        // One extra row tells us whether the cap actually cut anything.
+        let fetched = try store.entries(limit: maximumEntries + 1)
+        let truncated = fetched.count > maximumEntries
+        let entries = truncated
+            ? Array(fetched.prefix(maximumEntries))
+            : fetched
+        let available = try store.entryCount()
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
         let data = try encoder.encode(
             PhrasebookSection(
-                entries: try store.entries(limit: 1_000_000),
-                domainMappings: try store.domainMappings()
+                entries: entries,
+                domainMappings: try store.domainMappings(),
+                truncated: truncated,
+                availableEntries: available
             )
         )
         guard let object = try JSONSerialization.jsonObject(with: data)

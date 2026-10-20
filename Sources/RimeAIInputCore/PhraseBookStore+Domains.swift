@@ -108,6 +108,19 @@ extension PhraseBookStore {
         guard sourceDomain != targetDomain else {
             return 0
         }
+        return try renameDomainLocked(
+            from: sourceDomain,
+            to: targetDomain
+        )
+    }
+
+    /// The rename itself, without validating the source name: legacy
+    /// domain names (written when `_` was still accepted) have to be
+    /// migratable even though they no longer pass the current rule.
+    private func renameDomainLocked(
+        from sourceDomain: String,
+        to targetDomain: String
+    ) throws -> Int {
         return try queue.sync {
             var moved = 0
             try transaction {
@@ -197,6 +210,57 @@ extension PhraseBookStore {
             }
             return moved
         }
+    }
+
+    /// Migrates legacy domain names that the current charset rule
+    /// rejects.
+    ///
+    /// `_` used to be accepted in domain names. Rows written under such
+    /// a name are now unreachable: the domain can no longer be selected
+    /// in the settings page and its counts stay under the dead name.
+    /// The daemon and the broker never accepted `_` either (the daemon
+    /// stripped it, the broker rejected it), so only the L1 learning
+    /// tables can hold such a domain — the migration is therefore
+    /// confined to this store.
+    @discardableResult
+    public func migrateLegacyDomainNames() throws -> Int {
+        let legacy = try queue.sync { try legacyDomainNames() }
+        var migrated = 0
+        for name in legacy {
+            let target = name.replacingOccurrences(of: "_", with: "-")
+            guard target != name,
+                  (try? validatedDomain(target)) != nil
+            else {
+                continue
+            }
+            migrated += try renameDomainLocked(from: name, to: target)
+        }
+        return migrated
+    }
+
+    /// Distinct domain names containing `_` across the L1 tables.
+    private func legacyDomainNames() throws -> [String] {
+        var names: Set<String> = []
+        for table in [
+            "phrasebook_entries",
+            "domain_map",
+            "domain_stats",
+            "lexicons",
+        ] {
+            guard let statement = try? prepare(
+                "SELECT DISTINCT domain FROM \(table)"
+            ) else {
+                continue
+            }
+            defer { sqlite3_finalize(statement) }
+            while sqlite3_step(statement) == SQLITE_ROW {
+                let name = columnText(statement, index: 0)
+                if name.contains("_") {
+                    names.insert(name)
+                }
+            }
+        }
+        return names.sorted()
     }
 
     /// Deletes a domain: phrases fold back into `global` (counts merged),
@@ -343,15 +407,9 @@ extension PhraseBookStore {
     }
 
     func validatedDomain(_ raw: String) throws -> String {
-        let domain = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-        guard !domain.isEmpty,
-              domain.count <= PhraseBookDomain.maximumNameLength,
-              domain.allSatisfy(\.isLowercaseLetterOrDigitOrHyphen)
-        else {
-            throw PhraseBookError.invalidDomain
-        }
-        return domain
+        // The charset and length rules live in `PhraseBookDomain`; this
+        // wrapper only exists for call sites that already hold a store.
+        try PhraseBookDomain.validate(raw)
     }
 
     /// Pure normalization (no database access): empty resolves to
@@ -367,8 +425,8 @@ extension PhraseBookStore {
     }
 }
 
-/// Shared domain-name character rule (used by `PhraseBookDomain.normalize`
-/// and `PhraseBookStore.validatedDomain`): [a-z0-9-], identical to the
+/// Shared domain-name character rule (used by `PhraseBookDomain.validate`
+/// and, through it, by every caller): [a-z0-9-], identical to the
 /// daemon request validator and the broker profile store.
 extension Character {
     var isLowercaseLetterOrDigitOrHyphen: Bool {

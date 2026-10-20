@@ -241,7 +241,8 @@ extension PrivacyCenterWindowController {
                             message: "未能导入词库",
                             information: "文件需为 Rime .dict.yaml（含 --- 头、"
                                 + "词条用 Tab 分列并带拼音）；挂载域为小写"
-                                + "字母、数字、连字符或下划线。"
+                                + "字母、数字或连字符（最多 64 字符）；"
+                                + "单个词库最多 200,000 词条。"
                         )
                     }
                 }

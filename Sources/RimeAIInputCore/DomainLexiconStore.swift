@@ -95,6 +95,7 @@ public enum DomainLexiconError: Error, Equatable, Sendable {
     case invalidIdentifier
     case invalidDomain
     case emptyDictionary
+    case tooManyEntries(count: Int)
     case lexiconNotFound(String)
     case sqlite(code: Int32, message: String)
     case fileSystem(String)
@@ -179,7 +180,9 @@ public final class DomainLexiconStore: @unchecked Sendable {
         }
         guard dictionary.entries.count <= Self.maximumEntriesPerLexicon
         else {
-            throw DomainLexiconError.emptyDictionary
+            throw DomainLexiconError.tooManyEntries(
+                count: dictionary.entries.count
+            )
         }
         let resolvedDomain: String
         do {

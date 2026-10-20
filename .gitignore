@@ -27,6 +27,7 @@ xcuserdata/
 *.xcscmblueprint
 *.xcarchive
 .swiftpm/
+.build-voice/
 
 # JavaScript dependencies and build output
 node_modules/
@@ -52,4 +53,3 @@ reports/
 # never commit a copy that contains a real key)
 secrets/cloud.env
 !secrets/cloud.env.example
-.build-voice/

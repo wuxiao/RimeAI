@@ -206,6 +206,33 @@ struct DomainLexiconStoreTests {
         #expect(learned.first?.text == "老短语")
     }
 
+    @Test("installing more entries than the cap reports the real reason")
+    func tooManyEntriesHasItsOwnError() throws {
+        // 超限曾经误抛 emptyDictionary，设置页会把「词库太大」显示成
+        // 「词库为空」，排查方向完全反了。
+        let (store, _, directory) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let overCap = DomainLexiconStore.maximumEntriesPerLexicon + 1
+        let entries = (0..<overCap).map { index in
+            ParsedRimeDictionary.Entry(
+                text: "词\(index)",
+                pinyinKeys: "ci",
+                weight: 50
+            )
+        }
+        let dictionary = ParsedRimeDictionary(
+            identifier: "huge",
+            name: "huge",
+            version: "1",
+            entries: entries,
+            rejectedLines: [],
+            rejectedLineCount: 0
+        )
+        #expect(throws: DomainLexiconError.tooManyEntries(count: overCap)) {
+            try store.install(dictionary, domain: "global")
+        }
+    }
+
     @Test("invalid dictionaries and domains are rejected")
     func rejectsInvalidInput() throws {
         let (store, _, directory) = try makeStore()

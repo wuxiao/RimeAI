@@ -76,10 +76,26 @@ public enum PhraseBookDomain {
     public static let maximumNameLength = 64
 
     /// Single source of truth for domain-name rules, shared by the
-    /// phrasebook store, the lexicon store and the settings UI:
-    /// trimmed, lowercased, `[a-z0-9_-]`, at most 64 characters. Empty
-    /// input resolves to `global`; anything malformed throws
-    /// `PhraseBookError.invalidDomain`.
+    /// phrasebook store, the lexicon store, the settings UI, the daemon
+    /// request validator and the broker profile store: trimmed,
+    /// lowercased, `[a-z0-9-]`, at most 64 characters. Empty input is
+    /// not a domain; callers that accept "no domain" use `normalize`.
+    public static func validate(
+        _ raw: String
+    ) throws -> String {
+        let domain = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard !domain.isEmpty,
+              domain.count <= PhraseBookDomain.maximumNameLength,
+              domain.allSatisfy(\.isLowercaseLetterOrDigitOrHyphen)
+        else {
+            throw PhraseBookError.invalidDomain
+        }
+        return domain
+    }
+
+    /// Normalizes a domain name for storage; empty input resolves to
+    /// `global`, anything else must satisfy `validate`.
     public static func normalize(
         _ raw: String
     ) throws -> String {
@@ -88,12 +104,7 @@ public enum PhraseBookDomain {
         guard !domain.isEmpty else {
             return PhraseBookDomain.global
         }
-        guard domain.count <= PhraseBookDomain.maximumNameLength,
-              domain.allSatisfy(\.isLowercaseLetterOrDigitOrHyphen)
-        else {
-            throw PhraseBookError.invalidDomain
-        }
-        return domain
+        return try PhraseBookDomain.validate(domain)
     }
 }
 
@@ -160,6 +171,10 @@ public final class PhraseBookStore: @unchecked Sendable {
                 [.posixPermissions: 0o600],
                 ofItemAtPath: databaseURL.path
             )
+            // Repair legacy domain names once, at open time: rows written
+            // when `_` was still an accepted domain character would
+            // otherwise stay unreachable under the dead name.
+            try? migrateLegacyDomainNames()
         } catch {
             sqlite3_close_v2(opened)
             database = nil
@@ -252,6 +267,18 @@ public final class PhraseBookStore: @unchecked Sendable {
             }
             sqlite3_bind_int64(statement, index, Int64(max(0, limit)))
             return try readEntries(statement)
+        }
+    }
+
+    /// Total number of learning entries. Used by the export to report
+    /// whether the export cap truncated the payload.
+    public func entryCount() throws -> Int {
+        try queue.sync {
+            Int(
+                try queryInt64(
+                    "SELECT COUNT(*) FROM phrasebook_entries"
+                )
+            )
         }
     }
 

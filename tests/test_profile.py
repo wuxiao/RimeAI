@@ -11,6 +11,7 @@ import pytest
 
 from rimeai_cloud_broker.profile import (
     DOMAIN_PATTERN,
+    MAX_BATCH_BYTES,
     MAX_BATCH_CHARACTERS,
     CloudProfileSummarizer,
     ProfileError,
@@ -191,7 +192,8 @@ def test_revision_history_is_bounded(tmp_path: Path):
 def test_summarizer_truncates_line_aligned_keeping_newest():
     # 超批量预算时按整条丢弃最旧条目（行对齐），绝不把一条上屏原文
     # 拦腰截成残片喂给模型；保留最新尾部（旧批次风格已由
-    # previous_traits 携带）。
+    # previous_traits 携带）。预算按 UTF-8 字节计（设置页披露的
+    # “每域每轮 24KB”），所以全中文语料会先于字符上限触顶。
     captured: dict[str, Any] = {}
 
     def transport(path: str, payload: dict[str, Any], *, timeout: float) -> dict[str, Any]:
@@ -199,19 +201,23 @@ def test_summarizer_truncates_line_aligned_keeping_newest():
         return _completion(json.dumps({"register": ["x"]}))
 
     summarizer = CloudProfileSummarizer(transport)
-    oldest = "旧" * 500
-    middle = "中" * (MAX_BATCH_CHARACTERS - 120)
-    newest = "新" * 10
-    summarizer.summarize([oldest, middle, newest], None)
+    # 每条 1000 个汉字 = 3000 字节；10 条共 10,000 字符（未超字符
+    # 上限）但 30,000 字节（超 24KB 字节预算）→ 必须截断。
+    texts = [f"{index}" + "旧" * 999 for index in range(10)]
+    summarizer.summarize(texts, None)
     content = captured["payload"]["messages"][1]["content"]
     corpus = json.loads(content)["committed_text"]
+    assert len(corpus.encode("utf-8")) <= MAX_BATCH_BYTES
     assert len(corpus) <= MAX_BATCH_CHARACTERS
-    assert corpus.split("\n") == [middle, newest]
+    kept = corpus.split("\n")
+    # 保留最新的若干条，最旧的整条被丢弃（不拦腰截断）。
+    assert kept == texts[-len(kept):]
+    assert len(kept) < len(texts)
 
 
 def test_summarizer_truncates_a_single_oversized_entry_to_its_tail():
     # 单条原文超过整个批量预算时不能发出空 corpus；退化为该条尾部
-    # 截断（旧行为对该场景的语义），仍不超预算。
+    # 截断（旧行为对该场景的语义），仍不超预算（字节与字符双上限）。
     captured: dict[str, Any] = {}
 
     def transport(path: str, payload: dict[str, Any], *, timeout: float) -> dict[str, Any]:
@@ -223,8 +229,9 @@ def test_summarizer_truncates_a_single_oversized_entry_to_its_tail():
     summarizer.summarize([huge], None)
     content = captured["payload"]["messages"][1]["content"]
     corpus = json.loads(content)["committed_text"]
-    assert len(corpus) == MAX_BATCH_CHARACTERS
-    assert corpus == huge[-MAX_BATCH_CHARACTERS:]
+    assert len(corpus.encode("utf-8")) <= MAX_BATCH_BYTES
+    assert len(corpus) <= MAX_BATCH_CHARACTERS
+    assert huge.endswith(corpus)
 
 
 def test_summarizer_parses_strict_and_embedded_json():

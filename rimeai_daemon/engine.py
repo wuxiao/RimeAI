@@ -94,6 +94,7 @@ class LocalInferenceEngine:
         self._user_lm_path = user_lm_path
         self._user_lm: UserLanguageModel | None = None
         self._user_lm_mtime: float | None = None
+        self._user_lm_size: int | None = None
         self._refresh_user_lm(force=True)
         self.artifacts: list[dict[str, Any]] = [
             {
@@ -158,22 +159,32 @@ class LocalInferenceEngine:
         if path is None:
             return
         try:
-            mtime = path.stat().st_mtime
+            status = path.stat()
         except OSError:
             # Saves are atomic (os.replace), so a missing file is a genuine
             # deletion (settings-page clear) — take effect live instead of
             # waiting for an engine restart.
             self._user_lm = None
             self._user_lm_mtime = None
+            self._user_lm_size = None
             return
-        if not force and mtime == self._user_lm_mtime:
+        # Compare (mtime, size): a rewrite inside the same filesystem
+        # timestamp tick keeps the old mtime, and mtime alone would then
+        # keep serving the previous model.
+        if (
+            not force
+            and status.st_mtime == self._user_lm_mtime
+            and status.st_size == self._user_lm_size
+        ):
             return
         try:
             self._user_lm = UserLanguageModel.load(path)
-            self._user_lm_mtime = mtime
+            self._user_lm_mtime = status.st_mtime
+            self._user_lm_size = status.st_size
         except ValueError:
             self._user_lm = None
             self._user_lm_mtime = None
+            self._user_lm_size = None
 
     def _apply_user_evidence(
         self, ranking: list[str], request: dict[str, Any]

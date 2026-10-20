@@ -54,7 +54,6 @@ def test_scheduler_evaluates_semantic_provider_each_round():
         RawCommit,
         SemanticConsolidator,
     )
-
     calls = 0
     consolidators_seen: list[SemanticConsolidator | None] = []
 
@@ -62,7 +61,7 @@ def test_scheduler_evaluates_semantic_provider_each_round():
         def __init__(self) -> None:
             self.rounds = 0
 
-        def run_once(self, *, semantic_consolidator=None):
+        def run_once(self, *, semantic_consolidator=None, **_kwargs):
             self.rounds += 1
             consolidators_seen.append(semantic_consolidator)
             return ConsolidationReport()
@@ -133,11 +132,15 @@ def test_provider_reevaluates_credentials_each_round(
         profile_directory=tmp_path / "profiles",
         phrasebook_db=phrasebook,
     )
-    assert provider() is None
+    assert provider().consolidator is None
+    # 没有凭据 = 用户未开启云压缩 = 永久关闭，积压可判终态。
+    assert provider().permanently_unavailable is True
     state["key"] = "sk-live"
-    assert provider() is not None
+    assert provider().consolidator is not None
+    assert provider().permanently_unavailable is False
     state["key"] = ""
-    assert provider() is None
+    assert provider().consolidator is None
+    assert provider().permanently_unavailable is True
 
 
 def test_provider_rebuilds_domain_resolver_each_round(
@@ -147,6 +150,7 @@ def test_provider_rebuilds_domain_resolver_each_round(
     import sqlite3
 
     import rimeai_cloud_broker.__main__ as broker_main
+    from rimeai_daemon.consolidation import RawCommit
 
     monkeypatch.setattr(
         broker_main, "_usable_cloud_api_key", lambda: "sk-live"
@@ -175,13 +179,19 @@ def test_provider_rebuilds_domain_resolver_each_round(
         phrasebook_db=phrasebook,
     )
 
-    class Commit:
-        bundle_id = "com.example.app"
-        committed_text = "口径先对齐"
+    def commit() -> RawCommit:
+        return RawCommit(
+            id="1",
+            rowid=1,
+            committed_at_ms=0,
+            bundle_id="com.example.app",
+            pinyin="koujingxianduizhen",
+            committed_text="口径先对齐",
+        )
 
-    consolidator = provider()
+    consolidator = provider().consolidator
     assert consolidator is not None
-    assert consolidator([Commit()])
+    assert consolidator([commit()])
     assert (tmp_path / "profiles" / "profile-work.json").exists()
 
     with sqlite3.connect(phrasebook) as db:
@@ -189,7 +199,7 @@ def test_provider_rebuilds_domain_resolver_each_round(
             "UPDATE domain_map SET domain = 'chat'"
             " WHERE bundle_id = 'com.example.app'"
         )
-    consolidator = provider()
+    consolidator = provider().consolidator
     assert consolidator is not None
-    assert consolidator([Commit()])
+    assert consolidator([commit()])
     assert (tmp_path / "profiles" / "profile-chat.json").exists()
