@@ -38,12 +38,9 @@ extension RimeAIInputController {
                         forBundleIdentifier: bundleIdentifier
                     )
                 },
-                sendLocalInference: { request, completion in
-                    DaemonClient.shared.infer(
-                        request,
-                        completion: completion
-                    )
-                },
+                sendLocalInference: Self.makeDaemonSendClosure(
+                    controller: self
+                ),
                 cancelLocalInference: { requestID in
                     DaemonClient.shared.cancel(requestID: requestID)
                 },
@@ -100,12 +97,33 @@ extension RimeAIInputController {
                 }
             )
         )
-        // 神经臂迟到帧：daemon 连接层收到 sentence_late 后派发到本
-        // 控制器的流水线（主线程）。
-        DaemonClient.shared.onSentenceLateFrame = { [weak pipeline] frame in
-            pipeline?.applyNeuralSentenceLate(frame)
-        }
         return pipeline
+    }
+
+    /// 本地推断发送闭包：随发送登记迟到帧路由（reveal A-F1：按
+    /// requestID 路由到发起请求的 pipeline，帧到时一次性取回，
+    /// 不再依赖被最新 controller init 覆盖的单例单槽）。控制器在
+    /// init 尾部才把 pipeline 存入属性，故经 self 间接取用。
+    private static func makeDaemonSendClosure(
+        controller: RimeAIInputController
+    ) -> (
+        SemanticInferenceRequest,
+        @escaping @Sendable (SemanticInferenceResult?) -> Void
+    ) -> Void {
+        { [weak controller] request, completion in
+            if request.allowSentence,
+               let pipeline = controller?.pipeline {
+                DaemonClient.shared.registerSentenceLateRoute(
+                    requestID: request.requestID
+                ) { frame in
+                    pipeline.applyNeuralSentenceLate(frame)
+                }
+            }
+            DaemonClient.shared.infer(
+                request,
+                completion: completion
+            )
+        }
     }
 
     /// Forward the pipeline's diagnostic stream to the settings store and

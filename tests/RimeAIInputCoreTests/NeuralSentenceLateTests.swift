@@ -440,3 +440,169 @@ func neuralLateFrameSupersededByNewRequestRegistration() {
     )
     #expect(harness.appliedCandidates.count == 1)
 }
+
+// MARK: - reveal 修复轮（A-F2/C-F1、B-F1、A-F6）
+
+@Test @MainActor
+func syncResultArrivingAfterNeuralLateDoesNotOverwriteIt() {
+    // §4.3.1 冻结仲裁的反向序兜底：daemon 两臂无写序保证，同步帧
+    // 可能晚于神经迟到帧到达。神经已接管的建议位不得被同步 ok 帧
+    // 覆写（reveal A-F2/C-F1）。
+    let harness = NeuralLateHarness()
+    harness.typePinyin("qingzhixing", candidates: ["请执行"])
+    guard let request = harness.runLocalSendCycle() else {
+        Issue.record("local request must be sent")
+        return
+    }
+    let token = harness.composition.token
+    // 神经帧先到并接管建议位。
+    harness.pipeline.applyNeuralSentenceLate(
+        makeFrame(requestID: request.requestID, token: token)
+    )
+    guard case let .candidate(neuralText, neuralDecision, _) =
+        harness.pipeline.presentation
+    else {
+        Issue.record("neural frame must present a candidate first")
+        return
+    }
+    #expect(neuralText == "请执行命令")
+    #expect(neuralDecision == .sentenceSuggestion)
+    let appliedByNeural = harness.appliedCandidates.count
+
+    // 同步 ok 帧后到：只消费在途槽，不得覆写展示。
+    harness.pipeline.applyInferenceResult(
+        SemanticInferenceResult(
+            status: "ok",
+            requestID: request.requestID,
+            compositionID: token.compositionID.uuidString,
+            revision: token.revision,
+            appSessionID: token.appSessionID,
+            rankedCandidate: "请执行",
+            sentenceSuggestion: nil,
+            confidence: 0.8,
+            decision: .rankedCandidate
+        ),
+        requestID: request.requestID,
+        token: token
+    )
+    guard case let .candidate(text, decision, _) =
+        harness.pipeline.presentation
+    else {
+        Issue.record(
+            "late sync ok frame must not collapse the neural candidate"
+        )
+        return
+    }
+    #expect(text == "请执行命令")
+    #expect(decision == .sentenceSuggestion)
+    #expect(harness.appliedCandidates.count == appliedByNeural)
+    #expect(harness.diagnostics.contains(.supersededByNeuralLate))
+    // 在途槽已被消费：后续同请求帧按 stale 处理。
+    harness.pipeline.applyInferenceResult(
+        SemanticInferenceResult(
+            status: "ok",
+            requestID: request.requestID,
+            compositionID: token.compositionID.uuidString,
+            revision: token.revision,
+            appSessionID: token.appSessionID,
+            rankedCandidate: "请执行",
+            sentenceSuggestion: nil,
+            confidence: 0.8,
+            decision: .rankedCandidate
+        ),
+        requestID: request.requestID,
+        token: token
+    )
+    #expect(harness.diagnostics.suffix(2).contains(.staleResult))
+}
+
+@Test @MainActor
+func syncTimeoutAfterNeuralLateDoesNotClearPresentation() {
+    // 反向序的 timeout 形态：同步超时终态不得把已上屏的神经整句
+    // 塌成 .failure（reveal A-F2/C-F1 的第二种复现形态）。
+    let harness = NeuralLateHarness()
+    harness.typePinyin("qingzhixing", candidates: ["请执行"])
+    guard let request = harness.runLocalSendCycle() else {
+        Issue.record("local request must be sent")
+        return
+    }
+    let token = harness.composition.token
+    harness.pipeline.applyNeuralSentenceLate(
+        makeFrame(requestID: request.requestID, token: token)
+    )
+    harness.pipeline.applyInferenceResult(
+        SemanticInferenceResult(
+            status: "timeout",
+            requestID: request.requestID,
+            compositionID: token.compositionID.uuidString,
+            revision: token.revision,
+            appSessionID: token.appSessionID,
+            rankedCandidate: nil,
+            sentenceSuggestion: nil,
+            confidence: nil
+        ),
+        requestID: request.requestID,
+        token: token
+    )
+    guard case let .candidate(text, decision, _) =
+        harness.pipeline.presentation
+    else {
+        Issue.record(
+            "late sync timeout must not collapse the neural candidate"
+        )
+        return
+    }
+    #expect(text == "请执行命令")
+    #expect(decision == .sentenceSuggestion)
+    #expect(harness.diagnostics.contains(.supersededByNeuralLate))
+    #expect(harness.diagnostics.contains(.timeout) == false)
+}
+
+@Test @MainActor
+func neuralLateFrameWithWrongScriptFallsBackToSanitizedText() {
+    // reveal B-F1：神经臂可产出传统字形（基线 flips 有实例）；迟到帧
+    // 的 script-mismatch 与同步路径同款字形转写，而不是静默丢弃。
+    let harness = NeuralLateHarness()
+    harness.typePinyin("qingzhixing", candidates: ["请执行"])
+    guard let request = harness.runLocalSendCycle() else {
+        Issue.record("local request must be sent")
+        return
+    }
+    let token = harness.composition.token
+    harness.pipeline.applyNeuralSentenceLate(
+        makeFrame(
+            requestID: request.requestID,
+            token: token,
+            suggestion: "請執行命令"
+        )
+    )
+    guard case let .candidate(text, decision, _) =
+        harness.pipeline.presentation
+    else {
+        Issue.record("script-mismatch late frame must fall back to text")
+        return
+    }
+    #expect(text == "请执行命令")
+    #expect(decision == .sentenceSuggestion)
+    #expect(harness.appliedCandidates.last?.text == "请执行命令")
+    #expect(harness.diagnostics.contains(.resultShown))
+}
+
+@Test @MainActor
+func invalidateClearsNeuralLateExpectationSlot() {
+    // reveal A-F6：invalidate 与同步在途槽同位置清理神经臂期望槽，
+    // 不再依赖「每个调用点都恰好推进 revision」的隐式不变量。
+    let harness = NeuralLateHarness()
+    harness.typePinyin("qingzhixing", candidates: ["请执行"])
+    guard let request = harness.runLocalSendCycle() else {
+        Issue.record("local request must be sent")
+        return
+    }
+    let token = harness.composition.token
+    harness.pipeline.invalidate()
+    harness.pipeline.applyNeuralSentenceLate(
+        makeFrame(requestID: request.requestID, token: token)
+    )
+    #expect(harness.appliedCandidates.isEmpty)
+    #expect(harness.pipeline.presentation == .analyzing)
+}

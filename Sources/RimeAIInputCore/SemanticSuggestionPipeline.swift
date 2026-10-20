@@ -262,10 +262,13 @@ public final class SemanticSuggestionPipeline: @unchecked Sendable {
     // `applyLocalResult` for cross-punctuation sentence validation.
     var pendingRequestSegments: [PinyinSegment]?
     // 异步神经整句迟到帧（LM-001）：发送时登记的期望槽
-    // （latest-request-wins，迟到帧只消费登记过的 requestID）。
+    // （latest-request-wins，迟到帧只消费登记过的 requestID），
+    // 以及神经帧已成功应用的组合令牌（§4.3.1 冻结仲裁：后到的同步
+    // 帧在同令牌上不得覆写或清空已上屏的神经整句）。
     var neuralLateRequestID: String?
     var neuralLateToken: CompositionToken?
     var neuralLateSegments: [PinyinSegment]?
+    var neuralLateAppliedToken: CompositionToken?
     var pendingCloudRequestID: String?
     /// 分段向后重推（KBD-006）：防抖任务与在途请求 ID 集合。
     var suffixRefinementTask: (any SemanticSuggestionTask)?
@@ -327,6 +330,7 @@ public final class SemanticSuggestionPipeline: @unchecked Sendable {
         neuralLateRequestID = nil
         neuralLateToken = nil
         neuralLateSegments = nil
+        neuralLateAppliedToken = nil
     }
 
     /// No candidates and no mixed suggestion: collapse the slot to the
@@ -420,6 +424,10 @@ public final class SemanticSuggestionPipeline: @unchecked Sendable {
         }
         pendingRequestStartedAt = nil
         pendingRequestSegments = nil
+        neuralLateRequestID = nil
+        neuralLateToken = nil
+        neuralLateSegments = nil
+        neuralLateAppliedToken = nil
         if clearPresentation {
             presentation = .idle
             contextCharacterCount = 0

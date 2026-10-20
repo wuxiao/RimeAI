@@ -21,6 +21,7 @@ public enum RimeAIDiagnosticEvent: String, CaseIterable, Codable, Sendable {
     case resultShown = "result_shown"
     case resultRejected = "result_rejected"
     case staleResult = "stale_result"
+    case supersededByNeuralLate = "superseded_by_neural_late"
     case invalidResult = "invalid_result"
     case sameTopCandidate = "same_top_candidate"
     case insufficientCandidates = "insufficient_candidates"

@@ -151,6 +151,11 @@ public struct DaemonHelloRequest: Codable, Sendable {
             "sentence-late",
         ]
     ) {
+        // reveal B-F8（冻结的不对称）：客户端无条件通告 sentence-late
+        // 并随发送登记迟到帧期望槽；服务端只在自身配置了神经臂且
+        // 客户端也通告时才发帧。旧 daemon 从不发帧，客户端期望槽
+        // 由下一次请求/组合重置回收，fail-safe。不依据服务端回显
+        // 决定是否武装是有意为之（避免对 hello 时序的额外依赖）。
         self.clientID = clientID
         self.capabilities = capabilities
     }
@@ -810,7 +815,15 @@ public struct DaemonSentenceLateFrame: Codable, Sendable, Equatable {
             && appSessionID == token.appSessionID
     }
 
-    /// 结构门：非空单行整句 ≤30 字，置信度有限且在 [0, 1]。
+    /// 结构门：非空单行整句 ≤30 字、全部可打印（与同步路径
+    /// `CloudGeneratedSentencePolicy` 同口径：scalar > 0x20 且非
+    /// 0x7F），置信度有限且在 [0, 1]。
+    ///
+    /// 长度语义（reveal B-F3）：daemon 侧按 Unicode 码点计数
+    /// （Python `len()`），本侧按字形簇（`String.count`）计数；
+    /// 码点数 ≥ 字形簇数，故 daemon 门更严，不存在仅本侧放行的
+    /// 旁路。两侧上限值必须同步演进（daemon：
+    /// `neural_sentence.MAX_CHARACTERS`）。
     public var isValid: Bool {
         guard let sentenceSuggestion,
               let confidence,
@@ -823,10 +836,22 @@ public struct DaemonSentenceLateFrame: Codable, Sendable, Equatable {
             && sentenceSuggestion.count <= 30
             && !sentenceSuggestion.contains("\n")
             && !sentenceSuggestion.contains("\r")
+            && sentenceSuggestion.unicodeScalars.allSatisfy {
+                $0.value > 0x20 && $0.value != 0x7F
+            }
     }
 
     /// 转换为既有展示/应用路径可消费的 result 形态（decision 固定为
     /// sentenceSuggestion；迟到帧不携带重排候选）。
+    ///
+    /// reveal B-F2（量纲告警）：本转换刻意不走
+    /// `SemanticInferenceResult.isValid`——那条门包含 0.60 的云端
+    /// 整句置信度下限（`CloudGeneratedSentencePolicy
+    /// .minimumConfidence`），而神经臂的 confidence 是约束解码的
+    /// raw-softmax 几何均值（量纲完全不同，基线中约半数样本
+    /// <0.01），过那道门会被整帧丢弃。迟到帧结构校验用自身的
+    /// `isValid`；不得把本转换结果路由回 `gateLocalResult` /
+    /// `applyLocalResult`（那会重新引入 0.60 门）。
     public func asInferenceResult() -> SemanticInferenceResult {
         SemanticInferenceResult(
             status: "ok",

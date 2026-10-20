@@ -14,9 +14,16 @@ final class DaemonClient: @unchecked Sendable {
     typealias ReadyCompletion = @MainActor @Sendable (
         Result<Void, Error>
     ) -> Void
-    /// 异步神经整句迟到帧回调（主线程派发；由输入控制器接线到
-    /// 流水线的 applyNeuralSentenceLate）。
-    var onSentenceLateFrame: (@MainActor @Sendable (DaemonSentenceLateFrame) -> Void)?
+    /// 异步神经整句迟到帧路由（reveal A-F1：按 requestID 注册，
+    /// 帧到达时一次性取回；与 `pending` 表同队列变更、同生命周期
+    /// 清理——不再用被最新 controller init 覆盖的单例单槽，避免多
+    /// IMK controller 并存时迟到帧被路由到错误 pipeline 后静默
+    /// 丢弃）。容量有界：仅保留最近 16 条（流水线侧本就只接受
+    /// latest-request-wins，被逐出的都是必 stale 的旧请求）。
+    private static let sentenceLateRouteCapacity = 16
+    private var sentenceLateRoutes:
+        [String: @MainActor @Sendable (DaemonSentenceLateFrame) -> Void] = [:]
+    private var sentenceLateRouteOrder: [String] = []
 
     static let shared = DaemonClient()
 
@@ -110,6 +117,43 @@ final class DaemonClient: @unchecked Sendable {
             }
             ensureConnection()
         }
+    }
+
+    /// 为一次 allowSentence 请求登记迟到帧路由（发送闭包内在发送前
+    /// 调用；帧到达或连接拆除时消费/清除）。
+    func registerSentenceLateRoute(
+        requestID: String,
+        handler: @escaping @MainActor @Sendable (
+            DaemonSentenceLateFrame
+        ) -> Void
+    ) {
+        queue.async { [self] in
+            sentenceLateRoutes[requestID] = handler
+            sentenceLateRouteOrder.append(requestID)
+            while sentenceLateRouteOrder.count
+                > Self.sentenceLateRouteCapacity
+            {
+                let evicted = sentenceLateRouteOrder.removeFirst()
+                if evicted != requestID {
+                    sentenceLateRoutes.removeValue(forKey: evicted)
+                }
+            }
+        }
+    }
+
+    /// 帧到达时一次性取回路由（无路由 = 未登记/已消费/已逐出，
+    /// 流水线侧本就会按 stale 丢弃）。
+    private func takeSentenceLateRoute(
+        requestID: String?
+    ) -> (@MainActor @Sendable (DaemonSentenceLateFrame) -> Void)? {
+        guard let requestID,
+              let handler = sentenceLateRoutes
+                  .removeValue(forKey: requestID)
+        else {
+            return nil
+        }
+        sentenceLateRouteOrder.removeAll { $0 == requestID }
+        return handler
     }
 
     func invalidateCurrentGeneration(
@@ -310,14 +354,19 @@ private extension DaemonClient {
         }
         if result.type == "sentence_late" {
             // 神经臂迟到帧：独立于在途请求槽（同步 result 可能已消费
-            // 完成该 requestID），绑定校验在流水线侧执行。
+            // 完成该 requestID），按 requestID 路由到发起请求的
+            // pipeline（绑定校验仍在流水线侧执行）。
             if let frame = try? decoder.decode(
                 DaemonSentenceLateFrame.self,
                 from: line
             ) {
-                let handler = onSentenceLateFrame
-                DispatchQueue.main.async {
-                    handler?(frame)
+                let handler = takeSentenceLateRoute(
+                    requestID: frame.requestID
+                )
+                if let handler {
+                    DispatchQueue.main.async {
+                        handler(frame)
+                    }
                 }
             }
             return
@@ -414,6 +463,8 @@ private extension DaemonClient {
         modelArtifactID = "尚未连接"
         modelArtifacts = []
         daemonOfflineLock = false
+        sentenceLateRoutes.removeAll(keepingCapacity: false)
+        sentenceLateRouteOrder.removeAll(keepingCapacity: false)
         if recordFailure {
             circuitBreaker.recordFailure()
         }

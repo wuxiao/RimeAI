@@ -68,6 +68,14 @@ extension SemanticSuggestionPipeline {
             // slot.
             return
         }
+        if neuralLateAppliedToken == token {
+            // §4.3.1 冻结仲裁（reveal A-F2/C-F1）：两臂在 daemon 侧无
+            // 写序保证，同步帧可能晚于神经迟到帧到达。神经整句已在该
+            // 组合令牌上接管建议位后，后到的同步帧（含 ok 覆写与
+            // timeout/failure 塔塌）只消费在途槽，不改展示。
+            emit(.diagnostic(.supersededByNeuralLate))
+            return
+        }
         switch gateLocalResult(
             result,
             token: token,
@@ -310,27 +318,52 @@ extension SemanticSuggestionPipeline {
         let candidatePresentation = result.candidatePresentation(
             characterSet: dependencies.characterSet()
         )
-        guard case let .candidate(text, decision, confidence) =
-            candidatePresentation
-        else {
-            // 字形不符等终端态：迟到帧静默丢弃，保持既有展示。
+        switch candidatePresentation {
+        case let .candidate(text, decision, confidence):
+            guard dependencies.applySemanticCandidate(
+                text,
+                expectedToken,
+                decision,
+                segments
+            ) else {
+                emit(.diagnostic(.invalidResult))
+                return
+            }
+            presentation = .candidate(
+                text: text,
+                decision: decision,
+                confidence: confidence
+            )
+        case .scriptMismatch:
+            // reveal B-F1：与同步路径同款字形回退（繁→简就地转写），
+            // 仅无法转换时才丢弃——基线 flips 证明神经臂可产出传统
+            // 字形，静默丢弃会把可展示的整句丢掉。
+            guard let sanitized = SemanticCandidateScriptPolicy.sanitized(
+                text: result.displayCandidate,
+                characterSet: dependencies.characterSet()
+            ),
+                dependencies.applySemanticCandidate(
+                    sanitized,
+                    expectedToken,
+                    .sentenceSuggestion,
+                    segments
+                )
+            else {
+                emit(.diagnostic(.sentenceScriptMismatch))
+                emit(.suggestionSlotChanged)
+                return
+            }
+            presentation = .candidate(
+                text: sanitized,
+                decision: .sentenceSuggestion,
+                confidence: result.confidence ?? 0
+            )
+        default:
+            // 其余终端态：迟到帧静默丢弃，保持既有展示。
             emit(.suggestionSlotChanged)
             return
         }
-        guard dependencies.applySemanticCandidate(
-            text,
-            expectedToken,
-            decision,
-            segments
-        ) else {
-            emit(.diagnostic(.invalidResult))
-            return
-        }
-        presentation = .candidate(
-            text: text,
-            decision: decision,
-            confidence: confidence
-        )
+        neuralLateAppliedToken = expectedToken
         historySource = .localSemantic
         cloudCandidate = nil
         emit(.diagnostic(.resultShown))
