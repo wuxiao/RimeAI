@@ -150,6 +150,14 @@ if not service.is_file():
         f"missing neural sentence worker: {service}"
     )
 config["command"] = [str(service)]
+# The eval decoder config allows a 60s batch read timeout; the
+# interactive daemon must not inherit it — a wedged worker would
+# hold the single neural executor thread (and process teardown) for
+# up to a minute (reveal B-F5/C-F2 amplification). Cap it for
+# interactive deployment; eval keeps its own config untouched.
+config["timeout_ms"] = min(
+    int(config.get("timeout_ms", 10000)), 5000
+)
 Path(sys.argv[2]).write_text(
     json.dumps(config, ensure_ascii=False, indent=2) + "\n",
     encoding="utf-8",

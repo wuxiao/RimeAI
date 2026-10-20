@@ -176,8 +176,30 @@ Release builder 全流程已用 ONNX 路径重跑通过（preview-4-segment-focu
   多段（跨标点）请求 v1 不走神经臂，仍由同步 beam 与 KBD-006/007 分段
   机制服务。
 - **部署边界**：daemon 本机 LaunchAgent 路径（`--neural-sentence-config`，
-  安装脚本自动生成绝对路径配置）；Release builder/PyInstaller 打包
-  未包含 MLX 依赖，属后续任务。LM-002 SFT 未开始。
+  安装脚本自动生成绝对路径配置，交互部署的 worker 读超时封顶
+  5s——评测侧 60s 批量配置不随行）；Release builder/PyInstaller 打包
+  未包含 MLX 依赖，属后续任务；已安装 daemon 的神经臂 worker
+  （脚本/隔离 venv/模型）仍取自 repo checkout，路径在 hello
+  artifacts 的 path 字段可巡检（reveal C-F5 冻结注记）。LM-002 SFT
+  未开始。
+- **reveal 对抗审查加固（2026-10-20，跨家族三审 + 交叉验证）**：
+  (1) 仲裁反向序兑底——两臂在 daemon 侧无写序保证，同步帧可能晚于
+  神经帧到达；客户端在同令牌神经帧已应用后，后到的同步 ok/timeout/
+  failure 帧只消费在途槽不改展示（superseded_by_neural_late 事件）；
+  (2) 迟到帧改按 requestID 路由（发送时登记、帧到一次性取回，
+  容量 16），消除多 IMK controller 并存时单例单槽被最新 init 覆盖的
+  静默丢帧；(3) 交付预算 deadline 下传 worker 读（慢 decode 在预算处
+  释放单线程执行器槽）+ 提交前 revision 过期预检；worker stderr 不再
+  丢弃、遥测 stats 不再死请求；(4) 服务生命周期：close 先 terminate
+  （EOF 唤醒阻塞读）后关管道、kill 后 wait 收尸、打断不计入熔断；
+  冷启动首读豁免窗口（30s）；连续 5 轮熔断冷却后永久弃权；
+  (5) 迟到帧 script-mismatch 复用同步路径的字形转写；结构门双侧
+  补齐（server 层 min_confidence、Swift 侧可打印字符；长度不变式：
+  Python 码点计数 ≥ Swift 字形簇计数，无越界旁路）；神经置信度与
+  云端 0.60 门量纲差异已在 DaemonProtocol 文档冻结（不得把迟到帧
+  路由回 isValid 门）；(6) worker per-request 异常 fail-closed 不再
+  崩进程，请求后回滚共享缓存释放 beam 尾行（seed+context 前缀资产
+  保留）。
 
 ### 4.4 领域词库（schema v2）
 
