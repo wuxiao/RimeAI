@@ -2,6 +2,8 @@
 naive re-prefill, and persistent-prefix determinism — all with fake
 backends, no mlx import (the repo venv does not carry mlx)."""
 
+import json
+
 import pytest
 
 from rimeai_runtime.constrained_worker_protocol import (
@@ -16,6 +18,7 @@ from rimeai_runtime.mlx_worker import (
     RollbackBackend,
     _SeedPathScorer,
     common_prefix_length,
+    handle_request_line,
     model_artifact_id,
 )
 
@@ -275,3 +278,59 @@ def test_generate_response_envelope() -> None:
         stats={"cache_fed_tokens": 3},
     )
     assert with_stats["stats"] == {"cache_fed_tokens": 3}
+
+
+# --------------------------------------------------------------------------
+# reveal 修复轮：A-F4 per-request 兜底 / C-F7 请求后回滚
+
+
+def test_handle_request_line_fails_closed_on_internal_error() -> None:
+    # reveal A-F4：缓存合同违约/内部异常不再崩掉 worker——回空建议
+    # （fail-closed 弃权），进程继续服务；协议级错误仍退出。
+    class _ExplodingEngine:
+        def handle_request(self, request: dict) -> dict:
+            raise RuntimeError("cache contract violation")
+
+    class _ProtocolEngine:
+        def handle_request(self, request: dict) -> dict:
+            raise GenerateRequestError("bad request shape")
+
+    response = handle_request_line(
+        _ExplodingEngine(), json.dumps(dict(_request()))
+    )
+    assert response is not None
+    assert response["suggestion"] == ""
+    assert response["confidence"] == 0.0
+    assert response["request_id"] == "req-1"
+    assert response["model_artifact_id"] == model_artifact_id()
+
+    with pytest.raises(GenerateRequestError):
+        handle_request_line(
+            _ProtocolEngine(), json.dumps(dict(_request()))
+        )
+    assert handle_request_line(_ExplodingEngine(), "not json") is None
+
+
+def test_post_request_rollback_releases_beam_tail_rows() -> None:
+    # reveal C-F7：请求结束后共享缓存回滚到 seed+context 端点——
+    # beam 尾行/KV 不跨请求常驻，seed+context 行保留供下一请求复用。
+    backend = _KvSimulatingBackend()
+    cache = PrefixRollbackCache(backend)
+    seed = [1773, 9, 40]
+    scorer = _SeedPathScorer(cache, seed)
+    # 一次"请求"：seed + context + 若干 beam 路径。
+    for path in ([11, 4, 7, 2], [11, 7, 2, 5, 6]):
+        scorer(path)
+    # 缓存停在最后一个 beam 路径的末端（seed + 最长路径）。
+    assert len(cache.tokens) == len(seed) + 5
+    # handle_request 的收尾回滚：distribution(seed) 恰是纯裁剪。
+    stats_before = dict(cache.stats)
+    cache.distribution(seed)
+    assert cache.tokens == seed
+    # 回滚发生在 stats 快照之后：请求内遥测不受收尾影响。
+    assert cache.stats["cache_trim_operations"] == (
+        stats_before["cache_trim_operations"] + 1
+    )
+    # 下一请求从 seed 端点继续：只需喂自己的增量。
+    scorer([11, 4])
+    assert backend.feed_deltas[-1] == [11, 4]

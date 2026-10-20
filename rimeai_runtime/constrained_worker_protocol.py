@@ -14,8 +14,10 @@ Protocol (schema_version 1, one JSON object per line):
              confidence [0,1], model_artifact_id, stats? {...}}
 
 `suggestion` is "" when no constrained suggestion survives the final
-fuzzy gate. `stats` is optional engine telemetry (prefill/cache counters)
-consumed by the deployment service; the frozen eval parser ignores it.
+fuzzy gate. `stats` is optional engine telemetry (prefill/cache
+counters) requested by evaluation tooling; the daemon's deployment
+service deliberately does not request it and drops it from the
+payload (reveal B-F6: dead telemetry).
 """
 from __future__ import annotations
 

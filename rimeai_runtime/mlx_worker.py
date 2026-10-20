@@ -33,6 +33,7 @@ import importlib
 import json
 import os
 import sys
+import traceback
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from pathlib import Path
@@ -252,7 +253,7 @@ class _ProbabilityView:
 
 
 class MlxConstrainedEngine:
-    """Loads the pinned 4-bit model and decodes constrained sentences."""
+    """Loads the pinned 8-bit model and decodes constrained sentences."""
 
     def __init__(
         self,
@@ -343,6 +344,13 @@ class MlxConstrainedEngine:
         stats: dict[str, Any] | None = None
         if want_stats:
             stats = dict(self.cache.stats)
+        # Reveal C-F7: roll the shared cache back to the seed+context
+        # endpoint after each request. The beam-tail rows (and their KV
+        # entries, roughly 300KB per position of full-vocab logits) are
+        # never reused by the next request, while the seed+context rows
+        # ARE the cross-request prefix asset — keep exactly those.
+        # Rolling back now also pre-does the next request's rollback.
+        self.cache.distribution(seed_ids)
         return generate_response(
             request_id=request_id,
             suggestion=result.text,
@@ -363,6 +371,43 @@ class _SeedPathScorer:
         return self._cache.distribution(
             self._seed_ids + [int(token) for token in step_token_ids]
         )
+
+
+def handle_request_line(engine: Any, line: str) -> dict[str, Any] | None:
+    """Handles one request line; returns the response dict, or None
+    when the line is not valid JSON (protocol error → exit).
+
+    Reveal A-F4: a per-request internal failure (cache contract
+    violation, tokenizer edge input) fails CLOSED with an empty
+    suggestion instead of crashing the worker — a crash would cost a
+    cold restart (model load + dictionary index, seconds) and, under a
+    stream of bad requests, a crash loop. Only protocol-level errors
+    (invalid JSON) exit.
+    """
+    try:
+        request = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    request_id = (
+        request.get("request_id")
+        if isinstance(request, dict)
+        else None
+    )
+    try:
+        return engine.handle_request(request)
+    except GenerateRequestError:
+        # Protocol-level validation errors keep the frozen torch
+        # worker's exit(2) contract (main handles them).
+        raise
+    except Exception:
+        traceback.print_exc()
+        return {
+            "schema_version": 1,
+            "request_id": request_id,
+            "suggestion": "",
+            "confidence": 0.0,
+            "model_artifact_id": model_artifact_id(),
+        }
 
 
 def main() -> int:
@@ -388,18 +433,20 @@ def main() -> int:
         return 2
     for line in sys.stdin:
         try:
-            request = json.loads(line)
-        except json.JSONDecodeError:
+            response = handle_request_line(engine, line)
+        except GenerateRequestError as error:
+            print(
+                f"constrained-mlx: {error}",
+                file=sys.stderr,
+                flush=True,
+            )
+            return 2
+        if response is None:
             print(
                 "constrained-mlx: request is not valid JSON",
                 file=sys.stderr,
                 flush=True,
             )
-            return 2
-        try:
-            response = engine.handle_request(request)
-        except GenerateRequestError as error:
-            print(f"constrained-mlx: {error}", file=sys.stderr, flush=True)
             return 2
         sys.stdout.write(
             json.dumps(
