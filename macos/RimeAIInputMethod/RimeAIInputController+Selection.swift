@@ -55,20 +55,13 @@ extension RimeAIInputController {
             compositionInput(originalInput, client: client)
             return
         }
-        let appliedTransition: CandidateSelectionTransition
-        if let rawLeadPrefix, !rawLeadPrefix.isEmpty {
-            guard let adjusted = CandidateSelectionTransition(
-                originalInput: originalInput,
-                committedText: rawLeadPrefix + transition.committedText,
-                remainingInput: transition.remainingInput ?? ""
-            ) else {
-                settings.record(.invalidResult)
-                compositionInput(originalInput, client: client)
-                return
-            }
-            appliedTransition = adjusted
-        } else {
-            appliedTransition = transition
+        guard let appliedTransition = appliedSelectionTransition(
+            transition,
+            originalInput: originalInput,
+            rawLeadPrefix: rawLeadPrefix,
+            client: client
+        ) else {
+            return
         }
         // KBD-006：焦点在中间段时，数字选词只确认焦点段（Rime 学习
         // 照常），焦点自动右移到下一拼音段；后缀保持可编辑，历史留
@@ -85,6 +78,16 @@ extension RimeAIInputController {
             } else {
                 settings.record(.mainAccepted)
             }
+            return
+        }
+        // KBD-008：焦点在末段时的部分选词——确认前缀不上屏，保留
+        // 预编辑区可 ← 回修；校验失败回退下方既有提交路径。
+        if retainPartialSelectionInComposition(
+            appliedTransition,
+            acceptedViaSemanticCandidate: acceptedViaSemanticCandidate,
+            semanticDecision: semanticDecision,
+            client: client
+        ) {
             return
         }
         let historySource = acceptedViaSemanticCandidate
@@ -115,6 +118,61 @@ extension RimeAIInputController {
         } else {
             settings.record(.mainAccepted)
         }
+    }
+
+    /// 合成候选（韵母首字母前导 + 余串候选）：Rime 只见去掉前导的
+    /// 余串（选词与学习以余串为准），选后把前导加回定稿文本；非合
+    /// 成候选（无前导）原样返回。transition 校验失败（剩余拼音与原
+    /// 始输入不一致）时复位组合状态并返回 nil，调用方终止本次选词。
+    private func appliedSelectionTransition(
+        _ transition: CandidateSelectionTransition,
+        originalInput: String,
+        rawLeadPrefix: String?,
+        client: any IMKTextInput
+    ) -> CandidateSelectionTransition? {
+        guard let rawLeadPrefix, !rawLeadPrefix.isEmpty else {
+            return transition
+        }
+        guard let adjusted = CandidateSelectionTransition(
+            originalInput: originalInput,
+            committedText: rawLeadPrefix + transition.committedText,
+            remainingInput: transition.remainingInput ?? ""
+        ) else {
+            settings.record(.invalidResult)
+            compositionInput(originalInput, client: client)
+            return nil
+        }
+        return adjusted
+    }
+
+    /// KBD-008：焦点在末段时的部分选词（有未消费剩余拼音）——
+    /// 确认前缀不上屏，以定稿文本保留在预编辑区（可 ← 回修，修正
+    /// 定稿后由 KBD-006 重推其余段），剩余拼音成为新活跃段；历史
+    /// 与热词留待最终整句提交一次落库（D2/D3）。段写入校验失败时
+    /// 返回 false，调用方回退既有提交路径（fail-safe，与旧行为一
+    /// 致）。
+    private func retainPartialSelectionInComposition(
+        _ transition: CandidateSelectionTransition,
+        acceptedViaSemanticCandidate: Bool,
+        semanticDecision: SemanticInferenceDecision?,
+        client: any IMKTextInput
+    ) -> Bool {
+        guard let remainingInput = transition.remainingInput,
+              composition.retainFocusedSegmentAsPrefix(
+                  finalizedText: transition.committedText,
+                  remainingPinyin: remainingInput
+              )
+        else {
+            return false
+        }
+        invalidateInference(clearPresentation: true)
+        compositionInput(composition.pinyin, client: client)
+        if acceptedViaSemanticCandidate {
+            recordSemanticAcceptance(decision: semanticDecision)
+        } else {
+            settings.record(.mainAccepted)
+        }
+        return true
     }
 
     func selectSemanticCandidate(

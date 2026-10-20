@@ -326,6 +326,46 @@ public struct CompositionState: Sendable {
         return true
     }
 
+    /// 部分选词段保留（KBD-008）：焦点段以所选候选定稿并入前缀
+    /// （连同焦点字面量运行），未消费的剩余拼音成为新的活跃段，
+    /// 焦点随新活跃段留在末段——确认前缀不上屏，保留在预编辑区
+    /// 可 ← 回修（修正定稿后由 KBD-006 重推其余段），历史与热词
+    /// 记账留待最终整句提交一次落库。与 `moveFocusRight` 的区别：
+    /// 后缀不存在，新活跃段由部分选词的剩余拼音提供，段拼音只
+    /// 记被消费的前缀（否则历史拼音会重复计入剩余段）。剩余拼
+    /// 音非法（空、含 [a-z'] 之外字节、非焦点段拼音后缀或不短于
+    /// 焦点段）时返回 false，调用方回退既有上屏路径（fail-safe）。
+    @discardableResult
+    public mutating func retainFocusedSegmentAsPrefix(
+        finalizedText: String,
+        remainingPinyin: String
+    ) -> Bool {
+        guard !finalizedText.isEmpty,
+              !remainingPinyin.isEmpty,
+              remainingPinyin.count < pinyin.count,
+              pinyin.hasSuffix(remainingPinyin),
+              remainingPinyin.utf8.allSatisfy({ byte in
+                  byte == 0x27 || (0x61 ... 0x7a).contains(byte)
+              })
+        else {
+            return false
+        }
+        let consumed = String(pinyin.dropLast(remainingPinyin.count))
+        prefixSegments.append(
+            .committedPinyin(
+                pinyin: consumed,
+                committedText: finalizedText
+            )
+        )
+        prefixSegments.append(
+            contentsOf: focusedSeparatorLiterals.map(CompositionPrefixSegment.literal)
+        )
+        focusedSeparatorLiterals = []
+        pinyin = remainingPinyin
+        afterFocusMoved()
+        return true
+    }
+
     /// 焦点移动后的公共收敛：编辑目标变更，候选、分页、语义候选与
     /// 飞行中 token 全部失效（compositionID 重建）。
     private mutating func afterFocusMoved() {
