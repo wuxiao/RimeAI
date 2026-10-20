@@ -10,25 +10,49 @@ request's composition/revision.
 Fail-closed by construction: circuit opens after consecutive failures,
 ineligible request shapes abstain without touching the worker, and any
 protocol deviation drops the suggestion (never the connection).
+
+Thread contract (reveal B-F4/C-F3): ``decode`` runs on the single
+neural executor thread (or the test thread); ``close`` may be called
+concurrently from the event loop (daemon shutdown) and from the
+executor thread itself (circuit breaker). A blocked reader is released
+by terminating the child first (pipe EOF wakes the read) and only then
+closing the pipes; after ``close`` the service is terminally closed and
+``decode`` abstains WITHOUT recording a failure (interruption is not a
+worker failure). All shared attribute transitions happen under
+``_state_lock``.
 """
 from __future__ import annotations
 
 import contextlib
 import json
 import os
-import selectors
+import select
 import subprocess
+import threading
 from pathlib import Path
 from time import monotonic
 from typing import Any
 
 CONSECUTIVE_FAILURE_LIMIT = 3
 COOLDOWN_SECONDS = 30.0
+# Reveal C-F6: after this many full cooldown cycles without a single
+# delivered sentence, the arm disables itself instead of oscillating
+# (spawn → kill → cooldown) forever on an unattended LaunchAgent.
+COOLDOWN_DISABLE_CYCLES = 5
+# Reveal C-F6: a freshly spawned worker may legitimately spend seconds
+# loading the model (measured cold start ~2.5s + dictionary index).
+# The first read after a spawn gets this grace window; the delivery
+# budget is unaffected (late frames still only leave within budget).
+COLD_START_GRACE_SECONDS = 30.0
 MAX_CANDIDATES = 10
 MAX_CHARACTERS = 30
 DEFAULT_TIMEOUT_MS = 10_000
 DEFAULT_BUDGET_MS = 1_200
 DEFAULT_MIN_CONFIDENCE = 0.0
+# Reveal A-F3/B-F6: a response line longer than this without a newline
+# is a protocol violation, not something to buffer unbounded.
+MAX_RESPONSE_LINE_BYTES = 1 << 20
+_READ_CHUNK_BYTES = 65536
 
 
 class NeuralSentenceConfigurationError(ValueError):
@@ -92,12 +116,12 @@ def load_neural_sentence_config(path: Path) -> dict[str, Any]:
         or not 0 <= min_confidence <= 1
     ):
         raise NeuralSentenceConfigurationError(
-            "neural sentence min_confidence must be a number from 0 to 1"
+            "neural sentence config min_confidence must be a number from 0 to 1"
         )
     model_type = config.get("model_type")
     if model_type is not None and not isinstance(model_type, str):
         raise NeuralSentenceConfigurationError(
-            "neural sentence model_type must be a string when present"
+            "neural sentence config model_type must be a string when present"
         )
     return config
 
@@ -120,7 +144,12 @@ def _eligible_request(request: dict[str, Any]) -> bool:
 
 
 class NeuralSentenceService:
-    """One long-lived worker subprocess behind a circuit breaker."""
+    """One long-lived worker subprocess behind a circuit breaker.
+
+    ``timeout_ms`` bounds a single worker read (the deployment config
+    keeps it in the low seconds); ``budget_ms`` is the delivery deadline
+    the daemon passes down so a slow decode releases the executor slot
+    at the budget instead of occupying it for ``timeout_ms``."""
 
     def __init__(
         self,
@@ -139,10 +168,19 @@ class NeuralSentenceService:
             config.get("min_confidence", DEFAULT_MIN_CONFIDENCE)
         )
         self.model_type: str | None = config.get("model_type")
+        self._state_lock = threading.Lock()
         self._process: subprocess.Popen[bytes] | None = None
-        self._selector: selectors.BaseSelector | None = None
+        self._read_buffer = bytearray()
+        # Worker is "warm" once it answered once since spawning; the
+        # first read after a spawn gets the cold-start grace window.
+        self._warm = False
+        self._cold_start_until = 0.0
+        self._closing = False
+        self._closed = False
+        self._disabled = False
         self._consecutive_failures = 0
         self._cooldown_until = 0.0
+        self._cooldown_cycles = 0
         self.stats: dict[str, Any] = {
             "requests": 0,
             "abstained": 0,
@@ -175,86 +213,180 @@ class NeuralSentenceService:
             with contextlib.suppress(OSError):
                 process.stdout.close()
 
-    def close(self) -> None:
-        process = self._process
-        self._process = None
-        if self._selector is not None:
-            self._selector.close()
-            self._selector = None
-        if process is not None:
-            self._close_process(process)
-            if process.poll() is None:
+    def _terminate_process(
+        self, process: subprocess.Popen[bytes]
+    ) -> None:
+        """Terminate → bounded wait → kill → reap (reveal B-F4/C-F3:
+        SIGTERM makes the child exit, the pipe EOF wakes a reader
+        blocked on the fd, and the post-kill wait() prevents zombies)."""
+        if process.poll() is None:
+            with contextlib.suppress(OSError):
                 process.terminate()
-                try:
-                    process.wait(timeout=2)
-                except subprocess.TimeoutExpired:
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                with contextlib.suppress(OSError):
                     process.kill()
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    process.wait(timeout=2)
+        self._close_process(process)
+
+    def _recycle(self) -> None:
+        """Breaker path: tear down the current worker but keep the
+        service OPEN for a later respawn after cooldown (close() is the
+        terminal shutdown; recycling must not latch it)."""
+        with self._state_lock:
+            process = self._process
+            self._process = None
+        if process is not None:
+            self._terminate_process(process)
+
+    def close(self) -> None:
+        """Idempotent terminal teardown; safe to call from any thread
+        while a decode is blocked on the worker pipe."""
+        with self._state_lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._closing = True
+            process = self._process
+            self._process = None
+        if process is not None:
+            self._terminate_process(process)
 
     def _record_failure(self) -> None:
         self.stats["failures"] += 1
         self._consecutive_failures += 1
         if self._consecutive_failures >= CONSECUTIVE_FAILURE_LIMIT:
             self._cooldown_until = monotonic() + COOLDOWN_SECONDS
-            self.close()
+            self._cooldown_cycles += 1
+            self._consecutive_failures = 0
+            if self._cooldown_cycles >= COOLDOWN_DISABLE_CYCLES:
+                # Reveal C-F6: permanent abstain after enough unanswered
+                # cooldown cycles; the daemon keeps serving sync results.
+                self._disabled = True
+                self._recycle()
+            else:
+                self._recycle()
 
     def _worker(self) -> subprocess.Popen[bytes] | None:
-        if monotonic() < self._cooldown_until:
-            return None
-        if self._process is not None and self._process.poll() is None:
-            return self._process
-        if self._process is not None:
-            # A crashed worker's pipes must be closed before the
-            # replacement spawns (ResourceWarning discipline); the old
-            # selector leaks its kqueue fd otherwise.
-            self._close_process(self._process)
-            self._process = None
-            if self._selector is not None:
-                self._selector.close()
-                self._selector = None
-        try:
-            self._process = subprocess.Popen(
-                self._command,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                env=dict(os.environ),
-                cwd=str(Path(self._command[0]).resolve().parent.parent),
-            )
-            self._selector = selectors.DefaultSelector()
-            if self._process.stdout is None:
-                self._record_failure()
+        spawn_failed = False
+        process: subprocess.Popen[bytes] | None = None
+        with self._state_lock:
+            if self._closed or self._disabled:
                 return None
-            self._selector.register(
-                self._process.stdout, selectors.EVENT_READ
-            )
-            self.stats["worker_restarts"] += 1
-        except OSError:
+            if monotonic() < self._cooldown_until:
+                return None
+            if self._process is not None and self._process.poll() is None:
+                return self._process
+            if self._process is not None:
+                # A crashed worker's pipes must be closed before the
+                # replacement spawns (ResourceWarning discipline).
+                self._close_process(self._process)
+                self._process = None
+            try:
+                process = subprocess.Popen(
+                    self._command,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    # Reveal B-F6/C-F4: keep worker diagnostics (cold
+                    # start timing, engine errors) on the daemon's own
+                    # stderr instead of discarding them. DEVNULL also
+                    # deadlocks a chatty worker; inherit never does.
+                    stderr=None,
+                    env=dict(os.environ),
+                    cwd=str(
+                        Path(self._command[0]).resolve().parent.parent
+                    ),
+                )
+            except OSError:
+                spawn_failed = True
+            else:
+                self._process = process
+                self._read_buffer = bytearray()
+                self._warm = False
+                self._cold_start_until = (
+                    monotonic() + COLD_START_GRACE_SECONDS
+                )
+                self.stats["worker_restarts"] += 1
+        # Failure recording (which may call close()) stays outside the
+        # state lock: threading.Lock is not reentrant.
+        if spawn_failed:
             self._record_failure()
             return None
-        return self._process
+        return process
 
-    def _readline(self, timeout_seconds: float) -> str | None:
-        process = self._process
-        selector = self._selector
-        if process is None or selector is None or process.stdout is None:
+    def _read_response_line(
+        self,
+        process: subprocess.Popen[bytes],
+        deadline: float,
+    ) -> str | None:
+        """Bounded line read (reveal A-F3): os.read + line accumulator,
+        bounded by ``deadline`` and ``MAX_RESPONSE_LINE_BYTES``. Never
+        calls the unbounded blocking ``readline`` after ``select``.
+
+        Returns the stripped line, or None on timeout / worker exit /
+        overlong line / interruption. Raises no exceptions; callers
+        classify timeout/EOF as worker failure, closed-service as
+        interruption."""
+        if process.stdout is None:
             return None
-        deadline = monotonic() + timeout_seconds
+        fd = process.stdout.fileno()
+        buffer = self._read_buffer
         while True:
+            newline = buffer.find(b"\n")
+            if newline >= 0:
+                line = bytes(buffer[:newline])
+                del buffer[: newline + 1]
+                return line.decode("utf-8", errors="strict").strip()
+            if len(buffer) > MAX_RESPONSE_LINE_BYTES:
+                return None
             remaining = deadline - monotonic()
             if remaining <= 0:
                 return None
-            events = selector.select(timeout=remaining)
-            if not events:
+            try:
+                ready, _, _ = select.select([fd], [], [], remaining)
+            except (OSError, ValueError):
                 return None
-            line = process.stdout.readline()
-            if not line:
+            if not ready:
+                return None
+            try:
+                chunk = os.read(fd, _READ_CHUNK_BYTES)
+            except (OSError, ValueError):
+                return None
+            if not chunk:
                 # Worker exited mid-request.
                 return None
-            return line.decode("utf-8", errors="strict").strip()
+            buffer.extend(chunk)
 
-    def decode(self, request: dict[str, Any]) -> dict[str, Any] | None:
+    def _is_interruption(
+        self, process: subprocess.Popen[bytes]
+    ) -> bool:
+        """A read/write failure while the service is closing (or the
+        process was swapped) is an interruption, not a worker failure
+        (reveal B-F4: miscounting interruptions trips the breaker)."""
+        with self._state_lock:
+            return (
+                self._closing
+                or self._closed
+                or self._process is not process
+            )
+
+    def decode(
+        self,
+        request: dict[str, Any],
+        *,
+        deadline: float | None = None,
+    ) -> dict[str, Any] | None:
         """Runs one decode; returns the gated suggestion payload or None
-        when the arm abstains. Never raises for expected failures."""
+        when the arm abstains. Never raises for expected failures.
+
+        ``deadline`` (monotonic seconds) is the daemon's delivery
+        budget: the worker read stops at the deadline so a slow decode
+        releases the executor slot at budget time instead of occupying
+        it for the full ``timeout_ms`` (reveal B-F5/C-F2). A cold
+        worker's first read may exceed the deadline up to the cold-start
+        grace window (loading the model is not a decode failure)."""
         self.stats["requests"] += 1
         if not request.get("allow_sentence") or not _eligible_request(
             request
@@ -266,15 +398,26 @@ class NeuralSentenceService:
             "task": "generate_sentence",
             "request_id": request["request_id"],
             "context": request.get("context", ""),
+            # The server already validates 1..MAX_CANDIDATES entries;
+            # the worker protocol's own bound (20, frozen torch-worker
+            # compatibility) is deliberately looser.
             "pinyin": request["pinyin"],
-            "candidates": request["candidates"][:MAX_CANDIDATES],
+            "candidates": request["candidates"],
             "max_characters": MAX_CHARACTERS,
-            "stats": True,
         }
         process = self._worker()
         if process is None or process.stdin is None:
             self.stats["abstained"] += 1
             return None
+        now = monotonic()
+        read_deadline = (
+            deadline if deadline is not None
+            else now + self._timeout_seconds
+        )
+        if not self._warm:
+            read_deadline = max(
+                read_deadline, self._cold_start_until
+            )
         try:
             process.stdin.write(
                 (
@@ -288,12 +431,18 @@ class NeuralSentenceService:
                 ).encode("utf-8")
             )
             process.stdin.flush()
-            line = self._readline(self._timeout_seconds)
+            line = self._read_response_line(process, read_deadline)
         except (OSError, ValueError):
+            if self._is_interruption(process):
+                self.stats["abstained"] += 1
+                return None
             self._record_failure()
             self.stats["abstained"] += 1
             return None
         if line is None:
+            if self._is_interruption(process):
+                self.stats["abstained"] += 1
+                return None
             self._record_failure()
             self.stats["abstained"] += 1
             return None
@@ -309,6 +458,7 @@ class NeuralSentenceService:
             self._record_failure()
             self.stats["abstained"] += 1
             return None
+        self._warm = True
         self._consecutive_failures = 0
         suggestion = response.get("suggestion")
         confidence = response.get("confidence")
@@ -333,6 +483,5 @@ class NeuralSentenceService:
             "suggestion": suggestion,
             "confidence": float(confidence),
             "model_artifact_id": self.stats.get("model_artifact_id"),
-            "stats": response.get("stats"),
         }
         return payload

@@ -62,6 +62,51 @@ def _write_worker_script(directory: Path, behavior: str) -> Path:
                     continue
                 elif behavior == "exit":
                     sys.exit(0)
+                elif behavior == "silent":
+                    # Reads stdin but never answers (deadline/wedge probe).
+                    import time
+                    time.sleep(30)
+                    continue
+                elif behavior == "echo_then_silent":
+                    import time
+                    if not getattr(sys.modules[__name__], "_answered", False):
+                        sys.modules[__name__]._answered = True
+                        response = {{
+                            "schema_version": 1,
+                            "request_id": request["request_id"],
+                            "suggestion": "请执行命令",
+                            "confidence": 0.5,
+                            "model_artifact_id": "stub:mlx-8bit:v3",
+                        }}
+                    else:
+                        time.sleep(30)
+                        continue
+                elif behavior == "overlong":
+                    sys.stdout.write("x" * (2 * 1024 * 1024))
+                    sys.stdout.flush()
+                    continue
+                elif behavior == "slow_first":
+                    import time
+                    time.sleep(0.4)
+                    response = {{
+                        "schema_version": 1,
+                        "request_id": request["request_id"],
+                        "suggestion": "请执行命令",
+                        "confidence": 0.5,
+                        "model_artifact_id": "stub:mlx-8bit:v3",
+                    }}
+                elif behavior == "assert_no_stats":
+                    if "stats" in request:
+                        sys.stdout.write("not json\\n")
+                        sys.stdout.flush()
+                        continue
+                    response = {{
+                        "schema_version": 1,
+                        "request_id": request["request_id"],
+                        "suggestion": "请执行命令",
+                        "confidence": 0.5,
+                        "model_artifact_id": "stub:mlx-8bit:v3",
+                    }}
                 sys.stdout.write(
                     json.dumps(response, ensure_ascii=False) + "\\n"
                 )
@@ -168,7 +213,8 @@ def test_service_decodes_and_passes_payload_through(tmp_path: Path) -> None:
         assert payload["suggestion"] == "请执行命令"
         assert payload["confidence"] == 0.5
         assert payload["model_artifact_id"] == "stub:mlx-8bit:v3"
-        assert payload["stats"] == {"cache_fed_tokens": 3}
+        # reveal B-F6：部署服务不再请求/透传 worker 遥测。
+        assert "stats" not in payload
         assert service.stats["delivered"] == 1
         artifacts = service.artifacts()
         assert artifacts[0]["role"] == "neural_sentence"
@@ -282,7 +328,12 @@ class StubNeuralService(NeuralSentenceService):
         self.seen_revisions: list[int] = []
         self.stats["model_artifact_id"] = "stub:mlx-8bit:v3"
 
-    def decode(self, request: dict) -> dict | None:
+    def decode(
+        self,
+        request: dict,
+        *,
+        deadline: float | None = None,
+    ) -> dict | None:
         self.seen_revisions.append(request["revision"])
         if self._delay:
             loop_delay = self._delay
@@ -295,7 +346,6 @@ class StubNeuralService(NeuralSentenceService):
             "suggestion": self._suggestion,
             "confidence": 0.5,
             "model_artifact_id": "stub:mlx-8bit:v3",
-            "stats": None,
         }
 
 
@@ -588,3 +638,198 @@ def test_abstaining_service_sends_no_late_frame():
 
     with tempfile.TemporaryDirectory(prefix="rai-", dir="/tmp") as directory:
         asyncio.run(scenario(Path(directory)))
+
+
+# --------------------------------------------------------------------------
+# reveal 修复轮：deadline 下传 / 有界行读 / 关闭唤醒 / 冷启动豁免 /
+# 熔断上限 / server 侧 min_confidence / 不请求遥测
+
+
+def test_decode_deadline_bounds_blocked_read(tmp_path: Path) -> None:
+    # reveal B-F5/C-F2：交付预算下传 worker 读——阻塞的 decode 在
+    # deadline 处释放执行器槽，而不是占满 timeout_ms。（首次冷启动
+    # 读有独立豁免窗口，见 cold_start 测试；这里先热身再测稳态。）
+    script = _write_worker_script(tmp_path, "echo_then_silent")
+    service = NeuralSentenceService(
+        _config([sys.executable, str(script)], timeout_ms=5000),
+        project_root=tmp_path,
+    )
+    try:
+        warmup = service.decode(_request())
+        assert warmup is not None
+        started = monotonic()
+        payload = service.decode(
+            _request(request_id="req-2"),
+            deadline=monotonic() + 0.15,
+        )
+        elapsed = monotonic() - started
+        assert payload is None
+        assert elapsed < 2.0
+        assert service.stats["failures"] == 1
+    finally:
+        service.close()
+
+
+def test_overlong_response_line_is_rejected(tmp_path: Path) -> None:
+    # reveal A-F3/B-F6：无换行的超长响应行按协议违规处理，不再
+    # 无界缓冲。
+    script = _write_worker_script(tmp_path, "overlong")
+    service = NeuralSentenceService(
+        _config([sys.executable, str(script)], timeout_ms=5000),
+        project_root=tmp_path,
+    )
+    try:
+        payload = service.decode(
+            _request(), deadline=monotonic() + 5.0
+        )
+        assert payload is None
+        assert service.stats["failures"] == 1
+    finally:
+        service.close()
+
+
+def test_close_wakes_blocked_reader_without_counting_failure(
+    tmp_path: Path,
+) -> None:
+    # reveal B-F4/C-F3：close() 先 terminate（EOF 唤醒阻塞读）再关
+    # 管道；被打断的 decode 记 abstain 而非 failure，worker 被收割。
+    import threading
+
+    script = _write_worker_script(tmp_path, "silent")
+    service = NeuralSentenceService(
+        _config([sys.executable, str(script)], timeout_ms=5000),
+        project_root=tmp_path,
+    )
+    outcome: dict[str, object] = {}
+
+    def blocked_decode() -> None:
+        outcome["payload"] = service.decode(_request())
+
+    thread = threading.Thread(target=blocked_decode)
+    thread.start()
+    import time as _time
+
+    _time.sleep(0.4)
+    started = monotonic()
+    service.close()
+    thread.join(timeout=5.0)
+    assert not thread.is_alive()
+    assert monotonic() - started < 4.0
+    assert outcome["payload"] is None
+    # 打断不是 worker 失败：不触发熔断计数。
+    assert service.stats["failures"] == 0
+    assert service.stats["abstained"] == 1
+
+
+def test_cold_start_grace_prevents_mid_load_kill(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # reveal C-F6：冷启动窗口内首次读不按 timeout_ms 杀加载中的
+    # worker（交付预算不受影响）。
+    from rimeai_daemon import neural_sentence
+
+    monkeypatch.setattr(
+        neural_sentence, "COLD_START_GRACE_SECONDS", 5.0
+    )
+    script = _write_worker_script(tmp_path, "slow_first")
+    service = NeuralSentenceService(
+        _config([sys.executable, str(script)], timeout_ms=100),
+        project_root=tmp_path,
+    )
+    try:
+        payload = service.decode(
+            _request(), deadline=monotonic() + 0.1
+        )
+        assert payload is not None
+        assert service.stats["delivered"] == 1
+        assert service.stats["failures"] == 0
+    finally:
+        service.close()
+
+
+def test_cooldown_cycles_permanently_disable_the_arm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # reveal C-F6：连续多轮熔断冷却后永久弃权，不再 spawn→kill
+    # 振荡。
+    import time as _time
+
+    from rimeai_daemon import neural_sentence
+
+    monkeypatch.setattr(neural_sentence, "COOLDOWN_SECONDS", 0.01)
+    script = _write_worker_script(tmp_path, "exit")
+    service = NeuralSentenceService(
+        _config([sys.executable, str(script)], timeout_ms=1000),
+        project_root=tmp_path,
+    )
+    try:
+        for _ in range(40):
+            service.decode(
+                _request(request_id=f"req-{monotonic()}"),
+                deadline=monotonic() + 0.5,
+            )
+            if service._disabled:
+                break
+            _time.sleep(0.02)
+        assert service._disabled
+        restarts_before = service.stats["worker_restarts"]
+        assert service.decode(_request()) is None
+        assert service.stats["worker_restarts"] == restarts_before
+    finally:
+        service.close()
+
+
+def test_worker_request_omits_stats_telemetry(tmp_path: Path) -> None:
+    # reveal B-F6：部署服务不请求 worker 遥测（评测侧才用 stats）；
+    # worker 收到带 stats 的请求会回垃圾行让本测试失败。
+    script = _write_worker_script(tmp_path, "assert_no_stats")
+    service = NeuralSentenceService(
+        _config([sys.executable, str(script)]),
+        project_root=tmp_path,
+    )
+    try:
+        payload = service.decode(_request())
+        assert payload is not None
+        assert service.stats["delivered"] == 1
+    finally:
+        service.close()
+
+
+def test_server_gate_drops_frames_below_min_confidence():
+    # reveal B-F3：server 侧发帧门补齐 min_confidence（不再只在
+    # service.decode 层强制）。
+    async def scenario(runtime_root: Path):
+        socket_path = runtime_root / "runtime" / "rimeai.sock"
+        service = StubNeuralService()
+        service.min_confidence = 0.8  # stub 固定回 0.5 → 必须被丢弃
+        server = RimeAIDaemonServer(
+            socket_path, FakeEngine(), neural_sentence=service
+        )
+        await server.start()
+        try:
+            reader, writer = await asyncio.open_unix_connection(
+                socket_path
+            )
+            await _hello(reader, writer)
+            await _write_json(
+                writer, _infer_message(1, "request-1")
+            )
+            result = await _read_json(reader)
+            assert result["type"] == "result"
+            try:
+                late = await asyncio.wait_for(
+                    reader.readline(), timeout=1.0
+                )
+                frame = json.loads(late.decode("utf-8"))
+                assert frame["type"] != "sentence_late", (
+                    "below-min-confidence frame must be dropped"
+                )
+            except asyncio.TimeoutError:
+                pass  # 预期：无迟到帧
+            writer.close()
+            await writer.wait_closed()
+        finally:
+            await server.close()
+
+    with tempfile.TemporaryDirectory(prefix="rai-", dir="/tmp") as dir_:
+        asyncio.run(scenario(Path(dir_)))

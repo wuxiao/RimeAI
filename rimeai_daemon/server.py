@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import json
 import math
 import os
@@ -708,13 +709,22 @@ class RimeAIDaemonServer:
         service = self.neural_sentence
         if service is None:
             return
+        if latest_revision.get(key) != request["revision"]:
+            # Reveal B-F5/C-F2: drop the request BEFORE occupying the
+            # single-thread neural executor — keystrokes already
+            # advanced the revision, so decoding it would be pure
+            # wasted GPU work queued ahead of the live request.
+            return
         loop = asyncio.get_running_loop()
         started_at = monotonic()
         try:
             future = loop.run_in_executor(
                 self._neural_executor,
-                service.decode,
-                request,
+                functools.partial(
+                    service.decode,
+                    request,
+                    deadline=monotonic() + service.budget_ms / 1000,
+                ),
             )
             payload = await asyncio.wait_for(
                 future,
@@ -741,6 +751,7 @@ class RimeAIDaemonServer:
             or isinstance(confidence, bool)
             or not math.isfinite(confidence)
             or not 0 <= confidence <= 1
+            or confidence < service.min_confidence
         ):
             return
         await self._write(
