@@ -56,7 +56,7 @@ L-回灌评估  候选排序·整句打分·混输解析  +  三条离线回归�
 
 | ID | 缺口 | 证据 |
 | --- | --- | --- |
-| G1 | 句级决策反馈缺失：神经臂/云建议与用户最终选择未成对记录（本地排序/整句同样缺失） | `HistoryCommitSource` 只记最终提交来源；LM-001 reveal 记录「按段接受后 Space 提交 history source 记 `rimeMain`（云端归因丢失）」 |
+| G1 | 句级决策反馈不完整：采纳事件已有部分归因（本地 Tab 采纳记 `localSemantic`、云 Tab 采纳记 `cloudGenerated`），但四类关键反馈缺失——①建议「已展示但被忽略/覆盖/过期」的拒绝事件；②建议与最终选择的 request_id 级配对；③神经迟到帧采纳在 history 与同步 n-gram beam 不可区分（同记 `localSemantic`）；④按段接受后最终 Space 提交记 `rimeMain`（云端/神经归因丢失） | `SemanticSuggestionPipeline.swift` historySource 赋值点（.localSemantic/.cloudGenerated）；LM-001 reveal 记录的④；TASKS.md KBD-007「历史 source 归因为已知 v1 简化」 |
 | G2 | 蒸馏数据管道缺失：`cloud_model.py` 的 `_decision_cache` 是进程内 LRU（上限 256），不可持久化、不可复现 | `rimeai_cloud_broker/cloud_model.py:188,358-360` |
 | G3 | 外挂层三处缺口：L3 `signature_phrases` 未回灌 L1；L1 只增不淘汰（无容量上限、无时间衰减）；L2 计数聚合与固化压缩未实现 | LANGUAGE_PROFILE_DESIGN §4.3/§4.1；TASKS.md「L2 计数聚合与固化压缩（PLANNED）」 |
 | G4 | 权重更新路径缺失：`LM-002` 只有一行 TODO，无数据、无配方、无门 | TASKS.md `LM-002` |
@@ -66,7 +66,7 @@ L-回灌评估  候选排序·整句打分·混输解析  +  三条离线回归�
 
 | ID | 决策 | 理由 |
 | --- | --- | --- |
-| D1 | 反馈采集**本地优先**：决策日志落本机 `language_profile/decision_log.db`，默认零上传；上云需独立开关，与 L3 云压缩开关分离 | 采集面是全量按键事件，暴露面比现有 L3 批量摘要大得多，必须默认关闭 |
+| D1 | 反馈采集**本地优先**：决策日志落本机 `language_profile/decision_log.db`，默认零上传；上云需独立开关，与 L3 云压缩开关分离 | 采集面覆盖每一次建议展示事件，暴露面比现有 L3 批量摘要大得多，必须默认关闭 |
 | D2 | 反馈最小单元是 **(输入, 候选, 采纳结果)** 三元组；只留拼音串（≤256 字节）与结构化元数据，**不记**按键序列、上下文全文、候选池原文 | 与 PRD 隐私合同一致：日志不得记录按键、组合串、上下文、候选正文 |
 | D3 | 训练数据必须**可复现**：决策日志 → 冻结数据集（数据集 sha256 + 生成脚本版本 + 源日志区间），训练与评估都绑定该 sha；模型制品锁文件引用数据集 sha | 沿用 `models/qwen2.5-0.5b.lock.json` / `models/qwen2.5-0.5b-mlx-8bit.lock.json` 惯例；无 sha 的质量数字不可复现 |
 | D4 | 教师-学生分工固定：云端模型只在 `generate/abstain` 决策上提供软标签；本地约束解码器是学生；**云端生成文本不作金标** | 云端可纠出词典外的字，直接当金标会把不可对齐的字灌进学生（本地解码器受词典掩码约束，无法复现） |
@@ -91,10 +91,10 @@ TASKS.md「不在当前任务表」写明：教师软标签蒸馏、领域 adapt
 
 ### 阶段 A：反馈采集（闭环的传感层）
 
-**LM-003 决策日志与偏好对采集**
+#### LM-003 决策日志与偏好对采集
 
 | 落点 | 内容 |
-|---|---|
+| --- | --- |
 | 新增 `rimeai_daemon/decision_log.py` | sqlite `language_profile/decision_log.db`；表 `decisions(id, created_at_ms, source, request_id, composition_id, revision, pinyin, suggestion, confidence, model_artifact_id, outcome, outcome_at_ms)`；`source ∈ {local_rank, local_sentence, neural_late, cloud, phrase_book, continuation}`，`outcome ∈ {pending, adopted, rejected, superseded, expired, ignored}`；索引 `(created_at_ms)`、`(source, outcome)` |
 | `rimeai_daemon/neural_sentence.py` | `decode()` 成功返回处写 `outcome=pending` 记录（与 `sentence-late` 帧同 request_id） |
 | `rimeai_daemon/server.py` | 同步 infer 返回（`ranked_candidate` / `sentence_suggestion`）按同样 schema 落日志 |
@@ -108,11 +108,12 @@ TASKS.md「不在当前任务表」写明：教师软标签蒸馏、领域 adapt
 #### LM-004 离线蒸馏数据管道
 
 | 落点 | 内容 |
-|---|---|
+| --- | --- |
 | 新增 `tools/build_sft_dataset.py` | 输入：决策日志 + 持久化的云端决策记录；输出：冻结 jsonl（`{id, pinyin, chosen, rejected, weight, source}`）+ `datasets/sft-constrained-v1.lock.json`（数据集 sha256、生成脚本版本、源日志区间、样本数与去重统计） |
 | 隐私 | 需用户显式触发「导出训练集」动作；导出文件 0600（与语言画像导出同口径） |
 | 泄漏检查 | 生成即校验与冻结评测集（`.rimeai/datasets/p0-librime-1.17.0-luna-simp.jsonl`）零重叠，有重叠即失败退出 |
 | 数据源边界 | **云端决策日志必须先持久化**（`cloud_model._decision_cache` 是进程内 LRU，不能作训练源）；持久化路径要么落在 broker（与固化同进程），要么由 LM-003 的决策日志统一承接——实现前在 LM-003 进程归属决策里一并钉死 |
+| 最小可用规模 | 训练集是否够用（样本数、去重后规模、覆盖拼音模式数）在数据集生成时写入 lock 统计并评估；不足时明确报告「数据不足，不启动训练」，不用小样本硬跑 |
 
 依赖：LM-003。
 
@@ -174,12 +175,11 @@ TASKS.md 的完成条件。
 | 数据 | 位置 | 默认是否出机 | 清除 | 导出 |
 | --- | --- | --- | --- | --- |
 | 决策日志 | 本机 `language_profile/decision_log.db` | 否（D1，独立开关） | 一键清除（随语言画像清除） | 需显式「导出训练集」，0600 |
-| 云端决策记录 | 本机（broker 内持久化） | 否 | 随语言画像清除 | 仅作为 LM-004 输入（D1） |
+| 云端决策记录 | 本机（持久化路径随 LM-003 进程归属决策冻结，不在本表预判） | 否 | 随语言画像清除 | 仅作为 LM-004 输入（D1） |
 | L1 短语库 | 本机 `phrasebook.db` | 否 | 一键 | 已有（聚合导出，≤50,000 条 + truncated 标记） |
 | L2 用户 LM | 本机 `language_profile/user-lm.json.gz` | 否 | 一键 | 已有 |
 | L3 风格画像 | 本机 broker profile 目录 | 仅固化批次 ≤24KB/域/轮 | 一键 | 已有 |
 | 训练集 | 本机 `datasets/`（含 lock） | 否 | 一键 | 即数据集本身 |
-| 训练集源数据量与最小规模 | —（LM-004 完成后按真实决策日志分布确定） | — | — | — |
 | 模型制品 | `models/` + lock | 否 | 保留上一版，可回滚 | 随发行包 |
 
 继承的硬边界：Secure Event Input 期间不采集反馈、不写历史、不触发固化、
