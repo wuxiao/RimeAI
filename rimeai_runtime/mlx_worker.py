@@ -80,7 +80,49 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _load_artifact_manifest(model_dir: Path) -> dict[str, Any] | None:
+    """读取制品目录的可选 manifest（LM-002 SFT fused 制品）。
+
+    存在时必须含 weights_sha256（64 位十六进制）与 model_name；
+    字段非法按 fail-closed 拒载，不允许半路降级到内置 pin。
+    """
+    path = model_dir / "artifact.manifest.json"
+    if not path.is_file():
+        return None
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise MlxEngineError(
+            f"cannot read artifact manifest: {error}"
+        ) from error
+    if not isinstance(manifest, dict):
+        raise MlxEngineError("artifact manifest must be an object")
+    sha = manifest.get("weights_sha256")
+    if (
+        not isinstance(sha, str)
+        or len(sha) != 64
+        or any(c not in "0123456789abcdef" for c in sha.lower())
+    ):
+        raise MlxEngineError(
+            "artifact manifest weights_sha256 must be 64 hex chars"
+        )
+    if not isinstance(manifest.get("model_name"), str):
+        raise MlxEngineError("artifact manifest model_name is required")
+    manifest["weights_sha256"] = sha.lower()
+    return manifest
+
+
+_ACTIVE_MANIFEST: dict[str, Any] | None = None
+
+
 def model_artifact_id() -> str:
+    if _ACTIVE_MANIFEST:
+        revision = str(_ACTIVE_MANIFEST.get("revision", ""))
+        return (
+            f"{_ACTIVE_MANIFEST['model_name']}@{revision[:8] or 'sft'}:"
+            f"sha256-{_ACTIVE_MANIFEST['weights_sha256'][:12]}:"
+            f"mlx-8bit:{PROMPT_VERSION}"
+        )
     return (
         f"{MODEL_NAME}@{MODEL_REVISION[:8]}:"
         f"sha256-{MLX_WEIGHTS_SHA256[:12]}:"
@@ -272,12 +314,23 @@ class MlxConstrainedEngine:
         weights = model_dir / "model.safetensors"
         if not weights.is_file():
             raise MlxEngineError("MLX model files are missing")
+        # 制品 manifest（LM-002 SFT fused 制品）可选地覆盖内置 pin：
+        # 无 manifest 时维持内置 pin 校验（产品基座，行为不变）；有
+        # manifest 时按 manifest 的 weights_sha256 校验并驱动
+        # model_artifact_id —— 校验永远 fail-closed，只是预期值来源
+        # 跟随制品。
+        manifest = _load_artifact_manifest(model_dir)
+        expected_weights_sha = (
+            manifest["weights_sha256"] if manifest else MLX_WEIGHTS_SHA256
+        )
         if verify_weights:
             actual = sha256_file(weights)
-            if actual != MLX_WEIGHTS_SHA256:
+            if actual != expected_weights_sha:
                 raise MlxEngineError(
                     "MLX weights do not match the pinned SHA-256"
                 )
+        global _ACTIVE_MANIFEST
+        _ACTIVE_MANIFEST = manifest
         try:
             config = json.loads(
                 (model_dir / "config.json").read_text(encoding="utf-8")

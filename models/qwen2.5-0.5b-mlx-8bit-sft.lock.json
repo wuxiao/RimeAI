@@ -1,0 +1,61 @@
+{
+ "schema_version": 1,
+ "kind": "mlx-constrained-sft-lock",
+ "model_name": "qwen2.5-0.5b-mlx-8bit-sft",
+ "revision": "sft-v1-20261021",
+ "license": "Apache-2.0",
+ "base": {
+  "lock": "models/qwen2.5-0.5b-mlx-8bit.lock.json",
+  "weights_sha256": "9bc6f756079b502d08409edd09e24ad439429756e22fb6b9a15ae90f518e0d66",
+  "local_dir": ".rimeai/models/qwen2.5-0.5b-mlx-8bit-v1"
+ },
+ "weights_sha256": "d62b2833442593ae59c14f16a52c0d3c51bf0805c19913a83dc468bea3b82df2",
+ "local_dir": ".rimeai/models/qwen2.5-0.5b-mlx-8bit-sft-v1",
+ "verification": "worker enforces the pinned SHA-256 via artifact.manifest.json (rimeai_runtime/mlx_worker.py); mismatch is fail-closed",
+ "training": {
+  "tool": "mlx_lm.lora 0.32.2 / mlx 0.32.4",
+  "data": "p0-librime-1.17.0-luna-simp train split, 8044 unique zero-prompt rows ('。'+context+gold)",
+  "hyperparameters": {
+   "iters": 2000,
+   "learning_rate": 0.0001,
+   "batch_size": 4,
+   "max_seq_length": 256,
+   "num_layers": 16,
+   "seed": 42
+  },
+  "checkpoint_sweep_sentence_accuracy": {
+   "2000": 0.941478,
+   "4000": 0.939425,
+   "6000": 0.914784
+  }
+ },
+ "frozen_eval": {
+  "dataset": ".rimeai/datasets/p0-librime-1.17.0-luna-simp.jsonl test split (974)",
+  "sentence_accuracy": 0.941478,
+  "baseline_sentence_accuracy": 0.726899,
+  "vs_lm001_8bit_base": {
+   "accuracy": 0.921971,
+   "delta_pp": 1.95
+  },
+  "latency_ms": {
+   "p50": 123.9,
+   "p95": 253.4
+  },
+  "error_taxonomy": {
+   "failures": 57,
+   "model_path_miss": 44,
+   "gate_fuzzy_mismatch": 7,
+   "index_recall_miss": 6,
+   "pinyin_mismatch": 0,
+   "dict_recall_miss": 0
+  },
+  "baseline_taxonomy": {
+   "failures": 76,
+   "model_path_miss": 61,
+   "gate_fuzzy_mismatch": 9,
+   "index_recall_miss": 6
+  },
+  "fixed_vs_base": 216,
+  "regressions_vs_base": 7
+ }
+}

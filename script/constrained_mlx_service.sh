@@ -6,7 +6,9 @@ set -euo pipefail
 script_dir=${0:A:h}
 project_root=${script_dir:h}
 model_root=${RIMEAI_MODEL_ROOT:-"${project_root}/.rimeai/models"}
-model_dir="${model_root}/qwen2.5-0.5b-mlx-8bit-v1"
+# SFT 对照评估（LM-002）经外部 RIMEAI_MLX_MODEL_DIR 指向 fused 制品目录；
+# 产品默认仍是 lock 过的 8-bit 基座。
+model_dir="${RIMEAI_MLX_MODEL_DIR:-"${model_root}/qwen2.5-0.5b-mlx-8bit-v1"}"
 mlx_venv="${RIMEAI_MLX_VENV:-"${project_root}/.rimeai/mlx-venv"}"
 
 if [[ ! -f "${model_dir}/model.safetensors" ]]; then
