@@ -1,0 +1,74 @@
+{
+ "schema_version": 1,
+ "kind": "kbd001-completion-evidence",
+ "generated_at": "2026-10-21T18:05:42",
+ "keyboard_frozen_set": {
+  "scenarios_file": "datasets/keyboard-interaction-v3.jsonl",
+  "scenarios_sha256": "a5a199daef3ddd031bf97f04449fa37e23f6a54f72170d3afd3432717c555670",
+  "samples": 20,
+  "observations_sha256": "a8242b91faab46f53ebefe38b106ac8924474a3536acc783868b9a1a0840d5a9",
+  "categories": [
+   "abbreviated",
+   "delete-composition",
+   "exact",
+   "missing-syllable",
+   "mixed-composition",
+   "near-sound",
+   "partial-selection"
+  ],
+  "metrics": {
+   "accepted": 1.0,
+   "backspace_cleared": 1.0,
+   "candidate_pool_inclusion": 1.0,
+   "conditional_accuracy": 1.0,
+   "reverted": 1.0
+  },
+  "note": "20 scenarios across 7 categories (3 per category, 2 for delete-composition; v1 scenarios retained as regression anchors). All interaction slices at 1.0; delete-composition slices are 0.0 by scenario semantics (pool/accept not probed), matching v1."
+ },
+ "sentence_gate_060_reeval": {
+  "gate": "SENTENCE_MIN_CONFIDENCE = 0.60 (rimeai_daemon/engine.py, sync beam arm display gate)",
+  "dataset": ".rimeai/datasets/p0-librime-1.17.0-luna-simp.jsonl test split (974 samples)",
+  "decoder_config": ".rimeai/models/p0-beam-sentence-v3.json (same artifact as the running daemon)",
+  "post_lm001_sweep": {
+   "0.40": {
+    "decoder_sentence_accuracy": 0.790554,
+    "baseline_sentence_accuracy": 0.726899,
+    "decision_counts": {
+     "below_threshold": 157,
+     "no_change": 649,
+     "suggestion": 168
+    }
+   },
+   "0.50": {
+    "decoder_sentence_accuracy": 0.790554,
+    "baseline_sentence_accuracy": 0.726899,
+    "decision_counts": {
+     "below_threshold": 157,
+     "no_change": 649,
+     "suggestion": 168
+    }
+   },
+   "0.60": {
+    "decoder_sentence_accuracy": 0.788501,
+    "baseline_sentence_accuracy": 0.726899,
+    "decision_counts": {
+     "below_threshold": 157,
+     "no_change": 649,
+     "suggestion": 168
+    }
+   },
+   "0.70": {
+    "decoder_sentence_accuracy": 0.787474,
+    "baseline_sentence_accuracy": 0.726899,
+    "decision_counts": {
+     "below_threshold": 157,
+     "no_change": 649,
+     "suggestion": 168
+    }
+   }
+  },
+  "conclusion": "Decision distribution is bimodal: identical suggestion/below_threshold/no_change counts across 0.40-0.70 gates; decoder sentence accuracy varies by <=0.31pp. 0.60 sits mid-plateau — retained unchanged. Neural late-frame tier is gated separately (LM-001, dimension frozen in DaemonProtocol docs).",
+  "baseline_sentence_accuracy": 0.726899,
+  "decoder_sentence_accuracy_at_060": 0.788501
+ }
+}
