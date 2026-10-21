@@ -126,8 +126,11 @@ entries(
 - 更新方式：增量摘要 + 旧画像 → LLM merge → `revision+1`；保留最近
   N 版可回滚；merge 失败保留旧版。
 - 用户在设置页可编辑并锁定字段。画像 schema 版本化、merge、单调 rollback
-  与 `locked_fields` 已实现；`signature_phrases` 回灌 L1 当前未实现——
-  L3 固化仅做 summarize→merge→save，不写短语库。
+  与 `locked_fields` 已实现；`signature_phrases` 回灌 L1 已实现
+  （2026-10-21，LP-009）：语义固化逐域合并成功后，签名短语经 Rime 词典
+  注音写入短语库（`source='llm'`、`count=0`、`ON CONFLICT DO NOTHING`
+  不覆盖真实打字证据，孤儿自动清理，auto 累积不作用于 llm 行）——
+  详见 [CONTINUOUS_OPTIMIZATION_LOOP_DESIGN.md](CONTINUOUS_OPTIMIZATION_LOOP_DESIGN.md) §4 阶段 B。
 
 ### 4.4 HistoryStore 改动
 

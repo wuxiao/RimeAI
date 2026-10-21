@@ -101,7 +101,9 @@ TASKS.md「不在当前任务表」写明：教师软标签蒸馏、领域 adapt
 | daemon 协议（Swift `DaemonProtocol.swift`） | 新增 `sentence-feedback` 帧：`{request_id, outcome}`；Swift 在 Tab 采纳 / 选词覆盖 / composition 结束未采纳时上报 |
 | 隐私 | 不写上下文全文、不写按键、不写 Secure Input 内容；拼音只取活跃段（≤256 字节）；默认不上云（D1） |
 
-`decision_log` 进程归属与读写口：**进程归属在阶段 A 落地时钉死**（两个候选：daemon 内置，或挂在 broker 的 consolidation 旁作为轻量 pipe）；**必须在实现前确定**——`decision_log` 写路径落在 daemon 还是 broker 会影响「新增帧的方向」（daemon→broker vs Swift→daemon）与 Secure Input 的切分点；该决策必须写入本设计后再改 TASKS.md。
+`decision_log` 进程归属（2026-10-21 已拍板）：**daemon 内置**——传感层贴事件源（`decode()` 与同步 `infer()` 同进程写 `pending`，零跨进程开销）；`sentence-feedback` 帧方向 Swift→daemon，与现有 request/迟到帧同连接；daemon 是输入法生命周期必经进程，传感层不依赖可选 broker（无凭据时不跑）；Secure Input 切分点＝Swift 端不发帧 + daemon 不存上下文全文。
+
+云端 teacher 决策持久化（同日已拍板）：**broker 写穿**——`cloud_model.py` 云决策在本进程写穿至本机 `cloud-decisions.db`（`_decision_cache` 保留为内存命中层）；云建议的展示/采纳反馈由 Swift 经现有云连接回传 broker（帧语义同 `sentence-feedback`，request_id 即云请求 id）；daemon 的 decision_log 不含云 generate 文本（隐私面不扩大）；LM-004 读双库，两侧 request_id 空间天然分立不冲突。
 
 依赖：无。**LM-004 与 LM-002 都阻塞在它后面。**
 
@@ -112,7 +114,7 @@ TASKS.md「不在当前任务表」写明：教师软标签蒸馏、领域 adapt
 | 新增 `tools/build_sft_dataset.py` | 输入：决策日志 + 持久化的云端决策记录；输出：冻结 jsonl（`{id, pinyin, chosen, rejected, weight, source}`）+ `datasets/sft-constrained-v1.lock.json`（数据集 sha256、生成脚本版本、源日志区间、样本数与去重统计） |
 | 隐私 | 需用户显式触发「导出训练集」动作；导出文件 0600（与语言画像导出同口径） |
 | 泄漏检查 | 生成即校验与冻结评测集（`.rimeai/datasets/p0-librime-1.17.0-luna-simp.jsonl`）零重叠，有重叠即失败退出 |
-| 数据源边界 | **云端决策日志必须先持久化**（`cloud_model._decision_cache` 是进程内 LRU，不能作训练源）；持久化路径要么落在 broker（与固化同进程），要么由 LM-003 的决策日志统一承接——实现前在 LM-003 进程归属决策里一并钉死 |
+| 数据源边界 | **云端决策日志必须先持久化**（`cloud_model._decision_cache` 是进程内 LRU，不能作训练源）；已拍板（2026-10-21）：broker 写穿 `cloud-decisions.db`，LM-004 读 daemon `decision_log.db` + broker `cloud-decisions.db` 双库 |
 | 最小可用规模 | 训练集是否够用（样本数、去重后规模、覆盖拼音模式数）在数据集生成时写入 lock 统计并评估；不足时明确报告「数据不足，不启动训练」，不用小样本硬跑 |
 
 依赖：LM-003。
@@ -131,8 +133,11 @@ TASKS.md「不在当前任务表」写明：教师软标签蒸馏、领域 adapt
 #### LP-010 L1 时间衰减与容量上限
 落点：`rimeai_daemon/consolidation.py` 统计阶段后新增淘汰步；半衰期按
 `last_used_ms` 计算；`protected=1` 与 `source='user'` 豁免。
-具体数值（半衰期、容量上限）在实现前由真实 L1 分布数据决定，写入
-TASKS.md 的完成条件。
+2026-10-21 前置分布报告（真实库 3348 auto 条目）：count 极端长尾
+（p50=1、p75=2、p90=4、p99=18、max=261），数据窗口仅 ~10 天，时间衰减
+参数不可校准。据此定值：容量上限 20,000（触发式淘汰至 19,000，按衰减分
+最低的 auto 条目；当前 3348 远未触达）；半衰期 45 天为保守初值，待数据
+≥60 天后重评；重评前不单独依赖时间衰减路径（淘汰仅由容量触发）。
 完成条件：半衰期、容量上限、保护豁免、删除后计数不复活均有单测。
 
 #### LP-011 L2 计数聚合与固化压缩
@@ -175,7 +180,7 @@ TASKS.md 的完成条件。
 | 数据 | 位置 | 默认是否出机 | 清除 | 导出 |
 | --- | --- | --- | --- | --- |
 | 决策日志 | 本机 `language_profile/decision_log.db` | 否（D1，独立开关） | 一键清除（随语言画像清除） | 需显式「导出训练集」，0600 |
-| 云端决策记录 | 本机（持久化路径随 LM-003 进程归属决策冻结，不在本表预判） | 否 | 随语言画像清除 | 仅作为 LM-004 输入（D1） |
+| 云端决策记录 | 本机 broker `cloud-decisions.db`（`_decision_cache` 写穿） | 否 | 随语言画像清除 | 仅作为 LM-004 输入（D1） |
 | L1 短语库 | 本机 `phrasebook.db` | 否 | 一键 | 已有（聚合导出，≤50,000 条 + truncated 标记） |
 | L2 用户 LM | 本机 `language_profile/user-lm.json.gz` | 否 | 一键 | 已有 |
 | L3 风格画像 | 本机 broker profile 目录 | 仅固化批次 ≤24KB/域/轮 | 一键 | 已有 |
