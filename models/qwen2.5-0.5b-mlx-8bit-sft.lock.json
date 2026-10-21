@@ -9,7 +9,7 @@
   "weights_sha256": "9bc6f756079b502d08409edd09e24ad439429756e22fb6b9a15ae90f518e0d66",
   "local_dir": ".rimeai/models/qwen2.5-0.5b-mlx-8bit-v1"
  },
- "weights_sha256": "d62b2833442593ae59c14f16a52c0d3c51bf0805c19913a83dc468bea3b82df2",
+ "weights_sha256": "d62b2833442593ae5dbee329a355a15e9cf5bd3467eb23443c83bed506f57a2a",
  "local_dir": ".rimeai/models/qwen2.5-0.5b-mlx-8bit-sft-v1",
  "verification": "worker enforces the pinned SHA-256 via artifact.manifest.json (rimeai_runtime/mlx_worker.py); mismatch is fail-closed",
  "training": {
