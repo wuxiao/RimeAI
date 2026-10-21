@@ -363,6 +363,7 @@ class ConsolidationPipeline:
             ON CONFLICT(domain, text) DO UPDATE SET
                 count = count + 1,
                 last_used_ms = excluded.last_used_ms
+            WHERE phrasebook_entries.source != 'llm'
             """,
             (
                 phrase_entry_id(domain, text),

@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import json
+import logging
 import os
 import re
 import shutil
@@ -610,13 +611,19 @@ def make_semantic_consolidator(
     summarizer: CloudProfileSummarizer,
     *,
     domain_resolver: Callable[[str], str],
+    signature_backfill: Callable[[str, StyleProfile], None] | None = None,
 ) -> Callable[[Sequence[Any]], bool]:
     """Bridges the consolidation pipeline to L3 cloud compression.
 
     Groups one consolidation batch by effective domain, summarizes each
     group, merges into the stored profile, and returns True only when
     every domain succeeded — a single failure keeps the whole batch for
-    the next idle window (double-delete guard)."""
+    the next idle window (double-delete guard).
+
+    ``signature_backfill`` (LP-009) runs after a domain's profile has
+    been merged and persisted; its failures are logged and never fail
+    the batch (the semantic pass already succeeded and the raw rows
+    must not be retried just because L1 backfill hiccupped)."""
 
     def consolidate(batch: Sequence[Any]) -> bool:
         groups: dict[str, list[str]] = {}
@@ -643,6 +650,18 @@ def make_semantic_consolidator(
                 )
 
             store.update(domain, fold)
+            if signature_backfill is not None:
+                merged = store.load(domain)
+                if merged is not None:
+                    try:
+                        signature_backfill(domain, merged)
+                    except Exception:
+                        logging.getLogger(__name__).warning(
+                            "signature-phrase backfill failed for"
+                            " domain %s",
+                            domain,
+                            exc_info=True,
+                        )
         return True
 
     return consolidate

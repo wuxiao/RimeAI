@@ -16,6 +16,8 @@ from rimeai_daemon.consolidation import (
     IdleConsolidationScheduler,
     SemanticPass,
 )
+from rimeai_daemon.llm_backfill import SignaturePhraseBackfiller
+from rimeai_runtime.pinyin_guard import PinyinGuard
 
 from .cloud_model import CloudModelClient
 from .history_index import HistoryEmbeddingIndexer
@@ -24,6 +26,7 @@ from .profile import (
     ChatTransport,
     CloudProfileSummarizer,
     ProfileStore,
+    StyleProfile,
     make_semantic_consolidator,
 )
 from .server import CloudBrokerServer
@@ -124,6 +127,20 @@ def _parser() -> argparse.ArgumentParser:
             "consolidation round (statistics and eviction still run)"
         ),
     )
+    parser.add_argument(
+        "--signature-dictionary",
+        type=Path,
+        default=Path(__file__).resolve().parents[1]
+        / ".rimeai"
+        / "rime"
+        / "shared"
+        / "luna_pinyin.dict.yaml",
+        help=(
+            "Rime dictionary used to annotate L3 signature phrases "
+            "for the L1 backfill (LP-009); missing/unreadable files "
+            "disable the backfill, never the consolidation round"
+        ),
+    )
     return parser
 
 
@@ -190,6 +207,7 @@ def _semantic_consolidator(
     enabled: bool,
     profile_directory: Path,
     phrasebook_db: Path,
+    signature_dictionary: Path | None = None,
 ) -> SemanticPass:
     """Builds the L3 cloud-compression consolidator for this round, or a
     `SemanticPass` that says why it cannot run.
@@ -213,12 +231,41 @@ def _semantic_consolidator(
         )
         return SemanticPass(None, permanently_unavailable=False)
     summarizer = CloudProfileSummarizer(transport)
+    backfiller = None
+    if signature_dictionary is not None:
+        try:
+            guard = PinyinGuard.from_rime_dictionary(signature_dictionary)
+            backfiller = SignaturePhraseBackfiller(phrasebook_db, guard)
+        except (OSError, ValueError):
+            # Fail-open enhancement layer (LP-009): a missing or
+            # unreadable dictionary only disables the L1 backfill, the
+            # semantic pass itself still runs and the batch is never
+            # retried because of this.
+            logging.getLogger(__name__).warning(
+                "signature dictionary %s unusable; L1 backfill skipped",
+                signature_dictionary,
+                exc_info=True,
+            )
+
+    backfill: Callable[[str, StyleProfile], None] | None = None
+    if backfiller is not None:
+        active_backfiller = backfiller
+
+        def backfill_from_profile(
+            domain: str, profile: StyleProfile
+        ) -> None:
+            phrases = profile.traits.get("signature_phrases") or []
+            active_backfiller.backfill(domain, phrases)
+
+        backfill = backfill_from_profile
+
     consolidator = make_semantic_consolidator(
         ProfileStore(profile_directory),
         summarizer,
         # Fresh resolver per round: the per-bundle cache must not outlive
         # the round, or settings-page domain edits never reach L3 (P2-1).
         domain_resolver=_phrasebook_domain_resolver(phrasebook_db),
+        signature_backfill=backfill,
     )
     return SemanticPass(consolidator, permanently_unavailable=False)
 
@@ -229,6 +276,7 @@ def _semantic_consolidator_provider(
     enabled: bool,
     profile_directory: Path,
     phrasebook_db: Path,
+    signature_dictionary: Path | None = None,
 ):
     """Per-round consolidator factory (P2-1/P3-3): credentials and
     bundle→domain mappings are re-evaluated every round, so editing
@@ -242,6 +290,7 @@ def _semantic_consolidator_provider(
             enabled=enabled,
             profile_directory=profile_directory,
             phrasebook_db=phrasebook_db,
+            signature_dictionary=signature_dictionary,
         )
         active = state.consolidator is not None
         if active != last_state["active"]:
@@ -259,6 +308,7 @@ def _maybe_start_consolidation(
     ranker: CloudModelClient,
     *,
     enabled: bool,
+    signature_dictionary: Path | None = None,
 ) -> IdleConsolidationScheduler | None:
     """Starts the L3 cloud-compression loop when credentials exist.
 
@@ -279,6 +329,7 @@ def _maybe_start_consolidation(
             enabled=enabled,
             profile_directory=profile_directory,
             phrasebook_db=paths.phrasebook_db,
+            signature_dictionary=signature_dictionary,
         ),
     )
     scheduler.start()
@@ -289,6 +340,7 @@ async def _run(
     socket_path: Path,
     *,
     consolidation_enabled: bool = True,
+    signature_dictionary: Path | None = None,
 ) -> None:
     history_root = (
         Path.home()
@@ -304,6 +356,7 @@ async def _run(
     scheduler = _maybe_start_consolidation(
         ranker,
         enabled=consolidation_enabled,
+        signature_dictionary=signature_dictionary,
     )
     server = CloudBrokerServer(
         socket_path,
