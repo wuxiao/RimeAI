@@ -56,7 +56,7 @@ L-回灌评估  候选排序·整句打分·混输解析  +  三条离线回归�
 
 | ID | 缺口 | 证据 |
 | --- | --- | --- |
-| G1 | 句级决策反馈缺失：神经臂/云建议与用户最终选择未成对记录 | `HistoryCommitSource` 只记最终提交来源；LM-001 reveal 记录「按段接受后 Space 提交 history source 记 `rimeMain`（云端归因丢失）」 |
+| G1 | 句级决策反馈缺失：神经臂/云建议与用户最终选择未成对记录（本地排序/整句同样缺失） | `HistoryCommitSource` 只记最终提交来源；LM-001 reveal 记录「按段接受后 Space 提交 history source 记 `rimeMain`（云端归因丢失）」 |
 | G2 | 蒸馏数据管道缺失：`cloud_model.py` 的 `_decision_cache` 是进程内 LRU（上限 256），不可持久化、不可复现 | `rimeai_cloud_broker/cloud_model.py:188,358-360` |
 | G3 | 外挂层三处缺口：L3 `signature_phrases` 未回灌 L1；L1 只增不淘汰（无容量上限、无时间衰减）；L2 计数聚合与固化压缩未实现 | LANGUAGE_PROFILE_DESIGN §4.3/§4.1；TASKS.md「L2 计数聚合与固化压缩（PLANNED）」 |
 | G4 | 权重更新路径缺失：`LM-002` 只有一行 TODO，无数据、无配方、无门 | TASKS.md `LM-002` |
@@ -91,24 +91,28 @@ TASKS.md「不在当前任务表」写明：教师软标签蒸馏、领域 adapt
 
 ### 阶段 A：反馈采集（闭环的传感层）
 
-#### LM-003 决策日志与偏好对采集
+**LM-003 决策日志与偏好对采集**
 
 | 落点 | 内容 |
-| --- | --- |
-| 新增 `rimeai_daemon/decision_log.py` | sqlite `language_profile/decision_log.db`；表 `decisions(id, created_at_ms, source, request_id, composition_id, revision, pinyin, suggestion, confidence, model_artifact_id, outcome, outcome_at_ms)`；`outcome ∈ {pending, adopted, rejected, superseded, expired, ignored}`；索引 `(created_at_ms)`、`(source, outcome)` |
+|---|---|
+| 新增 `rimeai_daemon/decision_log.py` | sqlite `language_profile/decision_log.db`；表 `decisions(id, created_at_ms, source, request_id, composition_id, revision, pinyin, suggestion, confidence, model_artifact_id, outcome, outcome_at_ms)`；`source ∈ {local_rank, local_sentence, neural_late, cloud, phrase_book, continuation}`，`outcome ∈ {pending, adopted, rejected, superseded, expired, ignored}`；索引 `(created_at_ms)`、`(source, outcome)` |
 | `rimeai_daemon/neural_sentence.py` | `decode()` 成功返回处写 `outcome=pending` 记录（与 `sentence-late` 帧同 request_id） |
+| `rimeai_daemon/server.py` | 同步 infer 返回（`ranked_candidate` / `sentence_suggestion`）按同样 schema 落日志 |
 | daemon 协议（Swift `DaemonProtocol.swift`） | 新增 `sentence-feedback` 帧：`{request_id, outcome}`；Swift 在 Tab 采纳 / 选词覆盖 / composition 结束未采纳时上报 |
 | 隐私 | 不写上下文全文、不写按键、不写 Secure Input 内容；拼音只取活跃段（≤256 字节）；默认不上云（D1） |
+
+`decision_log` 进程归属与读写口：**进程归属在阶段 A 落地时钉死**（两个候选：daemon 内置，或挂在 broker 的 consolidation 旁作为轻量 pipe）；**必须在实现前确定**——`decision_log` 写路径落在 daemon 还是 broker 会影响「新增帧的方向」（daemon→broker vs Swift→daemon）与 Secure Input 的切分点；该决策必须写入本设计后再改 TASKS.md。
 
 依赖：无。**LM-004 与 LM-002 都阻塞在它后面。**
 
 #### LM-004 离线蒸馏数据管道
 
 | 落点 | 内容 |
-| --- | --- |
+|---|---|
 | 新增 `tools/build_sft_dataset.py` | 输入：决策日志 + 持久化的云端决策记录；输出：冻结 jsonl（`{id, pinyin, chosen, rejected, weight, source}`）+ `datasets/sft-constrained-v1.lock.json`（数据集 sha256、生成脚本版本、源日志区间、样本数与去重统计） |
 | 隐私 | 需用户显式触发「导出训练集」动作；导出文件 0600（与语言画像导出同口径） |
 | 泄漏检查 | 生成即校验与冻结评测集（`.rimeai/datasets/p0-librime-1.17.0-luna-simp.jsonl`）零重叠，有重叠即失败退出 |
+| 数据源边界 | **云端决策日志必须先持久化**（`cloud_model._decision_cache` 是进程内 LRU，不能作训练源）；持久化路径要么落在 broker（与固化同进程），要么由 LM-003 的决策日志统一承接——实现前在 LM-003 进程归属决策里一并钉死 |
 
 依赖：LM-003。
 
@@ -126,13 +130,15 @@ TASKS.md「不在当前任务表」写明：教师软标签蒸馏、领域 adapt
 #### LP-010 L1 时间衰减与容量上限
 落点：`rimeai_daemon/consolidation.py` 统计阶段后新增淘汰步；半衰期按
 `last_used_ms` 计算；`protected=1` 与 `source='user'` 豁免。
+具体数值（半衰期、容量上限）在实现前由真实 L1 分布数据决定，写入
+TASKS.md 的完成条件。
 完成条件：半衰期、容量上限、保护豁免、删除后计数不复活均有单测。
 
 #### LP-011 L2 计数聚合与固化压缩
 落点：`rimeai_daemon/user_lm.py` 计数聚合语义 + `rimeai_daemon/consolidation.py`
 批处理压缩（连续 run 合并 ≤3 段/域）+ drain/throttle 接线。
 完成条件：批内 SUM 语义稳定（乱序输入结果一致）、压缩后 L2 打分与压缩前
-在冻结集上一致。
+在冻结集上一致（**性能收益在 L2 评测里验证**——压缩是工程优化，不是质量目标）。
 
 ### 阶段 C：模型层（权重更新）
 
@@ -144,9 +150,9 @@ TASKS.md「不在当前任务表」写明：教师软标签蒸馏、领域 adapt
 | --- | --- |
 | 靶 | `model_path_miss` 桶 61/76（词典召回与拼音对齐零损失，错误全在模型选路） |
 | 数据 | LM-004 产出的冻结数据集（D3：绑定数据集 sha256） |
-| 配方 | PinyinGPT 式 LoRA；零 prompt、零 chat template 保持不变（TD-009） |
+| 配方 | PinyinGPT 式 LoRA（软标签蒸馏为默认形态——学生是 0.5B 本地模型，教师是云端 glm-5.3-flash；LoRA 精调作为平行的低成本对照）；零 prompt、零 chat template 保持不变（TD-009） |
 | 基座对照 | Qwen2.5 0.5B / 2B / 4B base，全部用同一冻结数据集与同一超参族 |
-| 门 | ① 冻结集句准确率 ≥ 现制品 +2pp；② `model_path_miss` 桶下降 ≥50%；③ 词典基线已命中的 708 样本不得新增覆盖损失；④ p50 延迟 ≤ 现制品 ×1.2；⑤ 峰值 RSS ≤ 现制品 ×1.2 |
+| 门 | ① 冻结集句准确率 ≥ 现制品 +2pp；② `model_path_miss` 桶下降 ≥50%；③ 词典基线已命中的 708 样本不得新增覆盖损失；④ p50 延迟 ≤ 现制品 ×1.2；⑤ 峰值 RSS ≤ 现制品 ×1.2。**门的数据划分**：①/③ 必须同时跑**冻结集**（`p0-librime-1.17.0-luna-simp.jsonl` test，974 样本）与**真实历史留出集**（80/20 时间切分，与 LP-008/LP-012 同口径），任一不达标即失败 |
 | 制品 | MLX 8-bit + lock（含数据集 sha、训练超参、代码版本、上一版制品指针）；保留上一版以便回滚（D7） |
 
 依赖：LM-004（→ LM-003）。基座对照可与 LM-003 并行。
@@ -159,7 +165,7 @@ TASKS.md「不在当前任务表」写明：教师软标签蒸馏、领域 adapt
 1. **外挂层门**：`LP-008` 首评续期——条件 top1 净增益 ≥ +2pt、个人短语命中率
    ≥30%、泛化 gap ≤ 1.0、本地路径 P95 延迟回归 ≤ +1ms。
 2. **模型层门**：冻结集 + 真实历史留出集（时间切分 80/20）上的句准确率、
-   `model_path_miss` 桶、延迟与内存。
+   `model_path_miss` 桶、延迟与内存（与 LM-002 §门 的数据划分一致）。
 3. **端到端门**：真实键盘冻结集 v3（`datasets/keyboard-interaction-v3.jsonl`，
    20 场景）交互切片全 1.0，与 `KBD-001` 同口径。
 
@@ -168,10 +174,12 @@ TASKS.md「不在当前任务表」写明：教师软标签蒸馏、领域 adapt
 | 数据 | 位置 | 默认是否出机 | 清除 | 导出 |
 | --- | --- | --- | --- | --- |
 | 决策日志 | 本机 `language_profile/decision_log.db` | 否（D1，独立开关） | 一键清除（随语言画像清除） | 需显式「导出训练集」，0600 |
+| 云端决策记录 | 本机（broker 内持久化） | 否 | 随语言画像清除 | 仅作为 LM-004 输入（D1） |
 | L1 短语库 | 本机 `phrasebook.db` | 否 | 一键 | 已有（聚合导出，≤50,000 条 + truncated 标记） |
 | L2 用户 LM | 本机 `language_profile/user-lm.json.gz` | 否 | 一键 | 已有 |
 | L3 风格画像 | 本机 broker profile 目录 | 仅固化批次 ≤24KB/域/轮 | 一键 | 已有 |
 | 训练集 | 本机 `datasets/`（含 lock） | 否 | 一键 | 即数据集本身 |
+| 训练集源数据量与最小规模 | —（LM-004 完成后按真实决策日志分布确定） | — | — | — |
 | 模型制品 | `models/` + lock | 否 | 保留上一版，可回滚 | 随发行包 |
 
 继承的硬边界：Secure Event Input 期间不采集反馈、不写历史、不触发固化、
