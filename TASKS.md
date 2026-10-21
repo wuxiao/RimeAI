@@ -5,7 +5,7 @@
 | 更新日期 | 2026-10-21 |
 | 产品发布状态 | `NOT RELEASED` |
 | 当前工作树状态 | 当前功能边界按可审查提交收口；产品仍不可发布 |
-| 当前最高优先级 | `LM-002` 约束解码 SFT（P1 键盘与云增强已收口，待发布流程验收） |
+| 当前最高优先级 | `LM-003` 决策日志与偏好对采集（LM-002 的数据前置，阻塞链 LM-003 → LM-004 → LM-002；P1 键盘与云增强已收口，待发布流程验收） |
 
 本文件是唯一任务状态源。PRD、产品设计、技术设计和专项协议不再维护重复
 checkbox 或路线状态。
@@ -48,7 +48,9 @@ scratch/Xcode DerivedData 且启用 warnings-as-errors 的条件下保持内部�
 | KBD-008 | `DONE-INTERNAL` | 部分选词段保留（无分隔符修正） | 2026-10-21 收口（实施+验收证据齐：SwiftPM 520/macOS Xcode 40/pytest 733 全绿；v3 冻结集 partial-selection 3 场景全 1.0 覆盖新行为选词+space 整句上屏；← 回修状态机由 retainFocusedSegmentAsPrefix+moveFocusLeft 单测覆盖——收集器暂无回修探针，端到端回修链自动化留作收集器后续增强）。设计提案 `docs/PARTIAL_SELECTION_DESIGN.md`（D2/D3/D4/D5 已拍板 2026-10-21：历史/热词推迟到最终整句提交一次落库；统一改造末段焦点部分选词；接受撤销语义变化）；本轮落地：`CompositionState.retainFocusedSegmentAsPrefix`（焦点段以所选候选定稿入前缀+焦点字面量运行并入，段拼音只记被消费前缀防历史重复，剩余拼音非法时空守卫回退 false）+ `selectMainCandidate` 新分支 `retainPartialSelectionInComposition`（末段焦点部分选词不再上屏，剩余拼音成新活跃段可 ← 回修，历史/热词留待最终整句提交；校验失败回退既有提交路径字节级一致）；顺手抽出 `appliedSelectionTransition`（rawLeadPrefix 合成候选 transition 调整块，纯行为等价重构，满足 function_body_length）；测试新增 CandidateSelectionTransitionTests 3 用例（段保留+回修/非法剩余拒绝且状态不变/字面量运行并入）；SwiftPM 520 全绿 + macOS Xcode TEST SUCCEEDED（40）；剩余：无（冻结集 v2 复评通过：7 场景全部切片与 v1 基线逐项一致，报告 .rimeai/reports/keyboard-interaction-v2-kbd008.json；输入法重装后 TIS 注册被重置需手动重添加 + TIS API 核实启用态，⌃Space 切换收集器前置；新行为（前缀保留预编辑区）为中间态，最终文档文本与撤销探针与 v1 等价）；真实键盘全链体验验收随 KBD-001 流程；iOS 范围外（iOS 键盘尚未接入段焦点模型） |
 | LM-001 reveal 对抗审查修复轮 | `DONE-INTERNAL` | 双延迟档整句架构对抗审查加固（P1×1 + P2×7 + P3×9） | 2026-10-20：跨家族三审 + 交叉验证（P1 为机械复现）；仲裁反向序兑底（神经帧已接管后，后到的同步 ok/timeout 帧只消费槽不改展示，superseded_by_neural_late）；迟到帧改按 requestID 路由（发送登记/帧到取回，多 controller 不再互踩）；预算 deadline 下传 worker 读 + 提交前过期预检 + 交互部署 timeout_ms 封顶 5s；close 先 terminate 后关管道 + kill 后 wait + 打断不计熔断 + 冷启动首读豁免 30s + 连续 5 轮冷却永久弃权；有界行读拒超长行；迟到帧 script-mismatch 复用字形转写；结构门双侧补齐（server min_confidence / Swift 可打印字符）；worker per-request 异常 fail-closed + 请求后回滚释放 beam 尾行；stderr 不再丢弃、stats 死请求移除；加固条款冻结于 TECHNICAL_DESIGN §4.3.1 |
 | LM-001 | `DONE-INTERNAL` | 整句解码切换为零 prompt 拼音约束路线（部署化） | 2026-10-19 完成：MLX 8-bit 制品（隔离 venv，mlx 0.32.4/mlx-lm 0.32.2，lock `models/qwen2.5-0.5b-mlx-8bit.lock.json`；4-bit 被证据否决——种子边界分布場塌，见 lock precision_decision）；`rimeai_runtime/mlx_worker.py` 单一持久 prompt cache，beam 跨路径与跨请求共 prefix 回退增量喂入（per-path 正确性保持，确定性测试 `tests/test_mlx_worker.py`）；冻结集句准确率 0.921971 与 fp16 完全一致、逐样本建议一致率 99.8%（净错误差 0），p50 115ms vs fp16 252ms，基线 `docs/baselines/constrained-qwen-v3-mlx.json`；daemon 异步神经臂（`rimeai_daemon/neural_sentence.py` + server `sentence-late` 迟到帧，capability 门控旧客户端，专用执行器不阻塞同步 infer，close 有界拆除），Swift InputCore 迟到帧接受/过期/失活/云槽/结构全 fail-closed（`NeuralSentenceLateTests`）；本机 LaunchAgent 路径真机冒烟：同步 result 0.01s、神经迟到帧交付、hello 诊断含 neural_sentence 条目；仲裁规则冻结于 TECHNICAL_DESIGN §4.3.1；Release/PyInstaller 打包 MLX 与 LM-002 SFT 未包含 |
-| LM-002 | `TODO` | 约束解码 SFT | 按 cloud decision cache 蒸馏 LoRA（PinyinGPT 配方），基座对照 Qwen 0.5B/2B/4B；作用靶为错误归类的 `model_path_miss` 桶（61/76 真实错误，词典召回与拼音对齐零损失） |
+| LM-002 | `TODO` | 约束解码 SFT | 按 cloud decision cache 蒸馏 LoRA（PinyinGPT 配方），基座对照 Qwen 0.5B/2B/4B；作用靶为错误归类的 `model_path_miss` 桶（61/76 真实错误，词典召回与拼音对齐零损失）。配方与门见 [docs/CONTINUOUS_OPTIMIZATION_LOOP_DESIGN.md](docs/CONTINUOUS_OPTIMIZATION_LOOP_DESIGN.md) §4 阶段 C：数据来自 LM-004 冻结数据集（绑定数据集 sha256）；门＝冻结集句准确率 ≥ 现制品 +2pp 且 `model_path_miss` 桶下降 ≥50%、词典基线已命中的 708 样本无新增覆盖损失、p50 延迟与峰值 RSS ≤ 现制品 ×1.2；制品为 MLX 8-bit + lock（数据集 sha/超参/代码版本/上一版指针，可回滚）。前置：LM-004 → LM-003 |
+| LM-003 | `TODO` | 决策日志与偏好对采集（闭环传感层） | 2026-10-21 设计冻结（[docs/CONTINUOUS_OPTIMIZATION_LOOP_DESIGN.md](docs/CONTINUOUS_OPTIMIZATION_LOOP_DESIGN.md) §4 阶段 A）：新增 `rimeai_daemon/decision_log.py`（本机 `language_profile/decision_log.db`，表 `decisions` 含 source/request_id/composition_id/revision/pinyin/suggestion/confidence/model_artifact_id/outcome）；神经臂 `decode()` 成功处写 `pending`，Swift 经新增 `sentence-feedback` 帧回传 adopted/rejected/superseded/expired；默认零上传（上云独立开关）、不记按键/上下文全文/候选池原文、Secure Input 不采集；完成后 LM-004 可用 |
+| LM-004 | `TODO` | 离线蒸馏数据管道（LM-002 数据前置） | 2026-10-21 设计冻结（同上文档 §4 阶段 A）：新增 `tools/build_sft_dataset.py`，读决策日志 + 持久化云端决策 → 冻结 jsonl + `datasets/sft-constrained-v1.lock.json`（数据集 sha256、生成脚本版本、源日志区间、去重统计）；生成即做冻结评测集零重叠泄漏检查（重叠非零即失败退出）；导出需用户显式触发且文件 0600；只服务 LM-002，不扩展为教师平台/领域 adapter/开放式续写 |
 | CLOUD-001 | `BLOCKED` | 放行固定云候选链路 | 使用真实凭据、冻结语料和目标网络通过覆盖增益、98% 纠错 precision、800ms、stale/SEI、费用/限流/代理/撤权矩阵 |
 | CLOUD-002 | `DONE-INTERNAL` | 清理旧 Qwen/阿里云/wwcn 口径 | 2026-10-13 完成：`rimeai_cloud_broker/qwen.py` 更名 `cloud_model.py`，`QwenCandidateRanker`/`QwenBrokerError` 更名 `CloudModelClient`/`CloudBrokerError`，全部 "Qwen ..." 错误文案改中性 cloud 口径；隐私中心用户文案（云端数据流、明文 Key 存储位置）与 candidate panel 无障碍标题/tooltip 改中性云端建议/纠错；PRD/PRODUCT_DESIGN/TECHNICAL_DESIGN/README/CLOUD_INPUT_IMPLEMENTATION 统一为智谱 Coding Plan 直连 + generate/abstain 无候选池合同；LaunchAgent 安装脚本导入检查同步更新。`fun.wwcn.*` 为代码签名 bundle ID 事实标识、`tools/qwen_sentence_worker.py` 与 `models/qwen2.5-0.5b` 为真实 Qwen 离线实验工件，均非误导声明、保持不变。全量 grep 复核无残留误导 provider 声明；pytest 574、InputCore 449、macOS 40 全绿 |
 | RELEASE-001 | `BLOCKED` | 放行 macOS 公开预览 | 公证/Gatekeeper、清洁机安装升级回滚、代表宿主与 Secure Input、系统级抓包/日志、最低硬件、许可证和用户指标全部通过 |
@@ -69,6 +71,10 @@ scratch/Xcode DerivedData 且启用 warnings-as-errors 的条件下保持内部�
 | LP-006 | `DONE-INTERNAL` | 运行时注入 | L2 进入 daemon engine 排序融合（15/15）；L1 短语建议位仲裁：本地+云均无建议时以 `phrase_book` 决策填充独立建议位（数字候选不可移动，pipeline 34/34）；混输个人词表切换到 PhraseBookStore（legacy 256 词幂等迁移 + 接受即学习）；真机冻结集复评计入 KBD-001 |
 | LP-007 | `DONE-INTERNAL` | 分域映射与回退 | bundleId→域映射、域改名/合并/删除；commit<50 冷启动回退 global；域优先+global 合并查询链（含在 10/10） |
 | LP-008 | `DONE-INTERNAL` | 评估闭环与文档修订 | 时间切分评估器（4/4）；真实历史首评完成（4356 条）：学习增益 +0.299 nats/字、短语命中率 52.3%（>30% 门）、泛化 gap 0.94；冻结集 top1 标注为泄漏监控；报告存 .rimeai/reports/language-profile-first-eval.json |
+| LP-009 | `TODO` | L3 `signature_phrases` 回灌 L1 | `rimeai_daemon/consolidation.py` 语义阶段成功后把画像 `traits.signature_phrases` 写入 `phrasebook_entries`（`source='llm'`、`protected=0`，沿用 `phrase_entry_id(domain, text)` 同 id 规则）；同一画像 revision 不重复计数（幂等）、回灌短语在独立建议位命中、跨读音屏蔽与既有 L1 行为不回归；Swift `PhraseBookStore` 是 schema owner，`source` 取值集合三侧（daemon 写/Swift 读/导出）一致；设计见 [docs/CONTINUOUS_OPTIMIZATION_LOOP_DESIGN.md](docs/CONTINUOUS_OPTIMIZATION_LOOP_DESIGN.md) §4 阶段 B |
+| LP-010 | `TODO` | L1 时间衰减与容量上限 | `rimeai_daemon/consolidation.py` 统计阶段后新增淘汰步（半衰期按 `last_used_ms` 计算），`protected=1` 与 `source='user'` 豁免；半衰期、容量上限、保护豁免、删除后计数不复活均有单测；当前实现只有 count upsert、无上限无衰减 |
+| LP-011 | `TODO` | L2 计数聚合与固化压缩 | 由「语言画像 L2 计数聚合与固化压缩（PLANNED）」升级为任务（2026-10-19 对抗审查确认 0ab0250 与当前树均无实现）：`rimeai_daemon/user_lm.py` 计数聚合语义（批内 SUM 稳定）+ `rimeai_daemon/consolidation.py` 批处理压缩（连续 run ≤3 段/域）+ drain/throttle 接线；乱序输入结果一致、压缩前后 L2 打分在冻结集一致 |
+| LP-012 | `TODO` | 闭环离线回归门 | 三条门单命令出报告，任一失败即不得转 `DONE-INTERNAL`：① 外挂层门（LP-008 首评续期：条件 top1 净增益 ≥ +2pt、个人短语命中率 ≥30%、泛化 gap ≤1.0、本地路径 P95 延迟回归 ≤ +1ms）② 模型层门（冻结集 + 真实历史 80/20 留出集上的句准确率、`model_path_miss` 桶、延迟与内存）③ 端到端门（`datasets/keyboard-interaction-v3.jsonl` 20 场景交互切片全 1.0，与 KBD-001 同口径） |
 
 ## P2：语音产品资格
 
@@ -103,14 +109,14 @@ scratch/Xcode DerivedData 且启用 warnings-as-errors 的条件下保持内部�
 | iOS 离线 librime + 紧凑 n-gram 原型 | `DONE-INTERNAL` | fresh Simulator unit/UI 基线通过；非产品支持，最新真机验收未完成 |
 | 语言画像 reveal 对抗审查 P1 加固 | `DONE-INTERNAL` | 2026-10-19：跨轮固化水位契约（statistics_watermark 持久化 + 停用清除/首轮/恢复/开启-关闭-开启语义）；renameDomain 重算 id 且开库修复漂移；daemon/broker/Swift 三侧统一域名校验（`PhraseBookDomain.validate`）；停用降级即时生效（`_refresh_user_lm` OSError 无条件清空）；导出聚合三层（GzipCodec 字节级兼容 Python gzip + LanguageProfileExport）；清除补删 L2 user-lm；RimeAIPhraseBookService 按职责拆三 extension；Swift 488 + pytest 668 + macOS Xcode BUILD SUCCEEDED |
 | 语言画像 reveal 对抗审查 P1B/P2/P3 加固 | `DONE-INTERNAL` | 2026-10-19：L3 固化改为“fresh/statistics_done 拆分 + 语义失败即释放 claim 重试”双状态机（statistics_done 语义重试积压、semantic_watermark 与 L2 计数解耦）；broker 单实例守卫（flock + pidfile 拒绝启动）+ 画像跨进程 locked() + 凭据每轮重评估（_semantic_consolidator 改 provider）；L3 ProfileStore 修订排序/裁剪/_archive 毫秒时间戳修复；域改名/删除级联 L2/L3 产物（LanguageProfileArtifacts + service 接线）；云端设置页补批量上云披露（≤24KB/域/轮，按 UTF-8 字节计）+ cloud-debug 只记元数据 + 凭据损坏区分「凭据无效」；快照 60 条改为保护优先；PhraseBookStore 缓存条数改 LIMIT 绑定。**更正**：原记录中的“L2 计数改为按 token 聚合”“连续 run 压缩（≤3 条/域）+ 前台/会话边界 drain + throttle 开关接线”在本仓无任何实现落点（`git diff ee4a195 0ab0250` 与全仓 grep 均无命中，`rimeai_daemon/user_lm.py` 本次未改），已降级为 PLANNED（见下行） |
-| 语言画像 L2 计数聚合与固化压缩（PLANNED） | `PLANNED` | 2026-10-19 对抗审查后从上一行 DONE-INTERNAL 中拆出：L2 计数“按 token 聚合（批内 SUM 语义稳定）”、固化“连续 run 压缩（每域 ≤3 段）+ 前台/会话边界 drain + throttle 开关”在 0ab0250 与当前树均无实现；`BATCH_LIMIT=512` 仍为普通批大小常量，固化仍按批线性扫描。实现前不得写入任何 DONE 记录 |
 | 语言画像 reveal 对抗审查修复轮（审查发现项） | `DONE-INTERNAL` | 2026-10-20：导出文件改 0600（权限重设失败即报错）+ 导出条目上限 50,000（带 `truncated` 标记）；broker 拒绝 group/world 可读凭据文件（`CredentialPermissionError`）；L3 可用性三分（永久未开启 → 积压判终态并 evict；凭据临时故障/空值 key → 积压保留重试）；云端上传预算改按 UTF-8 字节（24KB/域/轮）并做行对齐字节截断；评测按域分组交叉校验截断占比（换行计入 n-1）；域规则文档/实现对齐（`[a-z0-9-]{1,64}`）+ 旧 `_` 域名开库自动迁移；`PhraseBookDomain.validate` 单一入口；词条超限抛 `tooManyEntries`；user-lm 落盘加目录 fsync；daemon L2 探测改 (mtime, size)（含同 mtime 重写测试）；0 字节 user-lm 视为损坏而非 no-op；gzip 跨语言固件（Swift 编码 → Python 解码）；证据：swift test 513 passed、pytest 732 passed、macOS Debug BUILD SUCCEEDED；终审（glm-5.3:max）16 项修复中 15 项闭环、其余 7 条 P3 已全部修复；跨家族复核（deepseek）因终端被用户接管未交付，标 INCOMPLETE |
 
 ## 不在当前任务表
 
 教师软标签蒸馏、领域 adapter、开放式续写、商业定价和跨平台同步发布不是当前
 MVP 缺口。只有新的真实数据证明必要时，才新建任务；不保留长期“也许会做”的
-占位项。
+占位项。例外：LM-002 已在任务表内，其数据供给前置（LM-003 反馈采集、LM-004
+蒸馏管道）随任务创建；二者只服务 LM-002，不扩展为教师平台或领域 adapter 路线。
 
 ## 维护规则
 
