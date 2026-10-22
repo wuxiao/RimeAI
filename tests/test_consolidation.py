@@ -698,3 +698,139 @@ def test_crash_between_l2_save_and_watermark_does_not_double_count(
     report = pipeline.run_once()
     assert report.statistics_done == 2
     assert l2_payload() == crashed
+
+
+# --------------------------------------------------------------------------
+# LP-010: capacity-triggered L1 eviction (decay orders, capacity triggers).
+
+
+def seed_phrase(
+    paths: ConsolidationPaths,
+    text: str,
+    *,
+    count: int = 1,
+    age_days: float = 0.0,
+    source: str = "auto",
+    protected: int = 0,
+) -> None:
+    now_ms = int(time.time() * 1000)
+    with sqlite3.connect(paths.phrasebook_db) as db:
+        db.execute(
+            "INSERT INTO phrasebook_entries VALUES (?,?,?,?,?,?,?,?,?)",
+            (
+                phrase_entry_id("global", text),
+                "global",
+                text,
+                text.encode("utf-8").hex()[:8],
+                count,
+                now_ms - int(age_days * DAY_MS) - 1_000,
+                now_ms - int(age_days * DAY_MS),
+                source,
+                protected,
+            ),
+        )
+
+
+def phrasebook_texts(paths: ConsolidationPaths) -> set[str]:
+    with sqlite3.connect(paths.phrasebook_db) as db:
+        return {
+            row[0]
+            for row in db.execute(
+                "SELECT text FROM phrasebook_entries"
+            ).fetchall()
+        }
+
+
+def test_phrasebook_prune_below_capacity_is_a_no_op(tmp_path: Path):
+    paths = make_layout(tmp_path)
+    pipeline = ConsolidationPipeline(paths, phrasebook_capacity=10)
+    seed_phrase(paths, "甲", count=1)
+    seed_phrase(paths, "乙", count=2, age_days=90)
+    assert pipeline._prune_phrasebook() == 0
+    assert phrasebook_texts(paths) == {"甲", "乙"}
+
+
+def test_phrasebook_prune_evicts_lowest_decay_first_with_exemptions(
+    tmp_path: Path,
+):
+    paths = make_layout(tmp_path)
+    # half-life 45d: stale count-10 -> 2.5, fresh count-2 -> 2.0,
+    # half-stale count-6 -> 3.0 — eviction order is B, A, C.
+    pipeline = ConsolidationPipeline(
+        paths, phrasebook_capacity=4, phrasebook_capacity_target=2
+    )
+    seed_phrase(paths, "旧高频", count=10, age_days=90)
+    seed_phrase(paths, "新低频", count=2, age_days=0)
+    seed_phrase(paths, "半衰期中", count=6, age_days=45)
+    seed_phrase(
+        paths, "受保护", count=1, age_days=365, protected=1
+    )
+    seed_phrase(
+        paths, "用户词", count=1, age_days=365, source="user", protected=1
+    )
+    assert pipeline._prune_phrasebook() == 3
+    assert phrasebook_texts(paths) == {"受保护", "用户词"}
+
+
+def test_phrasebook_prune_stops_at_the_target(tmp_path: Path):
+    paths = make_layout(tmp_path)
+    pipeline = ConsolidationPipeline(
+        paths, phrasebook_capacity=5, phrasebook_capacity_target=4
+    )
+    seed_phrase(paths, "最低", count=1, age_days=0)
+    seed_phrase(paths, "次低", count=2, age_days=90)
+    seed_phrase(paths, "中", count=6, age_days=45)
+    seed_phrase(paths, "高", count=99, age_days=0)
+    seed_phrase(paths, "用户词", count=1, source="user", protected=1)
+    seed_phrase(paths, "第二用户", count=1, source="user", protected=1)
+    # 6 entries > capacity 5 -> evict 2 down to target 4: the two
+    # lowest decay scores (1.0 and 2 x 0.25 = 0.5 -> 最低=1.0? 次低=0.5).
+    assert pipeline._prune_phrasebook() == 2
+    # 最低 scores 1.0; 次低 (count 2, 90d) scores 0.5 — both leave.
+    assert phrasebook_texts(paths) == {"中", "高", "用户词", "第二用户"}
+
+
+def test_pruned_phrase_restarts_at_count_one(tmp_path: Path):
+    paths = make_layout(tmp_path)
+    hot = ConsolidationPipeline(
+        paths, phrasebook_capacity=1, phrasebook_capacity_target=1
+    )
+    # Lowest decay score leaves first: a stale count-1 (~0.16) evicts
+    # while a fresh count-10 (10.0) survives.
+    seed_phrase(paths, "待淘汰", count=1, age_days=120)
+    seed_phrase(paths, "保留", count=10, age_days=0)
+    assert hot._prune_phrasebook() == 1
+    assert "待淘汰" not in phrasebook_texts(paths)
+
+    # The same phrase typed again re-enters as a fresh row: count 1,
+    # never a resurrection of the old frequency.
+    insert_commit(
+        paths, suffix="000000000001", age_days=8, text="待淘汰"
+    )
+    calm = ConsolidationPipeline(paths)
+    report = calm.run_once()
+    assert report.statistics_done == 1
+    with sqlite3.connect(paths.phrasebook_db) as db:
+        row = db.execute(
+            "SELECT count FROM phrasebook_entries WHERE text = '待淘汰'"
+        ).fetchone()
+    assert row == (1,)
+
+
+def test_eviction_runs_inside_the_statistics_phase(tmp_path: Path):
+    paths = make_layout(tmp_path)
+    pipeline = ConsolidationPipeline(
+        paths, phrasebook_capacity=4, phrasebook_capacity_target=2
+    )
+    seed_phrase(paths, "旧一", count=1, age_days=100)
+    seed_phrase(paths, "旧二", count=1, age_days=100)
+    seed_phrase(paths, "旧三", count=1, age_days=100)
+    seed_phrase(paths, "新", count=5, age_days=0)
+    insert_commit(paths, suffix="000000000001", age_days=8, text="测试")
+    report = pipeline.run_once()
+    # 4 seeded + 1 upserted = 5 > capacity 4 -> evict 3 down to the
+    # target 2: the three stale count-1 rows leave, the fresh rows stay.
+    assert report.phrasebook_pruned == 3
+    assert report.to_payload()["phrasebook_pruned"] == 3
+    assert len(phrasebook_texts(paths)) == 2
+    assert phrasebook_texts(paths) == {"新", "测试"}

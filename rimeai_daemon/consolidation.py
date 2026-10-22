@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import json
 import logging
 import sqlite3
 import threading
@@ -35,6 +36,13 @@ WINDOW_DAYS = 7
 BATCH_LIMIT = 512
 COLD_START_THRESHOLD = 50
 MAX_PHRASE_BYTES = 1_024
+# L1 capacity eviction (LP-010, values pinned by the 2026-10-21
+# distribution report on the real phrasebook: count p50=1/p99=18/max=261,
+# ~10-day window — time decay alone is not calibratable yet, so decay
+# only ORDERS the eviction and eviction only fires on capacity).
+L1_CAPACITY = 20_000
+L1_CAPACITY_TARGET = 19_000
+L1_HALF_LIFE_DAYS = 45
 DOMAIN_SEPARATOR = "\x1f"
 DAY_MILLISECONDS = 86_400_000
 # A fetched batch is claimed for this long; a crashed round's claims expire
@@ -74,6 +82,7 @@ class ConsolidationReport:
     statistics_done: int = 0
     semantic_done: int = 0
     pruned: int = 0
+    phrasebook_pruned: int = 0
     domains: dict[str, int] = field(default_factory=dict)
 
     def to_payload(self) -> dict[str, Any]:
@@ -82,6 +91,7 @@ class ConsolidationReport:
             "statistics_done": self.statistics_done,
             "semantic_done": self.semantic_done,
             "pruned": self.pruned,
+            "phrasebook_pruned": self.phrasebook_pruned,
             "domains": dict(self.domains),
         }
 
@@ -130,11 +140,17 @@ class ConsolidationPipeline:
         window_days: int = WINDOW_DAYS,
         batch_limit: int = BATCH_LIMIT,
         cold_start_threshold: int = COLD_START_THRESHOLD,
+        phrasebook_capacity: int = L1_CAPACITY,
+        phrasebook_capacity_target: int = L1_CAPACITY_TARGET,
+        phrasebook_half_life_days: float = L1_HALF_LIFE_DAYS,
     ) -> None:
         self.paths = paths
         self.window_days = window_days
         self.batch_limit = batch_limit
         self.cold_start_threshold = cold_start_threshold
+        self.phrasebook_capacity = phrasebook_capacity
+        self.phrasebook_capacity_target = phrasebook_capacity_target
+        self.phrasebook_half_life_days = phrasebook_half_life_days
 
     def run_once(
         self,
@@ -160,11 +176,13 @@ class ConsolidationPipeline:
             return ConsolidationReport(pruned=pruned)
         # Statistics run only for fresh 'raw' rows; 'statistics_done' rows
         # are a semantic-retry backlog whose L1/L2 counts already happened.
+        phrasebook_pruned = 0
         fresh = [commit for commit in batch if commit.state == "raw"]
         effective: dict[str, str] = {}
         if fresh:
             effective, mapped = self._resolve_domains(fresh)
             self._update_phrasebook(fresh, effective, mapped)
+            phrasebook_pruned = self._prune_phrasebook()
             self._update_user_lm(fresh, effective)
             self._mark_statistics(fresh)
         semantic_done, pruned = self._semantic_phase(
@@ -177,6 +195,7 @@ class ConsolidationPipeline:
             statistics_done=len(fresh),
             semantic_done=semantic_done,
             pruned=pruned,
+            phrasebook_pruned=phrasebook_pruned,
             domains=dict(_count_domains(fresh, effective)) if fresh else {},
         )
 
@@ -376,6 +395,64 @@ class ConsolidationPipeline:
                 now_ms,
             ),
         )
+
+    def _prune_phrasebook(self, *, now_ms: int | None = None) -> int:
+        """Capacity-triggered L1 eviction (LP-010).
+
+        Fires only when the entry count exceeds ``phrasebook_capacity``;
+        the eviction order is by decay score (``count`` halved every
+        ``phrasebook_half_life_days`` of idle time since
+        ``last_used_ms``) ascending — computed in Python because
+        SQLite's ``pow``/``log`` depend on compile-time math functions.
+        ``protected = 1`` and ``source = 'user'`` rows are never
+        evicted; time alone never deletes anything before the 60-day
+        re-evaluation — decay only ranks the order, capacity pulls the
+        trigger. Deletes by id via a static ``json_each(?)`` IN-list
+        (parameterized, per the established durable fix)."""
+        now = now_ms if now_ms is not None else int(time.time() * 1000)
+        period_ms = self.phrasebook_half_life_days * DAY_MILLISECONDS
+        with contextlib.closing(
+            _connect(self.paths.phrasebook_db)
+        ) as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                total = db.execute(
+                    "SELECT COUNT(*) FROM phrasebook_entries"
+                ).fetchone()[0]
+                if total <= self.phrasebook_capacity:
+                    db.commit()
+                    return 0
+                excess = total - self.phrasebook_capacity_target
+                candidates = db.execute(
+                    "SELECT id, count, last_used_ms"
+                    " FROM phrasebook_entries"
+                    " WHERE protected = 0 AND source != 'user'"
+                ).fetchall()
+
+                def decay_score(row: tuple) -> tuple:
+                    age_ms = max(now - row[2], 0)
+                    return (
+                        row[1] * 0.5 ** (age_ms / period_ms),
+                        row[1],
+                        row[2],
+                    )
+
+                candidates.sort(key=decay_score)
+                victims = [row[0] for row in candidates[:excess]]
+                if not victims:
+                    db.commit()
+                    return 0
+                cursor = db.execute(
+                    "DELETE FROM phrasebook_entries"
+                    " WHERE id IN (SELECT value FROM json_each(?))",
+                    (json.dumps(victims),),
+                )
+                removed = max(cursor.rowcount, 0)
+                db.commit()
+                return removed
+            except BaseException:
+                db.rollback()
+                raise
 
     # -- phase 4: L2 user LM ---------------------------------------------------
 
