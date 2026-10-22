@@ -898,3 +898,26 @@ public struct DaemonCancelRequest: Codable, Sendable {
         case requestID = "request_id"
     }
 }
+
+/// LM-003 传感层反馈帧（fire-and-forget，无响应）：把用户对已展示
+/// 建议的裁决回传 daemon 决策日志。仅在 daemon hello 通告
+/// `sentence-feedback` capability 时发送；畸形帧由 daemon 静默忽略。
+public struct DaemonSentenceFeedback: Codable, Sendable {
+    public let schemaVersion = 1
+    public let type = "sentence_feedback"
+    public let requestID: String
+    /// adopted / rejected / superseded / expired / ignored
+    public let outcome: String
+
+    public init(requestID: String, outcome: String) {
+        self.requestID = requestID
+        self.outcome = outcome
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion = "schema_version"
+        case type
+        case requestID = "request_id"
+        case outcome
+    }
+}

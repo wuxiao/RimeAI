@@ -75,8 +75,10 @@ extension RimeAIInputController {
             scheduleSuffixRefinement(client: client)
             if acceptedViaSemanticCandidate {
                 recordSemanticAcceptance(decision: semanticDecision)
+                pipeline.markDisplayedSuggestionAdopted()
             } else {
                 settings.record(.mainAccepted)
+                pipeline.markDisplayedSuggestionRejected()
             }
             return
         }
@@ -115,8 +117,10 @@ extension RimeAIInputController {
         }
         if acceptedViaSemanticCandidate {
             recordSemanticAcceptance(decision: semanticDecision)
+            pipeline.markDisplayedSuggestionAdopted()
         } else {
             settings.record(.mainAccepted)
+            pipeline.markDisplayedSuggestionRejected()
         }
     }
 
@@ -262,6 +266,7 @@ extension RimeAIInputController {
             client: client
         )
         recordSemanticAcceptance(decision: decision)
+        pipeline.markDisplayedSuggestionAdopted()
         if !learnedEnglishTokens.isEmpty {
             // 混输个人词表学习进 L1 短语库（LP-006），取代 settings 的
             // 256 词上限；持久历史仍由固化循环统计。

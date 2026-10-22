@@ -80,6 +80,18 @@ extension RimeAIInputController {
                 disconnectCloud: {
                     CloudBrokerClient.shared.disconnect()
                 },
+                sendSentenceFeedback: { requestID, outcome in
+                    DaemonClient.shared.sendSentenceFeedback(
+                        requestID: requestID,
+                        outcome: outcome
+                    )
+                },
+                sendCloudFeedback: { requestID, outcome in
+                    CloudBrokerClient.shared.sendSentenceFeedback(
+                        requestID: requestID,
+                        outcome: outcome
+                    )
+                },
                 compositionSnapshot: { [weak self] in
                     self?.composition
                         ?? CompositionState(appSessionID: "inactive")

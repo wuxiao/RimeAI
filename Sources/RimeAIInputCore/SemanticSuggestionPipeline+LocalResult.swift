@@ -90,6 +90,7 @@ extension SemanticSuggestionPipeline {
         case let .proceed(validResult):
             presentLocalCandidate(
                 validResult,
+                requestID: requestID,
                 requestSegments: consumed.segments,
                 token: token
             )
@@ -131,6 +132,7 @@ extension SemanticSuggestionPipeline {
     /// 走字形回退，`.candidate` 落到候选应用尾部。
     private func presentLocalCandidate(
         _ result: SemanticInferenceResult,
+        requestID: String,
         requestSegments: [PinyinSegment]?,
         token: CompositionToken
     ) {
@@ -149,6 +151,7 @@ extension SemanticSuggestionPipeline {
         case .scriptMismatch:
             applyScriptMismatchFallback(
                 result,
+                requestID: requestID,
                 requestSegments: requestSegments,
                 token: token
             )
@@ -181,6 +184,7 @@ extension SemanticSuggestionPipeline {
         }
         applyRankedOrSentenceCandidate(
             result,
+            requestID: requestID,
             requestSegments: requestSegments,
             token: token
         )
@@ -215,6 +219,7 @@ extension SemanticSuggestionPipeline {
     /// （繁体整句转简体），仅无法转换时才拒绝。
     private func applyScriptMismatchFallback(
         _ result: SemanticInferenceResult,
+        requestID: String,
         requestSegments: [PinyinSegment]?,
         token: CompositionToken
     ) {
@@ -237,6 +242,7 @@ extension SemanticSuggestionPipeline {
             )
             historySource = .localSemantic
             cloudCandidate = nil
+            setDisplayedFeedback(requestID: requestID, cloud: false)
             emit(.diagnostic(.resultShown))
             emit(.suggestionSlotChanged)
             return
@@ -248,6 +254,7 @@ extension SemanticSuggestionPipeline {
     /// 候选应用尾部：重排候选或整句建议写入语义建议槽。
     private func applyRankedOrSentenceCandidate(
         _ result: SemanticInferenceResult,
+        requestID: String,
         requestSegments: [PinyinSegment]?,
         token: CompositionToken
     ) {
@@ -274,6 +281,7 @@ extension SemanticSuggestionPipeline {
         }
         historySource = .localSemantic
         cloudCandidate = nil
+        setDisplayedFeedback(requestID: requestID, cloud: false)
         emit(.diagnostic(.resultShown))
         if decision == .sentenceSuggestion {
             emit(.diagnostic(.sentenceSuggestionShown))
@@ -366,6 +374,9 @@ extension SemanticSuggestionPipeline {
         neuralLateAppliedToken = expectedToken
         historySource = .localSemantic
         cloudCandidate = nil
+        if let lateRequestID = frame.requestID {
+            setDisplayedFeedback(requestID: lateRequestID, cloud: false)
+        }
         emit(.diagnostic(.resultShown))
         emit(.diagnostic(.sentenceSuggestionShown))
         emit(.suggestionSlotChanged)

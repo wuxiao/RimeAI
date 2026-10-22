@@ -120,6 +120,21 @@ final class CloudBrokerClient: @unchecked Sendable {
         }
     }
 
+    /// LM-003 传感层反馈帧（与 daemon 侧 DaemonSentenceFeedback 同形）。
+    private struct SentenceFeedbackFrame: Encodable {
+        let schemaVersion = 1
+        let type = "sentence_feedback"
+        let requestID: String
+        let outcome: String
+
+        enum CodingKeys: String, CodingKey {
+            case schemaVersion = "schema_version"
+            case type
+            case requestID = "request_id"
+            case outcome
+        }
+    }
+
     /// 响应信封：仅取 request_id 用于推断/续写两条 pending 表的分流。
     private struct ResponseEnvelope: Decodable {
         let requestID: String
@@ -134,6 +149,8 @@ final class CloudBrokerClient: @unchecked Sendable {
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
     private var isReady = false
+    /// broker hello 通告的 capability 快照（LM-003 云端反馈帧门控）。
+    private var serverCapabilities: Set<String> = []
     /// Models the broker advertised in its last successful hello. Empty
     /// before the first handshake; model negotiation then stays a no-op.
     private var availableModels: Set<String> = []
@@ -341,6 +358,7 @@ private extension CloudBrokerClient {
             }
             isReady = true
             availableModels = Set(hello.models)
+            serverCapabilities = Set(hello.capabilities)
             transport.markProtocolReady()
             publishStatus("就绪")
             return
@@ -493,5 +511,26 @@ extension CloudBrokerClient {
         }
         data.append(UInt8(ascii: "\n"))
         return data
+    }
+}
+
+// MARK: - LM-003 传感层反馈（internal：controller 依赖注入用）
+
+extension CloudBrokerClient {
+    /// 云端建议的裁决帧（fire-and-forget，无响应）：broker 通告
+    /// `sentence-feedback` capability 时才发送；旧 broker 静默跳过
+    /// （不计数不重试，传感层永不反向影响输入路径）。
+    func sendSentenceFeedback(requestID: String, outcome: String) {
+        guard serverCapabilities.contains("sentence-feedback"),
+              transport.canSendApplicationFrames,
+              let payload = encodeLine(
+                  SentenceFeedbackFrame(
+                      requestID: requestID,
+                      outcome: outcome
+                  )
+              )
+        else { return }
+        transport.enqueueOutbound(data: payload, requestID: nil)
+        transport.flushOutbound()
     }
 }

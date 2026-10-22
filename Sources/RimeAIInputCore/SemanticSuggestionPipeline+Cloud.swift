@@ -348,6 +348,7 @@ extension SemanticSuggestionPipeline {
         historySource = .cloudGenerated
         cloudCandidate = candidate
         cloudSuggestionApplied = true
+        setDisplayedFeedback(requestID: request.requestID, cloud: true)
         presentation = .candidate(
             text: renderedText,
             decision: .sentenceSuggestion,

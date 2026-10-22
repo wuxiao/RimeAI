@@ -44,6 +44,11 @@ final class DaemonClient: @unchecked Sendable {
     private var modelArtifactID = "尚未连接"
     private var modelArtifacts: [DaemonModelArtifact] = []
     private var daemonOfflineLock = false
+    /// daemon hello 通告的 capability 快照（LM-003 反馈帧门控）。
+    /// 与其它可变状态同在 transport 队列上读写；对外快照经
+    /// `supportsSentenceFeedback` 读取时持锁。
+    private var serverCapabilities: Set<String> = []
+    private let capabilitiesLock = NSLock()
 
     private init() {
         let socketPath = FileManager.default.homeDirectoryForCurrentUser
@@ -319,6 +324,9 @@ private extension DaemonClient {
             modelArtifactID = hello.modelArtifactID
             modelArtifacts = hello.modelArtifacts ?? []
             daemonOfflineLock = true
+            capabilitiesLock.lock()
+            serverCapabilities = Set(hello.capabilities)
+            capabilitiesLock.unlock()
             transport.markProtocolReady()
             publishStatus("就绪")
             completeReadyWaiter(
@@ -548,5 +556,31 @@ private extension DaemonClient {
         }
         data.append(UInt8(ascii: "\n"))
         return data
+    }
+}
+
+// MARK: - LM-003 传感层反馈（internal：controller 依赖注入用）
+
+extension DaemonClient {
+    /// daemon 是否通告了 `sentence-feedback`（反馈帧发送门控）。
+    var supportsSentenceFeedback: Bool {
+        capabilitiesLock.lock()
+        defer { capabilitiesLock.unlock() }
+        return serverCapabilities.contains("sentence-feedback")
+    }
+
+    /// 把用户对已展示建议的裁决发往 daemon 决策日志（fire-and-forget，
+    /// 无响应；未通告 capability 的旧 daemon 静默跳过，不计数不重试）。
+    func sendSentenceFeedback(requestID: String, outcome: String) {
+        guard supportsSentenceFeedback,
+              let payload = encodeLine(
+                  DaemonSentenceFeedback(
+                      requestID: requestID,
+                      outcome: outcome
+                  )
+              )
+        else { return }
+        transport.enqueueOutbound(data: payload, requestID: nil)
+        transport.flushOutbound()
     }
 }

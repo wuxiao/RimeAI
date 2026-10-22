@@ -155,6 +155,19 @@ public struct SemanticSuggestionDependencies: Sendable {
     ) -> Void
     public var cancelCloudInference: @Sendable (_ requestID: String) -> Void
     public var disconnectCloud: @Sendable () -> Void
+    /// LM-003 传感层：把用户对已展示建议的裁决发往 daemon 决策日志
+    /// （controller 提供；传输层按 daemon capability 门控，默认空实现
+    /// ——单测与旧宿主零开销）。
+    public var sendSentenceFeedback: @Sendable (
+        _ requestID: String,
+        _ outcome: String
+    ) -> Void = { _, _ in }
+    /// LM-003 传感层：云端建议的裁决发往 broker 决策日志
+    /// （`cloud-decisions.db` 写穿侧的对应帧）。
+    public var sendCloudFeedback: @Sendable (
+        _ requestID: String,
+        _ outcome: String
+    ) -> Void = { _, _ in }
 
     // Live composition state (value snapshot per read) and the single
     // mutation the pipeline performs on it.
@@ -199,6 +212,8 @@ public struct SemanticSuggestionDependencies: Sendable {
         ) -> Void,
         cancelCloudInference: @escaping @Sendable (String) -> Void,
         disconnectCloud: @escaping @Sendable () -> Void,
+        sendSentenceFeedback: @escaping @Sendable (String, String) -> Void = { _, _ in },
+        sendCloudFeedback: @escaping @Sendable (String, String) -> Void = { _, _ in },
         compositionSnapshot: @escaping @MainActor @Sendable () -> CompositionState,
         applySemanticCandidate: @escaping @MainActor @Sendable (
             String,
@@ -228,6 +243,8 @@ public struct SemanticSuggestionDependencies: Sendable {
         self.sendCloudInference = sendCloudInference
         self.cancelCloudInference = cancelCloudInference
         self.disconnectCloud = disconnectCloud
+        self.sendSentenceFeedback = sendSentenceFeedback
+        self.sendCloudFeedback = sendCloudFeedback
         self.compositionSnapshot = compositionSnapshot
         self.applySemanticCandidate = applySemanticCandidate
         self.onEvent = onEvent
@@ -269,6 +286,9 @@ public final class SemanticSuggestionPipeline: @unchecked Sendable {
     var neuralLateToken: CompositionToken?
     var neuralLateSegments: [PinyinSegment]?
     var neuralLateAppliedToken: CompositionToken?
+    /// 当前展示槽中可反馈建议的来源标识（LM-003）：requestID + 是否
+    /// 云端（云端走 broker 反馈帧，本地/神经迟到帧走 daemon）。
+    var displayedFeedback: (requestID: String, cloud: Bool)?
     var pendingCloudRequestID: String?
     /// 分段向后重推（KBD-006）：防抖任务与在途请求 ID 集合。
     var suffixRefinementTask: (any SemanticSuggestionTask)?
@@ -321,6 +341,7 @@ public final class SemanticSuggestionPipeline: @unchecked Sendable {
     /// drop any cloud/mixed suggestion carried over from the previous
     /// keystroke.
     public func beginInputCycle() {
+        expireDisplayedSuggestion()
         mixedCompositionSuggestion = nil
         historySource = .localSemantic
         cloudCandidate = nil
@@ -331,6 +352,56 @@ public final class SemanticSuggestionPipeline: @unchecked Sendable {
         neuralLateToken = nil
         neuralLateSegments = nil
         neuralLateAppliedToken = nil
+    }
+
+    // MARK: - 决策反馈（LM-003 传感层）
+
+    /// 展示槽里是否有可反馈的建议（采纳/拒绝发射点用）。
+    public var hasDisplayedSuggestionForFeedback: Bool {
+        displayedFeedback != nil
+    }
+
+    /// 用户 Tab 采纳了展示槽中的建议。
+    public func markDisplayedSuggestionAdopted() {
+        emitDisplayedFeedback("adopted")
+    }
+
+    /// 用户选了其他候选（数字/Space 提交 Rime 首选），展示槽中的
+    /// 建议被拒绝。
+    public func markDisplayedSuggestionRejected() {
+        emitDisplayedFeedback("rejected")
+    }
+
+    /// 输入周期结束（新周期/重置）时建议未被处理。
+    func expireDisplayedSuggestion() {
+        emitDisplayedFeedback("expired")
+    }
+
+    private func emitDisplayedFeedback(_ outcome: String) {
+        guard let feedback = displayedFeedback else { return }
+        displayedFeedback = nil
+        if feedback.cloud {
+            dependencies.sendCloudFeedback(feedback.requestID, outcome)
+        } else {
+            dependencies.sendSentenceFeedback(
+                feedback.requestID,
+                outcome
+            )
+        }
+    }
+
+    /// 登记展示槽建议的来源；云端接管本地建议时先发 superseded。
+    func setDisplayedFeedback(requestID: String, cloud: Bool) {
+        if let existing = displayedFeedback,
+           !existing.cloud,
+           cloud,
+           existing.requestID != requestID {
+            dependencies.sendSentenceFeedback(
+                existing.requestID,
+                "superseded"
+            )
+        }
+        displayedFeedback = (requestID, cloud)
     }
 
     /// No candidates and no mixed suggestion: collapse the slot to the
