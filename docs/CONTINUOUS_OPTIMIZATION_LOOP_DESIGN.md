@@ -183,7 +183,9 @@ re-fetch 同批）不再双计 L2 分布；环形容量 2048（>4× 批上限 51
    学习信号——learning_gain_nats > 0、个人短语命中率 ≥30%、泛化无塔陷
    （user_test > baseline_test）。字段映射裁决（2026-10-22）：冻结集 top1
    净增益降为 monitoring-only（leakage 主导）；原「0.94 泛化 gap」公式
-   不可考，以无塔陷检查替代；P95 延迟回归 pending（基准 harness 未建）。
+   不可考，以无塔陷检查替代；P95 延迟回归由 `tools/benchmark_typing_path.py`
+   度量（A/B 交错 engine.infer 同步重排路径，L2 开/关），实测 delta
+   0.072ms ≤ 1.0ms 预算（2026-10-22）。
 2. **模型层门**：`--run-model-gate` 跑冻结 reproduce（torch 约束解码族，
    MLX 制品经 LM-001 证明 99.8% 一致）；回归地板句准确率 ≥0.90、
    p50 ≤1.5× 冻结 280.5ms；晋级门归 LM-002；真实历史留出集随 LM-004

@@ -70,6 +70,9 @@ DEFAULT_DECODER_CONFIG = (
 DEFAULT_E2E_REPORT = (
     PROJECT_ROOT / ".rimeai/reports/keyboard-interaction-v3.json"
 )
+DEFAULT_TYPING_PATH_REPORT = (
+    PROJECT_ROOT / ".rimeai/reports/typing-path-benchmark.json"
+)
 DEFAULT_REPORT_OUT = PROJECT_ROOT / ".rimeai/reports/loop-gates-v1.json"
 COLLECT_SCRIPT = PROJECT_ROOT / "script/collect_real_keyboard_evaluation.sh"
 
@@ -120,8 +123,12 @@ def _gate(
     }
 
 
-def check_sidecar(report: dict[str, Any]) -> dict[str, Any]:
-    """Gate 1 on a language-profile evaluator report dict."""
+def check_sidecar(
+    report: dict[str, Any],
+    typing_path: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Gate 1 on a language-profile evaluator report dict, plus the
+    optional A/B typing-path benchmark report."""
     metrics: list[dict[str, Any]] = []
     notes: list[str] = []
     gain = report.get("learning_gain_nats")
@@ -193,14 +200,35 @@ def check_sidecar(report: dict[str, Any]) -> dict[str, Any]:
                 )
             )
         )
-    notes.append(
-        "typing_path_p95_latency: pending — the benchmark harness for "
-        "the <= +1ms regression check does not exist yet (design "
-        "condition carried, unmeasured)"
-    )
-    metrics.append(
-        _metric("typing_path_p95_latency_ms", None, "<=+1", None, "pending")
-    )
+    if typing_path is not None:
+        delta = typing_path.get("delta_p95_ms")
+        budget = typing_path.get("regression_budget_ms", 1.0)
+        if isinstance(delta, (int, float)):
+            metrics.append(
+                _metric(
+                    "typing_path_p95_delta_ms",
+                    delta,
+                    "<=",
+                    budget,
+                    "pass" if delta <= budget else "fail",
+                )
+            )
+        else:
+            metrics.append(
+                _metric(
+                    "typing_path_p95_delta_ms", None, "<=", 1.0, "fail"
+                )
+            )
+    else:
+        notes.append(
+            "typing_path_p95: pending — run tools/benchmark_typing_path.py "
+            "to produce the A/B interleaved report this gate consumes"
+        )
+        metrics.append(
+            _metric(
+                "typing_path_p95_delta_ms", None, "<=", 1.0, "pending"
+            )
+        )
     return _gate("sidecar", metrics, notes)
 
 
@@ -335,6 +363,7 @@ def run_sidecar_gate(
     frozen_samples: Path,
     baseline_model: Path,
     sidecar_report: Path | None,
+    typing_path_report: Path,
     report_out: Path,
 ) -> dict[str, Any]:
     if sidecar_report is not None:
@@ -345,48 +374,58 @@ def run_sidecar_gate(
                 [_metric("sidecar_report_json", None, "json", None, "fail")],
                 [error or "unreadable sidecar report"],
             )
-        return check_sidecar(report)
-    if not history_db.exists():
-        return _gate(
-            "sidecar",
+    else:
+        if not history_db.exists():
+            return _gate(
+                "sidecar",
+                [
+                    _metric(
+                        "history_db_present", False, "==", True, "pending"
+                    )
+                ],
+                [f"history database missing: {history_db}"],
+            )
+        target = report_out.parent / "loop-gates-sidecar-latest.json"
+        completed = _run_command(
             [
-                _metric(
-                    "history_db_present", False, "==", True, "pending"
-                )
-            ],
-            [f"history database missing: {history_db}"],
+                sys.executable,
+                "-m",
+                "rimeai_eval",
+                "language-profile",
+                "--history-db",
+                str(history_db),
+                "--frozen-samples",
+                str(frozen_samples),
+                "--baseline-model",
+                str(baseline_model),
+                "--report",
+                str(target),
+            ]
         )
-    target = report_out.parent / "loop-gates-sidecar-latest.json"
-    completed = _run_command(
-        [
-            sys.executable,
-            "-m",
-            "rimeai_eval",
-            "language-profile",
-            "--history-db",
-            str(history_db),
-            "--frozen-samples",
-            str(frozen_samples),
-            "--baseline-model",
-            str(baseline_model),
-            "--report",
-            str(target),
-        ]
-    )
-    if completed.returncode != 0 or not target.exists():
-        return _gate(
-            "sidecar",
-            [_metric("evaluator_run", completed.returncode, "==", 0, "fail")],
-            [completed.stderr[-2000:]],
-        )
-    report, error = _load_json(target)
-    if report is None:
-        return _gate(
-            "sidecar",
-            [_metric("evaluator_report_json", None, "json", None, "fail")],
-            [error or "unreadable evaluator report"],
-        )
-    return check_sidecar(report)
+        if completed.returncode != 0 or not target.exists():
+            return _gate(
+                "sidecar",
+                [_metric("evaluator_run", completed.returncode, "==", 0, "fail")],
+                [completed.stderr[-2000:]],
+            )
+        report, error = _load_json(target)
+        if report is None:
+            return _gate(
+                "sidecar",
+                [_metric("evaluator_report_json", None, "json", None, "fail")],
+                [error or "unreadable evaluator report"],
+            )
+    typing_path: dict[str, Any] | None = None
+    if typing_path_report.exists():
+        loaded, load_error = _load_json(typing_path_report)
+        if loaded is None:
+            return _gate(
+                "sidecar",
+                [_metric("typing_path_json", None, "json", None, "fail")],
+                [load_error or "unreadable typing-path report"],
+            )
+        typing_path = loaded
+    return check_sidecar(report, typing_path)
 
 
 def run_model_gate(
@@ -525,6 +564,14 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="re-run the real-keyboard collector before the e2e gate",
     )
+    parser.add_argument(
+        "--typing-path-report",
+        type=Path,
+        default=DEFAULT_TYPING_PATH_REPORT,
+        help="A/B interleaved typing-path benchmark report "
+        "(tools/benchmark_typing_path.py); a missing file keeps the "
+        "metric pending",
+    )
     args = parser.parse_args(argv)
     selected = args.only or ["sidecar", "model", "e2e"]
 
@@ -535,6 +582,7 @@ def main(argv: list[str] | None = None) -> int:
             frozen_samples=DEFAULT_FROZEN_SAMPLES,
             baseline_model=DEFAULT_BASELINE_MODEL,
             sidecar_report=args.sidecar_report,
+            typing_path_report=args.typing_path_report,
             report_out=args.report_out,
         )
     if "model" in selected:

@@ -79,10 +79,38 @@ def test_sidecar_passes_on_first_eval_shape_except_pending_p95():
     assert found["learning_gain_nats"] == "pass"
     assert found["phrase_hit_rate"] == "pass"
     assert found["generalization_no_collapse(user_test>baseline_test)"] == "pass"
-    # The typing-path P95 harness does not exist yet: pending, not fail.
-    assert found["typing_path_p95_latency_ms"] == "pending"
+    # No typing-path benchmark report supplied: pending, not fail.
+    assert found["typing_path_p95_delta_ms"] == "pending"
     assert gate["verdict"] == "pending"
     assert any("monitoring-only" in note for note in gate["notes"])
+
+
+def test_sidecar_passes_with_typing_path_report_within_budget():
+    typing_path = {
+        "delta_p95_ms": 0.4,
+        "delta_p50_ms": 0.1,
+        "baseline_p95_ms": 4.2,
+        "user_p95_ms": 4.6,
+        "regression_budget_ms": 1.0,
+    }
+    gate = gates.check_sidecar(dict(SIDECAR_PASS), typing_path)
+    found = statuses(gate)
+    assert found["typing_path_p95_delta_ms"] == "pass"
+    assert gate["verdict"] == "pass"
+
+
+def test_sidecar_fails_when_typing_path_exceeds_budget():
+    typing_path = {
+        "delta_p95_ms": 1.5,
+        "regression_budget_ms": 1.0,
+    }
+    gate = gates.check_sidecar(dict(SIDECAR_PASS), typing_path)
+    assert gate["verdict"] == "fail"
+
+
+def test_sidecar_fails_on_corrupt_typing_path_report():
+    gate = gates.check_sidecar(dict(SIDECAR_PASS), {"delta_p95_ms": None})
+    assert statuses(gate)["typing_path_p95_delta_ms"] == "fail"
 
 
 def test_sidecar_fails_on_nonpositive_gain():
