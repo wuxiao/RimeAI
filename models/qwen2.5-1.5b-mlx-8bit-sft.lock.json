@@ -1,0 +1,57 @@
+{
+ "schema_version": 1,
+ "kind": "mlx-constrained-sft-lock",
+ "model_name": "qwen2.5-1.5b-mlx-8bit-sft",
+ "revision": "sft-v1-20261022",
+ "license": "Apache-2.0",
+ "base": {
+  "model": "Qwen/Qwen2.5-1.5B",
+  "fp16_source_dir": ".rimeai/models/qwen2.5-1.5b-base",
+  "convert": "mlx_lm.convert --quantize --q-bits 8 --q-group-size 64 (8.501 bpw)"
+ },
+ "weights_sha256": "ace31543919e04f659f7ec6f806efeb26299e774cab3483af495a8a9cd5230d2",
+ "local_dir": ".rimeai/models/qwen2.5-1.5b-mlx-8bit-sft-v1",
+ "verification": "worker artifact.manifest.json pin; fail-closed",
+ "training": {
+  "tool": "mlx_lm.lora 0.32.2 / mlx 0.32.4",
+  "data": ".rimeai/sft (8044 zero-prompt rows, identical to the 0.5B arm)",
+  "hyperparameters": {
+   "iters": 2000,
+   "learning_rate": 0.0001,
+   "batch_size": 4,
+   "max_seq_length": 256,
+   "num_layers": 16,
+   "seed": 42
+  }
+ },
+ "frozen_eval": {
+  "dataset": "p0-librime-1.17.0-luna-simp test (974)",
+  "sentence_accuracy": 0.955852,
+  "baseline_sentence_accuracy": 0.726899,
+  "latency_ms": {
+   "p50": 218.4,
+   "p95": 380.4
+  },
+  "error_taxonomy": {
+   "failures": 43,
+   "model_path_miss": 32,
+   "gate_fuzzy_mismatch": 5,
+   "index_recall_miss": 6
+  },
+  "fixed_vs_base": 232,
+  "regressions_vs_base": 9
+ },
+ "scale_ladder": {
+  "0.5B": {
+   "accuracy": 0.941478,
+   "model_path_miss": 44,
+   "p50_ms": 124
+  },
+  "1.5B": {
+   "accuracy": 0.955852,
+   "model_path_miss": 32,
+   "p50_ms": 218
+  },
+  "note": "same data/hyperparameters/seed; 1.5B trades ~1.8x latency for +1.44pp and a further -12 in the target bucket"
+ }
+}
