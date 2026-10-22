@@ -140,11 +140,19 @@ TASKS.md「不在当前任务表」写明：教师软标签蒸馏、领域 adapt
 ≥60 天后重评；重评前不单独依赖时间衰减路径（淘汰仅由容量触发）。
 完成条件：半衰期、容量上限、保护豁免、删除后计数不复活均有单测。
 
-#### LP-011 L2 计数聚合与固化压缩
-落点：`rimeai_daemon/user_lm.py` 计数聚合语义 + `rimeai_daemon/consolidation.py`
-批处理压缩（连续 run 合并 ≤3 段/域）+ drain/throttle 接线。
-完成条件：批内 SUM 语义稳定（乱序输入结果一致）、压缩后 L2 打分与压缩前
-在冻结集上一致（**性能收益在 L2 评测里验证**——压缩是工程优化，不是质量目标）。
+#### LP-011 L2 计数聚合幂等（范围裁决 2026-10-22）
+**范围裁决（用户授权）**：原 reveal finding 的「连续 run ≤3 段压缩 +
+drain/throttle」已不可考且无实证收益——实测真实 user-lm 仅 137KB gzip
+（解压 263KB）/ load 6.6ms / serialize 5.0ms，每轮固化处理单批 512 条，
+压缩在当前与可预见规模无收益，不做臆造重建。压缩降为量化证据门：
+**user-lm.json.gz ≥ 5MB 或 load+serialize ≥ 500ms 才重评**。
+落地可考证核心：`UserLanguageModel.fold(domain, items)` 按 commit id
+（token）聚合去重——同 token 至多计一次，崩溃重取（claim 过期后
+re-fetch 同批）不再双计 L2 分布；环形容量 2048（>4× 批上限 512，覆盖
+15 分钟 claim 过期窗口）。持久化 schema v2（per-domain
+`folded_tokens`；v1 兼容加载空环，Swift 侧透传不受影响）。
+完成条件（已验证）：重复折叠幂等、乱序输入计数一致、环容量驱逐行为
+确定、崩溃重取集成测试计数不变；全量 pytest 绿。
 
 ### 阶段 C：模型层（权重更新）
 

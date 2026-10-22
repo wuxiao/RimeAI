@@ -38,9 +38,8 @@ def make_daemon_db(
             """
         )
         db.executemany(
-            "INSERT INTO decisions(created_at_ms, source, request_id,"
-            " pinyin, suggestion, outcome) VALUES (?, ?, ?, ?, ?, ?)",
-            rows,
+            "INSERT INTO decisions VALUES (?,?,?,?,?,?,?)",
+            [(index, *row) for index, row in enumerate(rows, start=1)],
         )
     return path
 
@@ -65,10 +64,8 @@ def make_cloud_db(
             """
         )
         db.executemany(
-            "INSERT INTO decisions(created_at_ms, model_id, request_id,"
-            " pinyin, decision, text, outcome)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?)",
-            rows,
+            "INSERT INTO decisions VALUES (?,?,?,?,?,?,?,?)",
+            [(index, *row) for index, row in enumerate(rows, start=1)],
         )
     return path
 
@@ -88,8 +85,7 @@ def make_history_db(
             """
         )
         db.executemany(
-            "INSERT INTO history_commits(id, committed_at_ms, pinyin,"
-            " committed_text) VALUES (?, ?, ?, ?)",
+            "INSERT INTO history_commits VALUES (?,?,?,?)",
             [
                 (f"00000000-0000-0000-0000-{index:012d}", *row)
                 for index, row in enumerate(rows)

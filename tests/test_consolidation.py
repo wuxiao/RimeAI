@@ -653,3 +653,48 @@ def test_scheduler_idle_gate_defers_rounds_while_activity_recent():
     assert scheduler.should_run() is False
     scheduler.run_round()
     assert pipeline.rounds == 2
+
+
+def test_crash_between_l2_save_and_watermark_does_not_double_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """LP-011: the crashed-round re-fetch must not double-count L2.
+
+    The crash window is inside the statistics phase — after the L2
+    artifact was saved but before the statistics watermark advanced. The
+    expired claims let the next round re-fetch the same rows; the
+    folded-token ring makes the re-fold a no-op."""
+    paths = make_layout(tmp_path)
+    insert_commit(paths, suffix="000000000001", age_days=8, text="接口设计文档")
+    insert_commit(paths, suffix="000000000002", age_days=9, text="接口实现评审")
+    pipeline = ConsolidationPipeline(paths)
+    original = pipeline._mark_statistics
+    calls = {"count": 0}
+
+    def crash_before_watermark(batch):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise RuntimeError("crash before the statistics watermark")
+        return original(batch)
+
+    monkeypatch.setattr(
+        pipeline, "_mark_statistics", crash_before_watermark
+    )
+    with pytest.raises(RuntimeError):
+        pipeline.run_once()
+
+    def l2_payload() -> dict:
+        model = UserLanguageModel.load(paths.user_lm)
+        return model._domains["global"].to_payload()
+
+    crashed = l2_payload()
+    assert crashed["characters"] > 0
+
+    # The crashed round's claims expire (simulated); the rows are still
+    # 'raw', so the next round re-fetches and re-folds them.
+    with sqlite3.connect(paths.history_db) as db:
+        db.execute("DELETE FROM consolidation_claims")
+
+    report = pipeline.run_once()
+    assert report.statistics_done == 2
+    assert l2_payload() == crashed

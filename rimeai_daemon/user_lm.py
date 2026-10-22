@@ -14,7 +14,7 @@ import json
 import math
 import os
 import tempfile
-from collections import Counter
+from collections import Counter, deque
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -34,8 +34,17 @@ PRIOR_CHARACTERS = 5000.0
 # around 0.1-0.35 so user habits tilt, never dominate, the baseline.
 MAX_USER_WEIGHT = 0.35
 RANK_STICKINESS = 0.1
-SCHEMA_VERSION = 1
+# v2: per-domain ``folded_tokens`` ring makes L2 folding idempotent —
+# a crashed round whose claims expire re-fetches the same rows, and the
+# re-fold must not double-count (LP-011). v1 payloads load unchanged
+# (empty ring: every batch already folded by a v1 daemon is past the
+# statistics watermark, so only future batches need dedup).
+SCHEMA_VERSION = 2
 MAX_TEXT_LENGTH = 256
+# Ring capacity for folded commit ids: >4x the consolidation batch
+# limit (512), comfortably covering the 15-minute claim-expiry window
+# a crashed round's re-fetch can revisit.
+FOLDED_TOKEN_CAPACITY = 2048
 # Per-commit per-gram cap: one commit can increment each gram at most this
 # many times, so a single repeated phrase cannot dominate the distribution.
 PER_COMMIT_GRAM_CAP = 2
@@ -182,9 +191,17 @@ class UserLanguageModel:
 
     GLOBAL_DOMAIN = "global"
 
-    def __init__(self) -> None:
+    def __init__(
+        self, *, folded_token_capacity: int = FOLDED_TOKEN_CAPACITY
+    ) -> None:
+        if folded_token_capacity < 1:
+            raise UserLMError("folded token capacity must be >= 1")
+        self._folded_token_capacity = folded_token_capacity
         self._domains: dict[str, DomainCounts] = {
             self.GLOBAL_DOMAIN: DomainCounts()
+        }
+        self._folded: dict[str, deque[str]] = {
+            self.GLOBAL_DOMAIN: deque(maxlen=folded_token_capacity)
         }
 
     # -- evidence ingestion -------------------------------------------------
@@ -195,6 +212,35 @@ class UserLanguageModel:
         for text in texts:
             if text:
                 counts.observe(text)
+
+    def fold(
+        self, domain: str | None, items: Sequence[tuple[str, str]]
+    ) -> int:
+        """Folds ``(commit_id, text)`` pairs idempotently (LP-011).
+
+        Each distinct commit id is counted at most once for as long as
+        it stays in the bounded ring, so re-folding a batch whose claim
+        expired mid-round is a no-op instead of a double count. Within
+        one call, later duplicates of the same id are skipped too. The
+        return value is the number of newly folded items; the input's
+        order never changes the resulting counts (addition commutes,
+        and dedup is by id, not position)."""
+        resolved = (domain or self.GLOBAL_DOMAIN).strip() or self.GLOBAL_DOMAIN
+        counts = self._domains.setdefault(resolved, DomainCounts())
+        ring = self._folded.setdefault(
+            resolved, deque(maxlen=self._folded_token_capacity)
+        )
+        seen = set(ring)
+        folded = 0
+        for token, text in items:
+            if not token or token in seen:
+                continue
+            seen.add(token)
+            ring.append(token)
+            if text:
+                counts.observe(text)
+            folded += 1
+        return folded
 
     def domains(self) -> list[str]:
         return sorted(
@@ -306,7 +352,10 @@ class UserLanguageModel:
             "schema_version": SCHEMA_VERSION,
             "model_type": "user-char-ngram",
             "domains": {
-                name: counts.to_payload()
+                name: {
+                    **counts.to_payload(),
+                    "folded_tokens": list(self._folded.get(name, ())),
+                }
                 for name, counts in self._domains.items()
                 if counts.characters > 0
             },
@@ -353,7 +402,7 @@ class UserLanguageModel:
             ) from error
         if (
             not isinstance(payload, dict)
-            or payload.get("schema_version") != SCHEMA_VERSION
+            or payload.get("schema_version") not in {1, SCHEMA_VERSION}
             or payload.get("model_type") != "user-char-ngram"
         ):
             raise UserLMError("unsupported user language model artifact")
@@ -369,5 +418,22 @@ class UserLanguageModel:
                 raise UserLMError(
                     f"user language model domain '{name}' is invalid"
                 ) from error
+            tokens = (
+                domain_payload.get("folded_tokens")
+                if isinstance(domain_payload, dict)
+                else None
+            )
+            if isinstance(tokens, list):
+                # v1 payloads carry no ring: everything folded before the
+                # v2 upgrade sits past the statistics watermark, so an
+                # empty ring loses nothing (only future batches dedup).
+                model._folded[str(name)] = deque(
+                    (
+                        token
+                        for token in tokens
+                        if isinstance(token, str) and token
+                    ),
+                    maxlen=model._folded_token_capacity,
+                )
         model._domains.setdefault(model.GLOBAL_DOMAIN, DomainCounts())
         return model

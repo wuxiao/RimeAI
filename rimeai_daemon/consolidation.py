@@ -5,9 +5,11 @@ L1 phrasebook and the L2 user language model (statistics phase), then
 either runs the optional L3 semantic consolidator or explicitly skips it,
 and finally prunes raw text that satisfied the double-delete guard. Steps
 are idempotent across completed rounds via the consolidation watermarks
-maintained in the history database; a mid-round crash (claim expires while
-the rows are still 'raw') re-fetches the batch and may re-count phrase
-frequencies, domain stats, and user-LM statistics. Rows whose statistics
+maintained in the history database; L2 user-LM folding is additionally
+idempotent across crashed rounds via per-domain folded-token rings
+(user_lm.fold), so a re-fetched batch never double-counts the user's
+n-gram distribution. A mid-round crash may still re-count phrase
+frequencies and domain stats (benign counters). Rows whose statistics
 phase completed but whose semantic phase failed stay 'statistics_done' and
 are re-fetched for the semantic pass on later rounds without re-counting
 statistics; only rows in a terminal state ('consolidated' or explicitly
@@ -383,12 +385,17 @@ class ConsolidationPipeline:
         domains: dict[str, str],
     ) -> None:
         model = UserLanguageModel.load(self.paths.user_lm)
-        grouped: dict[str, list[str]] = {}
+        grouped: dict[str, list[tuple[str, str]]] = {}
         for commit in batch:
             domain = domains.get(commit.bundle_id, "global")
-            grouped.setdefault(domain, []).append(commit.committed_text)
-        for domain, texts in grouped.items():
-            model.update(domain, texts)
+            grouped.setdefault(domain, []).append(
+                (commit.id, commit.committed_text)
+            )
+        for domain, items in grouped.items():
+            # Token-keyed folding (LP-011): a crashed round whose claims
+            # expire re-fetches these rows, and the re-fold must be a
+            # no-op instead of a second count.
+            model.fold(domain, items)
         self.paths.user_lm.parent.mkdir(parents=True, exist_ok=True)
         model.save(self.paths.user_lm)
 

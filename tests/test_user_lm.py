@@ -225,3 +225,92 @@ def test_swift_encoded_user_lm_is_readable_by_python_gzip():
     )
     # 同一份字节也必须能被 Swift 侧读回（见 GzipCodecTests）。
     assert decoded.startswith(b"{")
+
+
+# --------------------------------------------------------------------------
+# LP-011: token-aggregated idempotent folding.
+
+
+def test_fold_is_idempotent_for_repeated_batches():
+    model = UserLanguageModel()
+    items = [("id-1", "接口设计文档"), ("id-2", "接口实现评审")]
+    assert model.fold("global", items) == 2
+    once = model._domains["global"].to_payload()
+    assert model.fold("global", items) == 0
+    assert model._domains["global"].to_payload() == once
+
+
+def test_fold_is_order_independent():
+    forward = UserLanguageModel()
+    backward = UserLanguageModel()
+    items = [
+        ("a", "你好世界"),
+        ("b", "接口设计"),
+        ("c", "测试用例"),
+    ]
+    forward.fold("global", items)
+    backward.fold("global", list(reversed(items)))
+    assert (
+        forward._domains["global"].to_payload()
+        == backward._domains["global"].to_payload()
+    )
+
+
+def test_fold_skips_duplicates_within_one_call():
+    model = UserLanguageModel()
+    assert model.fold("global", [("a", "文本"), ("a", "文本")]) == 1
+
+
+def test_fold_ring_evicts_oldest_beyond_capacity():
+    model = UserLanguageModel(folded_token_capacity=2)
+    model.fold("global", [("a", "甲乙"), ("b", "丙丁")])
+    model.fold("global", [("c", "戊己")])  # evicts "a" from the ring
+    # "a" left the bounded memory: re-folding counts it again. The bound
+    # (2048 by default, >4x the batch limit) covers the claim-expiry
+    # re-fetch window, so production re-fetches stay deduplicated.
+    assert model.fold("global", [("a", "甲乙")]) == 1
+
+
+def test_fold_empty_texts_contribute_no_counts_but_hold_tokens():
+    model = UserLanguageModel()
+    assert model.fold("global", [("a", "")]) == 1
+    assert model._domains["global"].characters == 0
+
+
+def test_save_load_round_trip_preserves_folded_tokens(tmp_path: Path):
+    model = UserLanguageModel()
+    model.fold("global", [("id-1", "接口设计文档")])
+    path = tmp_path / "user-lm.json.gz"
+    model.save(path)
+    restored = UserLanguageModel.load(path)
+    assert restored.fold("global", [("id-1", "接口设计文档")]) == 0
+    assert restored._folded_token_capacity == model._folded_token_capacity
+
+
+def test_load_accepts_v1_payloads_with_empty_rings(tmp_path: Path):
+    import gzip
+    import json
+
+    from rimeai_daemon.user_lm import DomainCounts
+
+    counts = DomainCounts()
+    counts.observe("接口设计文档")
+    payload = {
+        "schema_version": 1,
+        "model_type": "user-char-ngram",
+        "domains": {"global": counts.to_payload()},
+    }
+    path = tmp_path / "user-lm.json.gz"
+    path.write_bytes(
+        gzip.compress(json.dumps(payload, ensure_ascii=False).encode())
+    )
+    model = UserLanguageModel.load(path)
+    # v1 counts are intact; the ring starts empty because everything
+    # folded before the v2 upgrade is past the statistics watermark.
+    assert model._domains["global"].characters == counts.characters
+    assert model.fold("global", [("any", "接口设计文档")]) == 1
+
+
+def test_fold_capacity_must_be_positive():
+    with pytest.raises(UserLMError):
+        UserLanguageModel(folded_token_capacity=0)
