@@ -17,6 +17,10 @@ from pathlib import Path
 from time import monotonic
 from typing import Any, Protocol
 
+from rimeai_daemon.segment_policy import (
+    split_segmented_text,
+    validate_pinyin_segments,
+)
 from rimeai_runtime.localipc import (
     AlreadyListeningError,
     ExistingSocketUnverifiableError,
@@ -28,15 +32,6 @@ from rimeai_runtime.localipc import (
     prepare_unix_listener_socket,
 )
 
-from rimeai_daemon.segment_policy import (
-    split_segmented_text,
-    validate_pinyin_segments,
-)
-
-from .history_index import (
-    EMBEDDING_INDEXING_ENABLED,
-    HistoryEmbeddingIndexer,
-)
 from .cloud_model import (
     ALLOWED_MODELS,
     CONTINUATION_ALLOWED_MODELS,
@@ -45,20 +40,22 @@ from .cloud_model import (
     PROVIDER,
     _han_count,
 )
+from .decision_journal import (
+    RESOLVABLE_OUTCOMES,
+    DecisionJournal,
+)
+from .history_index import (
+    EMBEDDING_INDEXING_ENABLED,
+    HistoryEmbeddingIndexer,
+)
 
 
 class CandidateRanker(Protocol):
-    def rank(
-        self, cloud_request: dict[str, Any]
-    ) -> dict[str, Any]: ...
+    def rank(self, cloud_request: dict[str, Any]) -> dict[str, Any]: ...
 
-    def rank_continuation(
-        self, cloud_request: dict[str, Any]
-    ) -> dict[str, Any]: ...
+    def rank_continuation(self, cloud_request: dict[str, Any]) -> dict[str, Any]: ...
 
-    def embed_texts(
-        self, texts: Sequence[str]
-    ) -> list[list[float]]: ...
+    def embed_texts(self, texts: Sequence[str]) -> list[list[float]]: ...
 
 
 class CloudBrokerConfigurationError(ValueError):
@@ -113,11 +110,7 @@ def validate_request(message: Any) -> dict[str, Any]:
         raise ValueError("revision or history generation is invalid")
     recent = message.get("recent_context")
     snippets = message.get("history_snippets")
-    if (
-        not isinstance(recent, str)
-        or len(recent) > 600
-        or "\x00" in recent
-    ):
+    if not isinstance(recent, str) or len(recent) > 600 or "\x00" in recent:
         raise ValueError("recent context is invalid")
     if not isinstance(snippets, list) or len(snippets) > 8:
         raise ValueError("history snippets are invalid")
@@ -263,10 +256,7 @@ def validate_decision(
     if (
         len(text) > GENERATE_MAXIMUM_CHARACTERS
         or any(ord(char) < 0x20 or ord(char) == 0x7F for char in text)
-        or (
-            segments is not None
-            and split_segmented_text(text, segments) is None
-        )
+        or (segments is not None and split_segmented_text(text, segments) is None)
     ):
         raise ValueError("generated sentence is invalid")
     return decision
@@ -279,10 +269,12 @@ class CloudBrokerServer:
         ranker: CandidateRanker,
         history_indexer: HistoryEmbeddingIndexer | None = None,
         activity_notifier: Callable[[], None] | None = None,
+        decision_journal: DecisionJournal | None = None,
     ):
         self.socket_path = socket_path
         self.ranker = ranker
         self.history_indexer = history_indexer
+        self.decision_journal = decision_journal
         # Mirrors the daemon server: called for every accepted inference /
         # continuation request so a co-located idle scheduler (consolidation)
         # can tell "user is typing" from "process has merely been up".
@@ -305,17 +297,13 @@ class CloudBrokerServer:
                 self._handle_client,
             )
         except SocketPathTooLongError as failure:
-            raise CloudBrokerConfigurationError(
-                "socket path is too long"
-            ) from failure
+            raise CloudBrokerConfigurationError("socket path is too long") from failure
         except RuntimeDirectoryIsSymlinkError as failure:
             raise CloudBrokerConfigurationError(
                 "runtime path is a symlink"
             ) from failure
         except NotASocketPathError as failure:
-            raise CloudBrokerConfigurationError(
-                "refusing non-socket path"
-            ) from failure
+            raise CloudBrokerConfigurationError("refusing non-socket path") from failure
         except ExistingSocketUnverifiableError as failure:
             raise CloudBrokerConfigurationError(
                 "cannot verify existing cloud socket"
@@ -340,6 +328,8 @@ class CloudBrokerServer:
             task.cancel()
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
+        if self.decision_journal is not None:
+            self.decision_journal.close()
         if self.socket_path.exists() and stat.S_ISSOCK(
             self.socket_path.lstat().st_mode
         ):
@@ -365,8 +355,7 @@ class CloudBrokerServer:
                 await asyncio.to_thread(indexer.run_once, self.ranker)
             except Exception as error:
                 sys.stderr.write(
-                    f"[cloud] index loop error "
-                    f"{type(error).__name__}: {error}\n"
+                    f"[cloud] index loop error {type(error).__name__}: {error}\n"
                 )
                 sys.stderr.flush()
             await asyncio.sleep(interval)
@@ -378,8 +367,7 @@ class CloudBrokerServer:
         payload: dict[str, Any],
     ) -> None:
         encoded = (
-            json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-            + "\n"
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n"
         ).encode()
         async with lock:
             writer.write(encoded)
@@ -416,9 +404,7 @@ class CloudBrokerServer:
                     message = json.loads(line)
                 except (UnicodeDecodeError, json.JSONDecodeError):
                     break
-                if not isinstance(message, dict) or message.get(
-                    "schema_version"
-                ) != 1:
+                if not isinstance(message, dict) or message.get("schema_version") != 1:
                     break
                 message_type = message.get("type")
                 if not hello:
@@ -442,6 +428,8 @@ class CloudBrokerServer:
                         "text-generation",
                         "continuation-generation",
                     ]
+                    if self.decision_journal is not None:
+                        capabilities.append("sentence-feedback")
                     await self._write(
                         writer,
                         lock,
@@ -466,11 +454,27 @@ class CloudBrokerServer:
                         if task is not None:
                             task.cancel()
                     continue
+                if message_type == "sentence_feedback":
+                    # LM-003: cloud-suggestion adoption feedback from the
+                    # input method, resolving the teacher decision's
+                    # pending row. Fire-and-forget, malformed → ignored.
+                    feedback_request_id = message.get("request_id")
+                    feedback_outcome = message.get("outcome")
+                    if (
+                        self.decision_journal is not None
+                        and isinstance(feedback_request_id, str)
+                        and feedback_request_id
+                        and len(feedback_request_id) <= 256
+                        and isinstance(feedback_outcome, str)
+                        and feedback_outcome in RESOLVABLE_OUTCOMES
+                    ):
+                        self.decision_journal.resolve(
+                            feedback_request_id, feedback_outcome
+                        )
+                    continue
                 if message_type == "continuation":
                     try:
-                        continuation_request = validate_continuation_request(
-                            message
-                        )
+                        continuation_request = validate_continuation_request(message)
                     except ValueError:
                         continue
                     if self._activity_notifier is not None:
@@ -478,9 +482,7 @@ class CloudBrokerServer:
                     # Latest-wins: a new continuation supersedes any
                     # in-flight one; the client only ever wants the
                     # suggestion for the most recent commit.
-                    for old_id, old_task in tuple(
-                        pending_continuations.items()
-                    ):
+                    for old_id, old_task in tuple(pending_continuations.items()):
                         if not old_task.done():
                             old_task.cancel()
                         pending_continuations.pop(old_id, None)
@@ -492,9 +494,7 @@ class CloudBrokerServer:
                             client_capabilities,
                         )
                     )
-                    pending_continuations[
-                        continuation_request["request_id"]
-                    ] = task
+                    pending_continuations[continuation_request["request_id"]] = task
                     self._tasks.add(task)
                     task.add_done_callback(self._tasks.discard)
                     continue
@@ -583,8 +583,7 @@ class CloudBrokerServer:
             decision = validate_decision(raw_decision, cloud_request)
         except asyncio.TimeoutError:
             sys.stderr.write(
-                f"[cloud] timeout revision={revision} "
-                f"remaining={remaining:.2f}s\n"
+                f"[cloud] timeout revision={revision} remaining={remaining:.2f}s\n"
             )
             sys.stderr.flush()
             return
@@ -594,17 +593,14 @@ class CloudBrokerServer:
             return
         except Exception as exc:
             sys.stderr.write(
-                f"[cloud] error revision={revision} "
-                f"{type(exc).__name__}: {exc}\n"
+                f"[cloud] error revision={revision} {type(exc).__name__}: {exc}\n"
             )
             sys.stderr.flush()
             return
         if latest.get(key) != cloud_request["revision"]:
             return
         if self.history_indexer is not None:
-            generation = await asyncio.to_thread(
-                self.history_indexer.generation
-            )
+            generation = await asyncio.to_thread(self.history_indexer.generation)
             if (
                 generation is not None
                 and generation != cloud_request["history_generation"]
@@ -655,9 +651,7 @@ class CloudBrokerServer:
         # removal no longer send candidate_pool_hash; older clients still
         # compare it byte for byte, so echo it only when present.
         if cloud_request.get("candidate_pool_hash") is not None:
-            response["candidate_pool_hash"] = cloud_request[
-                "candidate_pool_hash"
-            ]
+            response["candidate_pool_hash"] = cloud_request["candidate_pool_hash"]
         if decision["decision"] == "generate":
             response["generated_text"] = decision["text"]
             # Echo the request pinyin verbatim: the client compares byte
@@ -727,15 +721,11 @@ class CloudBrokerServer:
                 timeout=remaining,
             )
         except asyncio.TimeoutError:
-            sys.stderr.write(
-                f"[cloud] continuation timeout request={request_id}\n"
-            )
+            sys.stderr.write(f"[cloud] continuation timeout request={request_id}\n")
             sys.stderr.flush()
             return
         except asyncio.CancelledError:
-            sys.stderr.write(
-                f"[cloud] continuation cancelled request={request_id}\n"
-            )
+            sys.stderr.write(f"[cloud] continuation cancelled request={request_id}\n")
             sys.stderr.flush()
             return
         except Exception as exc:
@@ -776,9 +766,6 @@ class CloudBrokerServer:
             generation = self.history_indexer.generation()
         except (OSError, sqlite3.Error):
             return cloud_request
-        if (
-            generation is not None
-            and generation != cloud_request["history_generation"]
-        ):
+        if generation is not None and generation != cloud_request["history_generation"]:
             return None
         return cloud_request

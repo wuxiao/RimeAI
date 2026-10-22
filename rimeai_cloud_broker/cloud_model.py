@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import re
 import sys
@@ -13,8 +14,11 @@ from threading import Lock
 from time import monotonic
 from typing import Any
 from urllib import error, request
+from urllib.parse import urlsplit
 
 from rimeai_daemon.segment_policy import split_segmented_text
+
+from .decision_journal import DecisionJournal
 
 LOCAL_ENDPOINT = "http://localhost:11434/v1"
 # Official Zhipu Coding Plan, direct connection (product decision
@@ -50,11 +54,19 @@ LOOSE_MAX_TAIL_OVERLAP = 3
 # field) inflate prefill and hand the model more material to echo
 # verbatim; a zero-Han context cannot inform a Chinese reading at all.
 PROMPT_CONTEXT_TAIL = 120
-# Explicit opt-in diagnostics: while this marker file exists, full request
-# and response bodies are written to the broker's stderr log. Prompts
-# contain the user's typed pinyin and context, so this stays off by
-# default; credentials (the Authorization header) are never logged.
+# Explicit opt-in diagnostics. Two levels:
+#   cloud-debug      — metadata only (path + byte counts), P2-9 default:
+#                      payloads contain the user's typed pinyin and
+#                      context in plaintext, so they stay out of logs.
+#   cloud-debug-full — development mode: additionally log full request/
+#                      response bodies (still never credentials). Point
+#                      this at a scratch log you control and remove the
+#                      flag before any release/diagnostic copy review.
 DEBUG_FLAG = Path.home() / ".config" / "rimeai" / "cloud-debug"
+DEBUG_PAYLOAD_FLAG = Path.home() / ".config" / "rimeai" / "cloud-debug-full"
+# Payload lines are capped so a pathological response cannot flood the
+# log; covers the 24KB profile-corpus batches with headroom.
+DEBUG_PAYLOAD_LIMIT = 64 * 1024
 
 # Post-commit continuation mirrors Swift ContinuationTextPolicy
 # (Sources/RimeAIInputCore/CloudBrokerProtocol.swift): keep every value
@@ -72,7 +84,14 @@ CONTINUATION_MAX_TAIL_OVERLAP = 3
 CONTINUATION_ALLOWED_MODELS = {
     "glm-5.3-flash",
 }
-_CONTINUATION_HAN_ONLY = re.compile(r"^[\u3400-\u9fff]+$")
+# 2026-10-22 决策：短语末尾允许保留一个中文标点并随接受上屏
+# （解决智能补全的标点问题）。标点不计入 MIN/MAX_HAN；句中
+# 标点、多个尾部标点与非集合标点仍然拒绝。与 Swift
+# ContinuationTextPolicy.trailingPunctuation 逐字对齐。
+_CONTINUATION_TRAILING_PUNCTUATION = "。，？！；："
+_CONTINUATION_HAN_ONLY = re.compile(
+    r"^[\u3400-\u9fff]+[" + _CONTINUATION_TRAILING_PUNCTUATION + r"]?$"
+)
 
 
 def _han_count(text: str) -> int:
@@ -115,7 +134,7 @@ def continuation_text_allows(text: str, context: str, confidence: float) -> bool
         return False
     if _CONTINUATION_HAN_ONLY.fullmatch(text) is None:
         return False
-    if not CONTINUATION_MIN_HAN <= len(text) <= CONTINUATION_MAX_HAN:
+    if not CONTINUATION_MIN_HAN <= _han_count(text) <= CONTINUATION_MAX_HAN:
         return False
     if context and text in context[-CONTINUATION_DEDUP_TAIL:]:
         return False
@@ -124,9 +143,22 @@ def continuation_text_allows(text: str, context: str, confidence: float) -> bool
 
 def _debug_enabled() -> bool:
     try:
-        return DEBUG_FLAG.exists()
+        return DEBUG_FLAG.exists() or DEBUG_PAYLOAD_FLAG.exists()
     except OSError:
         return False
+
+
+def _debug_payload_enabled() -> bool:
+    try:
+        return DEBUG_PAYLOAD_FLAG.exists()
+    except OSError:
+        return False
+
+
+def _debug_payload_line(direction: str, path: str, body: bytes) -> str:
+    shown = body[:DEBUG_PAYLOAD_LIMIT].decode("utf-8", "replace")
+    suffix = " …truncated" if len(body) > DEBUG_PAYLOAD_LIMIT else ""
+    return f"[cloud-debug-payload] {direction} {path} {shown}{suffix}\n"
 
 
 class CloudBrokerError(RuntimeError):
@@ -153,11 +185,7 @@ def _first_json_object(content: str) -> Any:
 def _first_choice(response: dict[str, Any]) -> dict[str, Any]:
     """OpenAI-compatible responses carry the message in choices[0]."""
     choices = response.get("choices")
-    if (
-        not isinstance(choices, list)
-        or not choices
-        or not isinstance(choices[0], dict)
-    ):
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
         raise CloudBrokerError("cloud returned invalid structured output")
     return choices[0]
 
@@ -173,6 +201,7 @@ class CloudModelClient:
         *,
         api_key_loader: Callable[[], str] | None = None,
         endpoint: str = ENDPOINT,
+        decision_journal: DecisionJournal | None = None,
     ) -> None:
         if endpoint.rstrip("/") != ENDPOINT:
             raise ValueError("the cloud endpoint is fixed by the product contract")
@@ -180,14 +209,13 @@ class CloudModelClient:
         self._api_key: str | None = None
         self._api_key_lock = Lock()
         self._endpoint = ENDPOINT
+        self.decision_journal = decision_journal
         # Pool-independent outputs are cached per (model, pinyin, context)
         # and re-decided locally on every hit, so the synthesis gates stay
         # exact while repeat typing skips the network round trip entirely.
         # Context is part of the key because the prompt (and therefore the
         # composition) changes with it.
-        self._decision_cache: OrderedDict[tuple, dict[str, Any]] = (
-            OrderedDict()
-        )
+        self._decision_cache: OrderedDict[tuple, dict[str, Any]] = OrderedDict()
 
     def rank(self, cloud_request: dict[str, Any]) -> dict[str, Any]:
         started = monotonic()
@@ -212,11 +240,13 @@ class CloudModelClient:
         if cache_key is not None and cache_key in self._decision_cache:
             # Cache hit: re-run the local decision synthesis on the cached
             # raw model output; the deadline clock never starts.
-            return self._synthesize_generation(
+            cached_validated = self._synthesize_generation(
                 self._decision_cache[cache_key],
                 segments=None,
                 recent_context=cloud_request["recent_context"],
             )
+            self._journal_decision(cloud_request, cached_validated)
+            return cached_validated
         if segments is not None:
             # Cross-punctuation composition: one round trip, the model sees
             # every segment (plus its committed_text hint) at once. Rules
@@ -255,7 +285,7 @@ class CloudModelClient:
                 "语境，但严禁把其中的词句抄进生成结果。\n"
                 "4. 只要存在合理解读就输出句子；确实无法解读时输出"
                 "空。\n"
-                '直接输出句子本身的纯文本：不要解释、引号或 JSON；'
+                "直接输出句子本身的纯文本：不要解释、引号或 JSON；"
                 "确实无法解读时输出空。"
             )
         max_tokens = 256
@@ -298,9 +328,7 @@ class CloudModelClient:
         }
         api_key = self._resolve_api_key(cloud_request)
         remaining = (
-            cloud_request["deadline_ms"] / 1000
-            - (monotonic() - started)
-            - 0.025
+            cloud_request["deadline_ms"] / 1000 - (monotonic() - started) - 0.025
         )
         if remaining < 0.05:
             raise CloudBrokerError("cloud deadline expired before network send")
@@ -339,9 +367,7 @@ class CloudModelClient:
                 return _abstain()
             if not (
                 isinstance(unwrapped, dict)
-                and isinstance(
-                    unwrapped.get("text"), (str, type(None))
-                )
+                and isinstance(unwrapped.get("text"), (str, type(None)))
             ):
                 return _abstain()
             text = unwrapped.get("text") or ""
@@ -358,15 +384,42 @@ class CloudModelClient:
             self._decision_cache[cache_key] = decision
             while len(self._decision_cache) > 256:
                 self._decision_cache.popitem(last=False)
+        self._journal_decision(cloud_request, validated)
         return validated
+
+    def _journal_decision(
+        self,
+        cloud_request: dict[str, Any],
+        validated: dict[str, Any],
+    ) -> None:
+        """Writes one teacher decision through to cloud-decisions.db
+        (LM-003, design decision 2026-10-21). Best-effort: journal
+        failures are logged and never fail the request path."""
+        journal = self.decision_journal
+        if journal is None:
+            return
+        request_id = cloud_request.get("request_id")
+        try:
+            journal.record(
+                model_id=cloud_request["model_id"],
+                request_id=(request_id if isinstance(request_id, str) else None),
+                pinyin=cloud_request["pinyin"],
+                decision=str(validated.get("decision") or "abstain"),
+                text=str(validated.get("text") or ""),
+                confidence=(
+                    validated.get("confidence")
+                    if isinstance(validated.get("confidence"), (int, float))
+                    else None
+                ),
+            )
+        except Exception:
+            logging.getLogger(__name__).exception("cloud-decision journaling failed")
 
     def rank_continuation(self, cloud_request: dict[str, Any]) -> dict[str, Any]:
         started = monotonic()
         model_id = cloud_request["model_id"]
         if model_id not in CONTINUATION_ALLOWED_MODELS:
-            raise CloudBrokerError(
-                "model is not in the continuation allowlist"
-            )
+            raise CloudBrokerError("model is not in the continuation allowlist")
         context = cloud_request["recent_context"]
         # Unlike the inference path (where context steers a pinyin-bound
         # composition), context IS the task here: post-commit continuation
@@ -388,7 +441,9 @@ class CloudModelClient:
                         "下一句，绝不能输出其他作品里的相似句子。\n"
                         "2. 记不准或没有把握时，宁可不猜：输出 "
                         '{"generated_text":null,"confidence":null}。\n'
-                        "3. 短语为 2-16 个汉字，不含标点、数字、字母。\n"
+                        "3. 短语为 2-16 个汉字；若该短语在原文中以标点"
+                        "收尾，可在末尾保留一个中文标点（。，？！；：）。"
+                        "除末尾这一个标点外，不得含任何标点、数字、字母。\n"
                         "只输出一个 JSON 对象。"
                     ),
                 },
@@ -402,9 +457,7 @@ class CloudModelClient:
         }
         api_key = self._resolve_api_key(cloud_request)
         remaining = (
-            cloud_request["deadline_ms"] / 1000
-            - (monotonic() - started)
-            - 0.025
+            cloud_request["deadline_ms"] / 1000 - (monotonic() - started) - 0.025
         )
         if remaining < 0.05:
             raise CloudBrokerError("cloud deadline expired before network send")
@@ -503,9 +556,7 @@ class CloudModelClient:
             ord(char) < 0x20 or ord(char) == 0x7F for char in text
         ):
             return _abstain()
-        if segments is not None and (
-            split_segmented_text(text, segments) is None
-        ):
+        if segments is not None and (split_segmented_text(text, segments) is None):
             return _abstain()
         if recent_context and (
             text in recent_context[-LOOSE_DEDUP_TAIL:]
@@ -575,7 +626,7 @@ class CloudModelClient:
                 "reason": "low_confidence",
             }
         if _CONTINUATION_HAN_ONLY.fullmatch(text) is None or not (
-            CONTINUATION_MIN_HAN <= len(text) <= CONTINUATION_MAX_HAN
+            CONTINUATION_MIN_HAN <= _han_count(text) <= CONTINUATION_MAX_HAN
         ):
             return {
                 "decision": "abstain",
@@ -609,9 +660,7 @@ class CloudModelClient:
     ) -> dict[str, Any]:
         """Public transport surface for co-located callers (the
         consolidation scheduler's profile summarizer)."""
-        return self._post_json(
-            path, payload, timeout=timeout, api_key=api_key
-        )
+        return self._post_json(path, payload, timeout=timeout, api_key=api_key)
 
     def _post_json(
         self,
@@ -627,18 +676,26 @@ class CloudModelClient:
             separators=(",", ":"),
         ).encode("utf-8")
         url = self._endpoint + path
-        if not url.startswith("https://") and self._endpoint != LOCAL_ENDPOINT:
+        # Scheme allowlist (audited): https for the cloud endpoint, or
+        # the explicit local Ollama endpoint. urlsplit lowercases the
+        # scheme, so a mixed-case prefix cannot slip past a startswith
+        # check; redirects are still refused by _RejectRedirects below.
+        scheme = urlsplit(url).scheme
+        if scheme != "https" and self._endpoint != LOCAL_ENDPOINT:
             raise CloudBrokerError("cloud requests must stay on https")
         if _debug_enabled():
-            # Debug logging stays metadata-only: request/response bodies
+            # Metadata-only by default (P2-9): request/response bodies
             # contain the user's typed pinyin and context (plaintext),
-            # so sizes and paths are logged, never the payloads (P2-9).
-            sys.stderr.write(
-                f"[cloud-debug] -> {path} bytes={len(encoded)}\n"
-            )
+            # so sizes and paths are logged, never the payloads. The
+            # opt-in cloud-debug-full flag adds payload lines for
+            # development.
+            sys.stderr.write(f"[cloud-debug] -> {path} bytes={len(encoded)}\n")
+            if _debug_payload_enabled():
+                sys.stderr.write(_debug_payload_line("->", path, encoded))
         # The scheme allowlist above guarantees https (or the explicit
         # local Ollama endpoint) before this point; redirects are refused
         # by _RejectRedirects below, so the audited scheme set is closed.
+        # pi-lens-ignore: python.urlopen-scheme-audit
         cloud_request = request.Request(  # nosemgrep: python.urlopen-scheme-audit
             url,
             data=encoded,
@@ -667,9 +724,9 @@ class CloudModelClient:
         if not isinstance(value, dict):
             raise CloudBrokerError("cloud response is not an object")
         if _debug_enabled():
-            sys.stderr.write(
-                f"[cloud-debug] <- {path} bytes={len(body)}\n"
-            )
+            sys.stderr.write(f"[cloud-debug] <- {path} bytes={len(body)}\n")
+            if _debug_payload_enabled():
+                sys.stderr.write(_debug_payload_line("<-", path, body))
         return value
 
     def _resolve_api_key(self, cloud_request: dict[str, Any]) -> str:

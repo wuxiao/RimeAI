@@ -26,6 +26,7 @@ from rimeai_runtime.localipc import (
     prepare_unix_listener_socket,
 )
 
+from .decision_log import RESOLVABLE_OUTCOMES, DecisionLog
 from .neural_sentence import NeuralSentenceService
 from .segment_policy import validate_pinyin_segments
 
@@ -168,6 +169,10 @@ BASE_CAPABILITIES = [
     "long-input-reasons",
 ]
 NEURAL_LATE_CAPABILITY = "sentence-late"
+# LM-003 sensing layer: advertised when the daemon owns a decision log,
+# so new clients only send feedback frames to daemons that can record
+# them (old daemons answer unsupported_message).
+SENTENCE_FEEDBACK_CAPABILITY = "sentence-feedback"
 # Daemon shutdown is bounded: a wedged client handler (e.g. a peer that
 # vanishes mid-teardown) must never block close() forever.
 CLOSE_TEARDOWN_TIMEOUT_SECONDS = 5.0
@@ -181,11 +186,13 @@ class RimeAIDaemonServer:
         *,
         activity_notifier: Callable[[], None] | None = None,
         neural_sentence: NeuralSentenceService | None = None,
+        decision_log: DecisionLog | None = None,
     ):
         self.socket_path = socket_path
         self.engine = engine
         self._activity_notifier = activity_notifier
         self.neural_sentence = neural_sentence
+        self.decision_log = decision_log
         self._server: asyncio.AbstractServer | None = None
         self._inference_executor = ThreadPoolExecutor(
             max_workers=1,
@@ -248,6 +255,8 @@ class RimeAIDaemonServer:
                 )
         if self.neural_sentence is not None:
             self.neural_sentence.close()
+        if self.decision_log is not None:
+            self.decision_log.close()
         if self.socket_path.exists():
             mode = self.socket_path.lstat().st_mode
             if stat.S_ISSOCK(mode):
@@ -360,6 +369,8 @@ class RimeAIDaemonServer:
                         and NEURAL_LATE_CAPABILITY in client_capabilities
                     )
                     capabilities = list(BASE_CAPABILITIES)
+                    if self.decision_log is not None:
+                        capabilities.append(SENTENCE_FEEDBACK_CAPABILITY)
                     model_artifacts = list(
                         getattr(self.engine, "artifacts", [])
                     )
@@ -409,6 +420,24 @@ class RimeAIDaemonServer:
                             "status": "ok",
                         },
                     )
+                    continue
+                if message_type == "sentence_feedback":
+                    # Fire-and-forget sensing feedback (LM-003): resolves
+                    # pending decision rows. Malformed frames are ignored
+                    # silently — feedback must never disturb the session.
+                    feedback_request_id = message.get("request_id")
+                    feedback_outcome = message.get("outcome")
+                    if (
+                        self.decision_log is not None
+                        and isinstance(feedback_request_id, str)
+                        and feedback_request_id
+                        and len(feedback_request_id) <= 256
+                        and isinstance(feedback_outcome, str)
+                        and feedback_outcome in RESOLVABLE_OUTCOMES
+                    ):
+                        self.decision_log.resolve(
+                            feedback_request_id, feedback_outcome
+                        )
                     continue
                 if message_type != "infer":
                     await self._write(
@@ -692,6 +721,28 @@ class RimeAIDaemonServer:
                 "elapsed_ms": round((monotonic() - started_at) * 1000, 3),
             },
         )
+        if (
+            self.decision_log is not None
+            and decision in {"ranked_candidate", "sentence_suggestion"}
+        ):
+            # LM-003 sensing: record what was actually surfaced, after the
+            # frame went out (display events only, D1/D2).
+            self.decision_log.record(
+                source=(
+                    "local_rank"
+                    if decision == "ranked_candidate"
+                    else "local_sentence"
+                ),
+                request_id=request["request_id"],
+                composition_id=request["composition_id"],
+                revision=request["revision"],
+                pinyin=request["pinyin"],
+                suggestion=(
+                    ranked_candidate or sentence_suggestion or ""
+                ),
+                confidence=float(confidence),
+                model_artifact_id=self.engine.artifact_id,
+            )
 
     async def _run_neural_sentence(
         self,
@@ -777,3 +828,21 @@ class RimeAIDaemonServer:
                 ),
             },
         )
+        if self.decision_log is not None:
+            # LM-003 sensing: the late frame was delivered — this is the
+            # suggestion the user actually saw (D1/D2 display events).
+            reported_artifact = (
+                artifact_id
+                if isinstance(artifact_id, str) and artifact_id
+                else self.engine.artifact_id
+            )
+            self.decision_log.record(
+                source="neural_late",
+                request_id=request["request_id"],
+                composition_id=request["composition_id"],
+                revision=request["revision"],
+                pinyin=request["pinyin"],
+                suggestion=suggestion,
+                confidence=float(confidence),
+                model_artifact_id=reported_artifact,
+            )

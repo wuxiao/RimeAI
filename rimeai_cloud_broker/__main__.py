@@ -20,6 +20,7 @@ from rimeai_daemon.llm_backfill import SignaturePhraseBackfiller
 from rimeai_runtime.pinyin_guard import PinyinGuard
 
 from .cloud_model import CloudModelClient
+from .decision_journal import DecisionJournal
 from .history_index import HistoryEmbeddingIndexer
 from .instance_lock import SingleInstanceLock
 from .profile import (
@@ -125,6 +126,14 @@ def _parser() -> argparse.ArgumentParser:
         help=(
             "skip the L3 cloud LLM profile pass on each idle "
             "consolidation round (statistics and eviction still run)"
+        ),
+    )
+    parser.add_argument(
+        "--no-decision-journal",
+        action="store_true",
+        help=(
+            "disable the local cloud-decision journal (LM-003); the"
+            " sentence-feedback capability is then not advertised"
         ),
     )
     parser.add_argument(
@@ -341,6 +350,7 @@ async def _run(
     *,
     consolidation_enabled: bool = True,
     signature_dictionary: Path | None = None,
+    decision_journal_enabled: bool = True,
 ) -> None:
     history_root = (
         Path.home()
@@ -349,7 +359,20 @@ async def _run(
         / "RimeAI"
         / "History"
     )
-    ranker = CloudModelClient(api_key_loader=_cloud_env_loader)
+    decision_journal = None
+    if decision_journal_enabled:
+        decision_journal = DecisionJournal(
+            Path.home()
+            / "Library"
+            / "Application Support"
+            / "RimeAI"
+            / "language_profile"
+            / "cloud-decisions.db"
+        )
+    ranker = CloudModelClient(
+        api_key_loader=_cloud_env_loader,
+        decision_journal=decision_journal,
+    )
     # The scheduler owns the idle gate for consolidation; creating it
     # before the server lets every accepted inference/continuation
     # request refresh the idle deadline, so rounds never fire mid-typing.
@@ -368,6 +391,7 @@ async def _run(
         activity_notifier=(
             scheduler.note_activity if scheduler is not None else None
         ),
+        decision_journal=decision_journal,
     )
     await server.start()
     stop = asyncio.Event()
@@ -399,6 +423,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             _run(
                 args.socket,
                 consolidation_enabled=not args.no_consolidation,
+                signature_dictionary=args.signature_dictionary,
+                decision_journal_enabled=not args.no_decision_journal,
             )
         )
     finally:

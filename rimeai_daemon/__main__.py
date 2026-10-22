@@ -10,6 +10,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+from .decision_log import DecisionLog
 from .engine import LocalInferenceEngine
 from .neural_sentence import (
     NeuralSentenceConfigurationError,
@@ -67,6 +68,15 @@ def _parser() -> argparse.ArgumentParser:
         "--user-lm",
         type=Path,
         help="L2 user language model artifact the engine reranks with",
+    )
+    parser.add_argument(
+        "--no-decision-log",
+        action="store_true",
+        help=(
+            "disable the local decision log (LM-003 sensing layer);"
+            " feedback frames are then answered with nothing and the"
+            " capability is not advertised"
+        ),
     )
     parser.add_argument(
         "--neural-sentence-config",
@@ -156,10 +166,16 @@ async def _run(args: argparse.Namespace) -> None:
             load_neural_sentence_config(args.neural_sentence_config),
             project_root=Path(__file__).resolve().parent.parent,
         )
+    decision_log = None
+    if not args.no_decision_log:
+        decision_log = DecisionLog(
+            support_directory / "language_profile" / "decision_log.db"
+        )
     server = RimeAIDaemonServer(
         args.socket,
         engine,
         neural_sentence=neural_sentence_service,
+        decision_log=decision_log,
     )
     await server.start()
     stop_event = asyncio.Event()
