@@ -14,15 +14,26 @@ final class CandidatePanelController: NSObject {
         /// 当前展示的整句建议来自神经臂迟到帧（LM-002 开发期来源
         /// 标注）；随 token 失效链自动消失。
         let neuralLateApplied: Bool
+        /// LM-002 对比行：与主槽异源的整句建议（nil 时不展示）。
+        struct ComparisonLine {
+            let label: String
+            let text: String
+        }
+        let comparisonLine: ComparisonLine?
     }
 
     private let panel: NSPanel
     private let backgroundView: NSVisualEffectView
     private let mainCandidatesStack: NSStackView
     private let semanticButton: NSButton
+    /// LM-002 对比行：与主槽异源建议（本地/云端各一行展示）。
+    private let comparisonButton: NSButton
     private let pageIndicator: NSTextField
     private var mainSelectionHandler: ((Int) -> Void)?
     private var semanticSelectionHandler: (() -> Void)?
+    private var comparisonSelectionHandler: ((String) -> Void)?
+    /// 当前对比行可采纳的建议文本（点击时传给 handler）。
+    private var comparisonCandidateText: String?
     private var pageIndicatorVisible = false
     private var hasVisibleContent = false
     /// 续写形态不经过 `refreshCandidatePanelIfActive` 的 hasComposition
@@ -41,6 +52,7 @@ final class CandidatePanelController: NSObject {
         )
         mainCandidatesStack = NSStackView()
         semanticButton = NSButton()
+        comparisonButton = NSButton()
         pageIndicator = NSTextField(labelWithString: "")
         super.init()
 
@@ -78,6 +90,13 @@ final class CandidatePanelController: NSObject {
         semanticButton.contentTintColor = .controlAccentColor
         semanticButton.target = self
         semanticButton.action = #selector(acceptSemanticCandidate(_:))
+        comparisonButton.isBordered = false
+        comparisonButton.alignment = .left
+        comparisonButton.font = .systemFont(ofSize: 13, weight: .regular)
+        comparisonButton.contentTintColor = .secondaryLabelColor
+        comparisonButton.target = self
+        comparisonButton.action = #selector(acceptComparisonCandidate(_:))
+        backgroundView.addSubview(comparisonButton)
         semanticButton.toolTip = "Tab 接受本地语义候选"
         backgroundView.addSubview(semanticButton)
 
@@ -94,61 +113,11 @@ final class CandidatePanelController: NSObject {
         backgroundView.addSubview(pageIndicator)
     }
 
-    /// 语义行标题组装：候选态按建议来源署名（☁︎ 云端系 / ✦ 本地
-    /// 系）；LM-002 开发期神经臂迟到帧的建议与云端“☁︎ LLM 生成”
-    /// 对称署名，避免本地/云端来源混淆；云端在途与上下文字数后置。
-    private func resolvedSemanticTitle(
-        presentation: SemanticCandidatePresentation,
-        suggestionSource: HistoryCommitSource,
-        primaryCandidate: String?,
-        neuralLateApplied: Bool,
-        cloudInFlight: Bool,
-        contextCharacterCount: Int
-    ) -> String {
-        var semanticTitle: String
-        if case let .candidate(text, _, _) = presentation {
-            switch suggestionSource {
-            case .cloudExact:
-                semanticTitle = "☁︎ 云端建议：\(text)"
-            case .cloudFuzzy:
-                semanticTitle = "☁︎ 云端纠错：\(text)"
-            case .cloudGenerated:
-                semanticTitle = "☁︎ LLM 生成：\(text)"
-            case .continuation:
-                semanticTitle = "✦ 续写：\(text)"
-            case .phraseBook:
-                semanticTitle = "✦ 个人短语：\(text)"
-            case .rimeMain, .localSemantic, .rawPinyin:
-                semanticTitle = neuralLateApplied
-                    ? "✦ 本地模型：\(text)"
-                    : presentation.title
-            }
-        } else {
-            semanticTitle = presentation.title(
-                mainCandidate: primaryCandidate
-            )
-        }
-        if cloudInFlight {
-            // 云端请求在途：本地可选候选保留原文追加提示，负面诊断等
-            // 不可选状态直接让位给云端分析中，AI 参与始终可见。
-            if presentation.isSelectable {
-                semanticTitle += " · ☁︎ 云端分析中…"
-            } else {
-                semanticTitle = SemanticCandidatePresentation
-                    .cloudAnalyzing
-                    .title
-            }
-        }
-        if contextCharacterCount > 0 {
-            semanticTitle += " · 上下文 \(contextCharacterCount) 字"
-        }
-        return semanticTitle
-    }
-
     func update(
         content: Content,
         onMainSelection: @escaping (Int) -> Void,
-        onSemanticSelection: @escaping () -> Void
+        onSemanticSelection: @escaping () -> Void,
+        onComparisonSelection: @escaping (String) -> Void
     ) {
         let visibleCandidates = content.visibleCandidates
         let primaryCandidate = content.primaryCandidate
@@ -158,8 +127,10 @@ final class CandidatePanelController: NSObject {
         let contextCharacterCount = content.contextCharacterCount
         let cloudInFlight = content.cloudInFlight
         let neuralLateApplied = content.neuralLateApplied
+        let comparisonLine = content.comparisonLine
         mainSelectionHandler = onMainSelection
         semanticSelectionHandler = onSemanticSelection
+        comparisonSelectionHandler = onComparisonSelection
         isShowingContinuation = semanticPresentation.isContinuation
 
         for view in mainCandidatesStack.arrangedSubviews {
@@ -191,6 +162,19 @@ final class CandidatePanelController: NSObject {
             cloudInFlight: cloudInFlight,
             contextCharacterCount: contextCharacterCount
         )
+
+        // LM-002 对比行：与主槽异源的整句建议，计算逻辑在 extension。
+        let comparisonTitle = resolveComparisonTitle(
+            presentation: semanticPresentation,
+            suggestionSource: suggestionSource,
+            comparisonLine: comparisonLine
+        )
+        if comparisonTitle == nil {
+            comparisonCandidateText = nil
+        }
+        comparisonButton.title = comparisonTitle ?? ""
+        comparisonButton.isHidden = comparisonTitle == nil
+
         semanticButton.title = semanticTitle
         semanticButton.setAccessibilityLabel(semanticTitle)
         semanticButton.isEnabled = semanticPresentation.isSelectable
@@ -223,7 +207,11 @@ final class CandidatePanelController: NSObject {
         )
         // 面板高度只容纳实际内容：上 6 + 候选行 28 + 间距 4 +
         // 语义行 22 + 下 6，消除两行之间与底部的大面积留白。
-        let contentHeight: CGFloat = showsMainCandidates ? 66 : 34
+        // LM-002 对比行存在时另加 22pt（语义行下方）。
+        let showsComparison = comparisonTitle != nil
+        let contentHeight: CGFloat = showsMainCandidates
+            ? (showsComparison ? 88 : 66)
+            : (showsComparison ? 56 : 34)
         hasVisibleContent = showsMainCandidates
             || semanticPresentation.isSelectable
         panel.setContentSize(
@@ -232,7 +220,8 @@ final class CandidatePanelController: NSObject {
         layoutSubviews(
             width: contentWidth,
             height: contentHeight,
-            showsMainCandidates: showsMainCandidates
+            showsMainCandidates: showsMainCandidates,
+            showsComparison: showsComparison
         )
     }
 
@@ -285,10 +274,12 @@ final class CandidatePanelController: NSObject {
                 suggestionSource: .continuation,
                 contextCharacterCount: 0,
                 cloudInFlight: false,
-                neuralLateApplied: false
+                neuralLateApplied: false,
+                comparisonLine: nil
             ),
             onMainSelection: { _ in },
-            onSemanticSelection: onSelection
+            onSemanticSelection: onSelection,
+            onComparisonSelection: { _ in }
         )
         show(anchorRect: anchor)
     }
@@ -296,13 +287,15 @@ final class CandidatePanelController: NSObject {
     private func layoutSubviews(
         width: CGFloat,
         height: CGFloat,
-        showsMainCandidates: Bool
+        showsMainCandidates: Bool,
+        showsComparison: Bool
     ) {
         backgroundView.frame = NSRect(
             origin: .zero,
             size: NSSize(width: width, height: height)
         )
         let semanticHeight: CGFloat = 22
+        let comparisonHeight: CGFloat = 22
         let candidatesHeight: CGFloat = showsMainCandidates ? 28 : 0
         let candidatesY = height - 6 - candidatesHeight
         mainCandidatesStack.frame = NSRect(
@@ -320,12 +313,21 @@ final class CandidatePanelController: NSObject {
             height: 16
         )
         pageIndicator.isHidden = !pageIndicatorVisible
+        // 语义行固定底部；对比行存在时上移其高度。
+        let semanticY: CGFloat = 6 + (showsComparison ? comparisonHeight : 0)
         semanticButton.frame = NSRect(
             x: 8,
-            y: 6,
+            y: semanticY,
             width: width - 16,
             height: semanticHeight
         )
+        comparisonButton.frame = NSRect(
+            x: 8,
+            y: 6,
+            width: width - 16,
+            height: comparisonHeight
+        )
+        comparisonButton.isHidden = !showsComparison
     }
 
     @objc
@@ -341,6 +343,17 @@ final class CandidatePanelController: NSObject {
         semanticSelectionHandler?()
     }
 
+    @objc
+    private func acceptComparisonCandidate(_ sender: NSButton) {
+        guard sender.isEnabled,
+              let text = comparisonCandidateText,
+              !text.isEmpty
+        else {
+            return
+        }
+        comparisonSelectionHandler?(text)
+    }
+
     /// Tab 接受续写 chip：与点击 chip 同一回调路径；未在续写形态
     /// 时返回 false，调用方继续原有 Tab 分派。
     @discardableResult
@@ -352,5 +365,97 @@ final class CandidatePanelController: NSObject {
         }
         handler()
         return true
+    }
+}
+
+// MARK: - 语义行标题组装（LM-002 来源标注；移出类体满足 type_body_length）
+
+private extension CandidatePanelController {
+    /// 语义行标题组装：候选态按建议来源署名（☁︎ 云端系 / ✦ 本地
+    /// 系）；LM-002 开发期神经臂迟到帧的建议与云端“☁︎ LLM 生成”
+    /// 对称署名，避免本地/云端来源混淆；云端在途与上下文字数后置。
+    private func resolvedSemanticTitle(
+        presentation: SemanticCandidatePresentation,
+        suggestionSource: HistoryCommitSource,
+        primaryCandidate: String?,
+        neuralLateApplied: Bool,
+        cloudInFlight: Bool,
+        contextCharacterCount: Int
+    ) -> String {
+        var semanticTitle: String
+        if case let .candidate(text, _, _) = presentation {
+            switch suggestionSource {
+            case .cloudExact:
+                semanticTitle = "☁︎ 云端建议：\(text)"
+            case .cloudFuzzy:
+                semanticTitle = "☁︎ 云端纠错：\(text)"
+            case .cloudGenerated:
+                semanticTitle = "☁︎ LLM 生成：\(text)"
+            case .continuation:
+                semanticTitle = "✦ 续写：\(text)"
+            case .phraseBook:
+                semanticTitle = "✦ 个人短语：\(text)"
+            case .rimeMain, .localSemantic, .rawPinyin:
+                semanticTitle = neuralLateApplied
+                    ? "✦ 本地模型：\(text)"
+                    : presentation.title
+            }
+        } else {
+            semanticTitle = presentation.title(
+                mainCandidate: primaryCandidate
+            )
+        }
+        if cloudInFlight {
+            // 云端请求在途：本地可选候选保留原文追加提示，负面诊断等
+            // 不可选状态直接让位给云端分析中，AI 参与始终可见。
+            if presentation.isSelectable {
+                semanticTitle += " · ☁︎ 云端分析中…"
+            } else {
+                semanticTitle = SemanticCandidatePresentation
+                    .cloudAnalyzing
+                    .title
+            }
+        }
+        if contextCharacterCount > 0 {
+            semanticTitle += " · 上下文 \(contextCharacterCount) 字"
+        }
+        return semanticTitle
+    }
+}
+
+// MARK: - 对比行计算（LM-002；移出类体满足 function_body_length）
+
+private extension CandidatePanelController {
+    /// 与主槽异源的整句建议标题：主槽为本地建议时显示云端，反之
+    /// 显示本地；双方文本一致或主槽不可选（诊断态）时不展示。
+    /// 副作用：命中时记录 comparisonCandidateText 供点击采纳。
+    func resolveComparisonTitle(
+        presentation: SemanticCandidatePresentation,
+        suggestionSource: HistoryCommitSource,
+        comparisonLine: Content.ComparisonLine?
+    ) -> String? {
+        guard presentation.isSelectable,
+              case let .candidate(mainText, _, _) = presentation
+        else {
+            return nil
+        }
+        if suggestionSource == .cloudGenerated
+            || suggestionSource == .cloudExact
+            || suggestionSource == .cloudFuzzy {
+            guard let local = comparisonLine, local.text != mainText,
+                  local.label == "local"
+            else {
+                return nil
+            }
+            comparisonCandidateText = local.text
+            return "✦ 本地模型：\(local.text)"
+        }
+        guard let cloud = comparisonLine, cloud.text != mainText,
+              cloud.label == "cloud"
+        else {
+            return nil
+        }
+        comparisonCandidateText = cloud.text
+        return "☁︎ 云端：\(cloud.text)"
     }
 }

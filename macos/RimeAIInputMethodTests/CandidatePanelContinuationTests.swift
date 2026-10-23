@@ -79,10 +79,12 @@ final class CandidatePanelContinuationTests: XCTestCase {
                 suggestionSource: .rimeMain,
                 contextCharacterCount: 0,
                 cloudInFlight: false,
-                neuralLateApplied: false
+                neuralLateApplied: false,
+                comparisonLine: nil
             ),
             onMainSelection: { _ in },
-            onSemanticSelection: {}
+            onSemanticSelection: {},
+            onComparisonSelection: { _ in }
         )
         panel.show(anchorRect: NSRect(x: 100, y: 400, width: 0, height: 20))
 

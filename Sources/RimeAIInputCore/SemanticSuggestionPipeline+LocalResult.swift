@@ -281,6 +281,11 @@ extension SemanticSuggestionPipeline {
         }
         historySource = .localSemantic
         cloudCandidate = nil
+        if decision == .sentenceSuggestion {
+            // LM-002 对比行快照：本地同步 beam 整句建议（token 失效链）。
+            localSentenceText = candidate
+            localSentenceToken = token
+        }
         setDisplayedFeedback(requestID: requestID, cloud: false)
         emit(.diagnostic(.resultShown))
         if decision == .sentenceSuggestion {
@@ -318,7 +323,16 @@ extension SemanticSuggestionPipeline {
             emit(.secureInputDetected)
             return
         }
-        guard !cloudSuggestionApplied, frame.isValid else {
+        if cloudSuggestionApplied {
+            // 云端已接管主槽：冻结仲裁不变（主槽与提交语义不动），
+            // 但 LM-002 对比行仍记录本地快照供分两行展示。
+            if frame.isValid, let text = frame.sentenceSuggestion {
+                localSentenceText = text
+                localSentenceToken = expectedToken
+            }
+            return
+        }
+        guard frame.isValid else {
             return
         }
         let result = frame.asInferenceResult()
@@ -326,6 +340,7 @@ extension SemanticSuggestionPipeline {
         let candidatePresentation = result.candidatePresentation(
             characterSet: dependencies.characterSet()
         )
+        var appliedLocalText: String?
         switch candidatePresentation {
         case let .candidate(text, decision, confidence):
             guard dependencies.applySemanticCandidate(
@@ -342,6 +357,7 @@ extension SemanticSuggestionPipeline {
                 decision: decision,
                 confidence: confidence
             )
+            appliedLocalText = text
         case .scriptMismatch:
             // reveal B-F1：与同步路径同款字形回退（繁→简就地转写），
             // 仅无法转换时才丢弃——基线 flips 证明神经臂可产出传统
@@ -366,6 +382,7 @@ extension SemanticSuggestionPipeline {
                 decision: .sentenceSuggestion,
                 confidence: result.confidence ?? 0
             )
+            appliedLocalText = sanitized
         default:
             // 其余终端态：迟到帧静默丢弃，保持既有展示。
             emit(.suggestionSlotChanged)
@@ -374,6 +391,9 @@ extension SemanticSuggestionPipeline {
         neuralLateAppliedToken = expectedToken
         historySource = .localSemantic
         cloudCandidate = nil
+        // LM-002 对比行快照：神经迟到帧即本地建议。
+        localSentenceText = appliedLocalText
+        localSentenceToken = expectedToken
         if let lateRequestID = frame.requestID {
             setDisplayedFeedback(requestID: lateRequestID, cloud: false)
         }

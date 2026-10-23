@@ -3,6 +3,28 @@ import InputMethodKit
 
 /// 候选面板渲染与光标锚点几何。
 extension RimeAIInputController {
+    /// LM-002 对比行：主槽为整句建议时，给出异源快照（本地槽→云端，
+    /// 云端槽→本地）；其余形态不展示对比。
+    private func comparisonLineForPanel()
+        -> CandidatePanelController.Content.ComparisonLine? {
+        guard case let .candidate(_, decision, _) = pipeline.presentation,
+              decision == .sentenceSuggestion
+        else {
+            return nil
+        }
+        let cloudSources: Set<HistoryCommitSource> = [
+            .cloudGenerated, .cloudExact, .cloudFuzzy,
+        ]
+        if cloudSources.contains(pipeline.historySource) {
+            return pipeline.localComparisonSuggestion.map {
+                .init(label: "local", text: $0)
+            }
+        }
+        return pipeline.cloudComparisonSuggestion.map {
+            .init(label: "cloud", text: $0)
+        }
+    }
+
     func renderCandidatePanel(client: any IMKTextInput) {
         let pageOffset = composition.candidatePage
             * CompositionState.candidatesPerPage
@@ -17,7 +39,8 @@ extension RimeAIInputController {
                 suggestionSource: pipeline.historySource,
                 contextCharacterCount: pipeline.contextCharacterCount,
                 cloudInFlight: pipeline.cloudInFlight,
-                neuralLateApplied: pipeline.neuralLateApplied
+                neuralLateApplied: pipeline.neuralLateApplied,
+                comparisonLine: comparisonLineForPanel()
             ),
             onMainSelection: { [weak self] localIndex in
                 guard let self,
@@ -34,6 +57,15 @@ extension RimeAIInputController {
             onSemanticSelection: { [weak self] in
                 guard let self,
                       let candidate = self.composition.semanticCandidate,
+                      let client = self.activeClientObject
+                        as? any IMKTextInput
+                else {
+                    return
+                }
+                self.selectSemanticCandidate(candidate, client: client)
+            },
+            onComparisonSelection: { [weak self] candidate in
+                guard let self,
                       let client = self.activeClientObject
                         as? any IMKTextInput
                 else {

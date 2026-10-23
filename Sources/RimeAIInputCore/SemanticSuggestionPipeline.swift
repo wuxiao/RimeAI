@@ -286,11 +286,41 @@ public final class SemanticSuggestionPipeline: @unchecked Sendable {
     var neuralLateToken: CompositionToken?
     var neuralLateSegments: [PinyinSegment]?
     var neuralLateAppliedToken: CompositionToken?
+    /// LM-002 开发期对比行：本地/云端整句建议快照（绑定 token，
+    /// 独立于仲裁槽存活，供面板分两行展示；不改变提交/反馈语义）。
+    var localSentenceText: String?
+    var localSentenceToken: CompositionToken?
+    var cloudSentenceText: String?
+    var cloudSentenceToken: CompositionToken?
+
+    /// 当前组合令牌下的本地整句建议快照（神经迟到帧 / 同步 beam）。
+    public var localComparisonSuggestion: String? {
+        guard let localSentenceText, let localSentenceToken,
+              localSentenceToken == composition.token
+        else {
+            return nil
+        }
+        return localSentenceText
+    }
+
+    /// 当前组合令牌下的云端整句建议快照。
+    public var cloudComparisonSuggestion: String? {
+        guard let cloudSentenceText, let cloudSentenceToken,
+              cloudSentenceToken == composition.token
+        else {
+            return nil
+        }
+        return cloudSentenceText
+    }
 
     /// 当前展示槽的整句建议是否来自神经臂迟到帧（LM-002 开发期
-    /// 来源标注）。token 失效链自动消除；云端接管槽位时显式清除。
+    /// 来源标注）。token 仍匹配当前组合才为真（失效链自动消除）；
+    /// 云端接管槽位时显式清除。
     public var neuralLateApplied: Bool {
-        neuralLateAppliedToken != nil
+        guard let neuralLateAppliedToken else {
+            return false
+        }
+        return neuralLateAppliedToken == composition.token
     }
     /// 当前展示槽中可反馈建议的来源标识（LM-003）：requestID + 是否
     /// 云端（云端走 broker 反馈帧，本地/神经迟到帧走 daemon）。
@@ -354,6 +384,10 @@ public final class SemanticSuggestionPipeline: @unchecked Sendable {
         cloudSuggestionApplied = false
         phraseContext = nil
         cloudCyclePending = false
+        localSentenceText = nil
+        localSentenceToken = nil
+        cloudSentenceText = nil
+        cloudSentenceToken = nil
         neuralLateRequestID = nil
         neuralLateToken = nil
         neuralLateSegments = nil
@@ -514,6 +548,10 @@ public final class SemanticSuggestionPipeline: @unchecked Sendable {
             mixedCompositionSuggestion = nil
             phraseContext = nil
             cloudCyclePending = false
+            localSentenceText = nil
+            localSentenceToken = nil
+            cloudSentenceText = nil
+            cloudSentenceToken = nil
         }
     }
 }

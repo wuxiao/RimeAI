@@ -523,11 +523,25 @@ public enum ContinuationTextPolicy {
     public static let dedupTailLength = 32
     /// Tail overlap above this many characters is rejected (half-echo).
     public static let maximumTailOverlap = 3
+    /// 续写短语末尾允许保留的单个中文标点（2026-10-22 决策：允许尾部
+    /// 标点并随接受上屏）。句中任意位置与非集合标点仍然拒绝。
+    public static let trailingPunctuation: Set<Character> = [
+        "，", "。", "？", "！", "；", "：",
+    ]
 
     public static func hanCount(_ text: String) -> Int {
         text.unicodeScalars.reduce(0) { count, scalar in
             count + ((0x3400 ... 0x9FFF).contains(scalar.value) ? 1 : 0)
         }
+    }
+
+    /// 剥离可选的单个尾部中文标点，返回参与纯汉字校验的主体。
+    /// 标点不计入 2-16 的长度上限，但必须在集合内且只能出现在末尾。
+    static func hanOnlyBody(of text: String) -> Substring {
+        if let last = text.last, trailingPunctuation.contains(last) {
+            return text.dropLast()
+        }
+        return text[...]
     }
 
     public static func allows(
@@ -540,7 +554,9 @@ public enum ContinuationTextPolicy {
         else {
             return false
         }
-        let scalars = Array(text.unicodeScalars)
+        // 尾部允许一个中文标点：主体必须全部是 CJK 汉字，
+        // 长度上限按汉字数计（标点不计入）。
+        let scalars = Array(hanOnlyBody(of: text).unicodeScalars)
         guard scalars.count >= minHanCharacters,
               scalars.count <= maxHanCharacters,
               scalars.allSatisfy({ (0x3400 ... 0x9FFF).contains($0.value) })

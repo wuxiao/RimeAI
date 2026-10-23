@@ -348,6 +348,9 @@ extension SemanticSuggestionPipeline {
         historySource = .cloudGenerated
         cloudCandidate = candidate
         cloudSuggestionApplied = true
+        // LM-002 对比行快照：云端整句建议（token 失效链）。
+        cloudSentenceText = renderedText
+        cloudSentenceToken = token
         // 云端接管槽位（“an applied cloud decision owns the slot
         // outright”）：清神经帧已应用标记，避免云端建议被标注为本地。
         neuralLateAppliedToken = nil
