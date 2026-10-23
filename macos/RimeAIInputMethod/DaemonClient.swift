@@ -401,7 +401,11 @@ private extension DaemonClient {
                     : "熔断冷却中"
             )
         } else if result.status == "circuit_open" {
-            circuitBreaker.recordFailure()
+            // circuit_open 是客户端自身熔断拒绝的回声（DaemonClient
+            // 熔断分支构造的结果），不是服务端新失败：不得再
+            // recordFailure——否则每次被拒都把 openUntil 顺延 30 秒，
+            // 只要用户持续打字（含续写等高频 daemon 调用），熔断
+            // 永不过期，“本地模型暂不可用”自锁（2026-10-23 实锤）。
             publishStatus("服务端熔断")
         }
         finish(requestID: requestID, result: result)

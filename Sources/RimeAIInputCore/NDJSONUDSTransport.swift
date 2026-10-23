@@ -1,5 +1,13 @@
 import Foundation
 import Network
+import os
+
+/// 传输层连接诊断（LM-002 验证插桩）：failConnection 的具体原因
+/// 经 unified log 可被 `log stream --predicate 'subsystem == "fun.wwcn.rimeai"'` 抓取。
+private let ndjsonTransportLog = Logger(
+    subsystem: "fun.wwcn.rimeai",
+    category: "ndjson-transport"
+)
 
 /// NDJSON 行组装器：把字节流按换行符（`0x0A`）切成完整行，
 /// 并对未换行的残留缓冲施加上限。纯值类型，无锁。
@@ -425,7 +433,16 @@ public final class NDJSONUDSTransport: @unchecked Sendable {
                 return
             }
             receiveNext(on: connection, generation: eventGeneration)
-        case .failed, .cancelled:
+        case let .failed(error):
+            ndjsonTransportLog.notice(
+                "nw state failed: \(String(describing: error), privacy: .public)"
+            )
+            failConnection(
+                generation: eventGeneration,
+                reason: .connectFailed
+            )
+        case .cancelled:
+            ndjsonTransportLog.notice("nw state cancelled (connect timeout arm)")
             failConnection(
                 generation: eventGeneration,
                 reason: .connectFailed
@@ -506,6 +523,9 @@ public final class NDJSONUDSTransport: @unchecked Sendable {
         guard generation == failedGeneration, phase != .disconnected else {
             return
         }
+        ndjsonTransportLog.notice(
+            "connection failed: generation=\(failedGeneration, privacy: .public) reason=\(String(describing: reason), privacy: .public)"
+        )
         tearDownConnection()
         eventHandler?(
             .connectionClosed(
