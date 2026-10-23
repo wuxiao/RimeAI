@@ -11,6 +11,9 @@ final class CandidatePanelController: NSObject {
         let suggestionSource: HistoryCommitSource
         let contextCharacterCount: Int
         let cloudInFlight: Bool
+        /// 当前展示的整句建议来自神经臂迟到帧（LM-002 开发期来源
+        /// 标注）；随 token 失效链自动消失。
+        let neuralLateApplied: Bool
     }
 
     private let panel: NSPanel
@@ -91,6 +94,57 @@ final class CandidatePanelController: NSObject {
         backgroundView.addSubview(pageIndicator)
     }
 
+    /// 语义行标题组装：候选态按建议来源署名（☁︎ 云端系 / ✦ 本地
+    /// 系）；LM-002 开发期神经臂迟到帧的建议与云端“☁︎ LLM 生成”
+    /// 对称署名，避免本地/云端来源混淆；云端在途与上下文字数后置。
+    private func resolvedSemanticTitle(
+        presentation: SemanticCandidatePresentation,
+        suggestionSource: HistoryCommitSource,
+        primaryCandidate: String?,
+        neuralLateApplied: Bool,
+        cloudInFlight: Bool,
+        contextCharacterCount: Int
+    ) -> String {
+        var semanticTitle: String
+        if case let .candidate(text, _, _) = presentation {
+            switch suggestionSource {
+            case .cloudExact:
+                semanticTitle = "☁︎ 云端建议：\(text)"
+            case .cloudFuzzy:
+                semanticTitle = "☁︎ 云端纠错：\(text)"
+            case .cloudGenerated:
+                semanticTitle = "☁︎ LLM 生成：\(text)"
+            case .continuation:
+                semanticTitle = "✦ 续写：\(text)"
+            case .phraseBook:
+                semanticTitle = "✦ 个人短语：\(text)"
+            case .rimeMain, .localSemantic, .rawPinyin:
+                semanticTitle = neuralLateApplied
+                    ? "✦ 本地模型：\(text)"
+                    : presentation.title
+            }
+        } else {
+            semanticTitle = presentation.title(
+                mainCandidate: primaryCandidate
+            )
+        }
+        if cloudInFlight {
+            // 云端请求在途：本地可选候选保留原文追加提示，负面诊断等
+            // 不可选状态直接让位给云端分析中，AI 参与始终可见。
+            if presentation.isSelectable {
+                semanticTitle += " · ☁︎ 云端分析中…"
+            } else {
+                semanticTitle = SemanticCandidatePresentation
+                    .cloudAnalyzing
+                    .title
+            }
+        }
+        if contextCharacterCount > 0 {
+            semanticTitle += " · 上下文 \(contextCharacterCount) 字"
+        }
+        return semanticTitle
+    }
+
     func update(
         content: Content,
         onMainSelection: @escaping (Int) -> Void,
@@ -103,6 +157,7 @@ final class CandidatePanelController: NSObject {
         let suggestionSource = content.suggestionSource
         let contextCharacterCount = content.contextCharacterCount
         let cloudInFlight = content.cloudInFlight
+        let neuralLateApplied = content.neuralLateApplied
         mainSelectionHandler = onMainSelection
         semanticSelectionHandler = onSemanticSelection
         isShowingContinuation = semanticPresentation.isContinuation
@@ -128,41 +183,14 @@ final class CandidatePanelController: NSObject {
         pageIndicator.stringValue = pageLabel ?? ""
         pageIndicatorVisible = pageLabel != nil
 
-        var semanticTitle: String
-        if case let .candidate(text, _, _) = semanticPresentation {
-            switch suggestionSource {
-            case .cloudExact:
-                semanticTitle = "☁︎ 云端建议：\(text)"
-            case .cloudFuzzy:
-                semanticTitle = "☁︎ 云端纠错：\(text)"
-            case .cloudGenerated:
-                semanticTitle = "☁︎ LLM 生成：\(text)"
-            case .continuation:
-                semanticTitle = "✦ 续写：\(text)"
-            case .phraseBook:
-                semanticTitle = "✦ 个人短语：\(text)"
-            case .rimeMain, .localSemantic, .rawPinyin:
-                semanticTitle = semanticPresentation.title
-            }
-        } else {
-            semanticTitle = semanticPresentation.title(
-                mainCandidate: primaryCandidate
-            )
-        }
-        if cloudInFlight {
-            // 云端请求在途：本地可选候选保留原文追加提示，负面诊断等
-            // 不可选状态直接让位给云端分析中，AI 参与始终可见。
-            if semanticPresentation.isSelectable {
-                semanticTitle += " · ☁︎ 云端分析中…"
-            } else {
-                semanticTitle = SemanticCandidatePresentation
-                    .cloudAnalyzing
-                    .title
-            }
-        }
-        if contextCharacterCount > 0 {
-            semanticTitle += " · 上下文 \(contextCharacterCount) 字"
-        }
+        let semanticTitle = resolvedSemanticTitle(
+            presentation: semanticPresentation,
+            suggestionSource: suggestionSource,
+            primaryCandidate: primaryCandidate,
+            neuralLateApplied: neuralLateApplied,
+            cloudInFlight: cloudInFlight,
+            contextCharacterCount: contextCharacterCount
+        )
         semanticButton.title = semanticTitle
         semanticButton.setAccessibilityLabel(semanticTitle)
         semanticButton.isEnabled = semanticPresentation.isSelectable
@@ -256,7 +284,8 @@ final class CandidatePanelController: NSObject {
                 semanticPresentation: .continuation(candidate: text),
                 suggestionSource: .continuation,
                 contextCharacterCount: 0,
-                cloudInFlight: false
+                cloudInFlight: false,
+                neuralLateApplied: false
             ),
             onMainSelection: { _ in },
             onSemanticSelection: onSelection

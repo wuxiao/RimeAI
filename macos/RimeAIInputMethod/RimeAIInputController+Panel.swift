@@ -16,7 +16,8 @@ extension RimeAIInputController {
                 semanticPresentation: pipeline.presentation,
                 suggestionSource: pipeline.historySource,
                 contextCharacterCount: pipeline.contextCharacterCount,
-                cloudInFlight: pipeline.cloudInFlight
+                cloudInFlight: pipeline.cloudInFlight,
+                neuralLateApplied: pipeline.neuralLateApplied
             ),
             onMainSelection: { [weak self] localIndex in
                 guard let self,

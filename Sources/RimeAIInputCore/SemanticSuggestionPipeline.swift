@@ -286,6 +286,12 @@ public final class SemanticSuggestionPipeline: @unchecked Sendable {
     var neuralLateToken: CompositionToken?
     var neuralLateSegments: [PinyinSegment]?
     var neuralLateAppliedToken: CompositionToken?
+
+    /// 当前展示槽的整句建议是否来自神经臂迟到帧（LM-002 开发期
+    /// 来源标注）。token 失效链自动消除；云端接管槽位时显式清除。
+    public var neuralLateApplied: Bool {
+        neuralLateAppliedToken != nil
+    }
     /// 当前展示槽中可反馈建议的来源标识（LM-003）：requestID + 是否
     /// 云端（云端走 broker 反馈帧，本地/神经迟到帧走 daemon）。
     var displayedFeedback: (requestID: String, cloud: Bool)?

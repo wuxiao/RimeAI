@@ -78,7 +78,8 @@ final class CandidatePanelContinuationTests: XCTestCase {
                 semanticPresentation: .idle,
                 suggestionSource: .rimeMain,
                 contextCharacterCount: 0,
-                cloudInFlight: false
+                cloudInFlight: false,
+                neuralLateApplied: false
             ),
             onMainSelection: { _ in },
             onSemanticSelection: {}
