@@ -321,10 +321,29 @@ private extension DaemonClient {
             guard let hello = try? decoder.decode(
                 DaemonHelloResponse.self,
                 from: line
-            ), connectionState.acceptHello(
+            ) else {
+                daemonClientLog.notice(
+                    "hello rejected: decode failed len=\(line.count, privacy: .public)"
+                )
+                tearDownConnection(
+                    failPending: true,
+                    recordFailure: true,
+                    status: "协议不兼容"
+                )
+                return
+            }
+            guard connectionState.acceptHello(
                 hello,
                 generation: generation
             ) else {
+                let stateGeneration = connectionState.generation
+                let statePhase = String(describing: connectionState.phase)
+                let compatible = hello.isCompatible
+                let diagnosis = "stateGen=\(stateGeneration) frameGen=\(generation) "
+                    + "phase=\(statePhase) compatible=\(compatible)"
+                daemonClientLog.notice(
+                    "hello rejected: \(diagnosis, privacy: .public)"
+                )
                 tearDownConnection(
                     failPending: true,
                     recordFailure: true,

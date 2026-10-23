@@ -340,9 +340,13 @@ struct DaemonClientOutboundQueue: Equatable, Sendable {
 public struct DaemonModelArtifact: Codable, Equatable, Sendable {
     public let role: String
     public let path: String
-    public let sha256: String
+    /// 脚本类工件（如 neural_sentence 的 constrained_mlx_service.sh）
+    /// 无法稳定取哈希，daemon 不回该字段：必须可选，否则整个
+    /// hello 帧解码失败 → “协议不兼容”拆连 ×3 → 熔断，
+    /// 面板永久“本地模型暂不可用”（2026-10-23 定案）。
+    public let sha256: String?
 
-    public init(role: String, path: String, sha256: String) {
+    public init(role: String, path: String, sha256: String? = nil) {
         self.role = role
         self.path = path
         self.sha256 = sha256
@@ -497,6 +501,10 @@ public struct SemanticInferenceRequest: Codable, Sendable {
     /// the key entirely, which old daemons parse as the pre-domain
     /// protocol (engine treats a missing/invalid value as global).
     public let domain: String?
+    /// Target script for sentence suggestions ("simplified"). nil omits
+    /// the key: the daemon keeps its legacy behavior (beam suggestions
+    /// surface in the dictionary's traditional script).
+    public let characterSet: String?
 
     public init(
         requestID: String,
@@ -508,7 +516,8 @@ public struct SemanticInferenceRequest: Codable, Sendable {
         deadlineMilliseconds: Int,
         allowSentence: Bool,
         segments: [PinyinSegment]? = nil,
-        domain: String? = nil
+        domain: String? = nil,
+        characterSet: String? = nil
     ) {
         self.requestID = requestID
         compositionID = token.compositionID.uuidString
@@ -525,6 +534,7 @@ public struct SemanticInferenceRequest: Codable, Sendable {
         self.allowSentence = allowSentence
         self.segments = segments
         self.domain = domain
+        self.characterSet = characterSet
     }
 
     enum CodingKeys: String, CodingKey {
@@ -543,6 +553,7 @@ public struct SemanticInferenceRequest: Codable, Sendable {
         case sensitive
         case segments
         case domain
+        case characterSet = "character_set"
     }
 }
 

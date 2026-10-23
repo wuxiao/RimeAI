@@ -71,7 +71,9 @@ extension SemanticSuggestionPipeline {
                     characterSet: dependencies.characterSet()
                 ),
                 segments: segments,
-                domain: dependencies.domainForBundle(bundleIdentifier)
+                domain: dependencies.domainForBundle(bundleIdentifier),
+                characterSet: dependencies.characterSet() == .simplified
+                    ? "simplified" : nil
             )
         } else {
             localRequest = nil
