@@ -32,7 +32,7 @@ if [[ ! -f "${template}" ]]; then
   exit 2
 fi
 if ! PYTHONPATH="${project_root}" "${python_path}" -c \
-  'from rimeai_cloud_broker import CloudBrokerServer, CloudModelClient; from rimeai_daemon.consolidation import ConsolidationPipeline' \
+  'from rimeai_cloud_broker import CloudBrokerServer, CloudModelClient; from rimeai_daemon.consolidation import ConsolidationPipeline; from rimeai_daemon.llm_backfill import SignaturePhraseBackfiller' \
   >/dev/null 2>&1; then
   print -u2 "error: cloud broker source is incompatible with ${python_path}"
   exit 2
@@ -58,19 +58,21 @@ rsync -a --delete --exclude='._*' --exclude='__pycache__' \
   "${project_root}/rimeai_runtime/localipc.py" \
   "${broker_root}/rimeai_runtime/"
 # __main__.py imports rimeai_daemon.consolidation for idle history
-# consolidation, and both servers share rimeai_daemon.segment_policy for
-# pinyin-segment validation; ship the modules they need the same way.
+# consolidation, rimeai_daemon.llm_backfill for signature-phrase
+# backfill (LM-003), and both servers share rimeai_daemon.segment_policy
+# for pinyin-segment validation; ship the modules they need the same way.
 mkdir -p "${broker_root}/rimeai_daemon"
 rsync -a --delete --exclude='._*' --exclude='__pycache__' \
   "${project_root}/rimeai_daemon/__init__.py" \
   "${project_root}/rimeai_daemon/consolidation.py" \
+  "${project_root}/rimeai_daemon/llm_backfill.py" \
   "${project_root}/rimeai_daemon/segment_policy.py" \
   "${project_root}/rimeai_daemon/user_lm.py" \
   "${broker_root}/rimeai_daemon/"
 # Fail fast if the staged snapshot cannot import the full module chain the
 # LaunchAgent will run (this exact gap once crash-looped the broker).
 if ! PYTHONPATH="${broker_root}" "${python_path}" -c \
-  'from rimeai_cloud_broker import CloudBrokerServer; from rimeai_daemon.consolidation import ConsolidationPipeline' \
+  'from rimeai_cloud_broker import CloudBrokerServer; from rimeai_daemon.consolidation import ConsolidationPipeline; from rimeai_daemon.llm_backfill import SignaturePhraseBackfiller' \
   >/dev/null 2>&1; then
   print -u2 "error: staged cloud broker snapshot failed its import smoke test"
   exit 2

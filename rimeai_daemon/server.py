@@ -5,10 +5,12 @@ import asyncio
 import contextlib
 import functools
 import json
+import logging
 import math
 import os
 import re
 import stat
+import sys
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -33,6 +35,17 @@ from .segment_policy import validate_pinyin_segments
 # Shared domain charset contract with the broker profile store and the
 # Swift PhraseBookStore: [a-z0-9-]{1,64} (locked by cross-layer tests).
 DOMAIN_PATTERN = re.compile(r"[a-z0-9-]{1,64}")
+
+logger = logging.getLogger(__name__)
+
+
+def _clip_pinyin(pinyin: str, limit: int = 32) -> str:
+    """Pinyin stays clipped in debug logs; ``context`` is logged in
+    full by explicit request for local development — debug logs are
+    opt-in (default warning) and land only in the local stderr file,
+    while the persistent decision log keeps the D1/D2 privacy cap
+    (pinyin ≤ 256 bytes, no context text at all)."""
+    return pinyin if len(pinyin) <= limit else pinyin[:limit] + "…"
 
 
 def is_valid_domain(domain: object) -> bool:
@@ -130,6 +143,11 @@ def _validate_inference_request(message: Any) -> dict[str, Any]:
     domain = message.get("domain")
     if domain is not None and not is_valid_domain(domain):
         raise ValueError("domain must be a bounded lowercase identifier")
+    character_set = message.get("character_set")
+    if character_set is not None and character_set != "simplified":
+        raise ValueError(
+            "character_set must be the string 'simplified' when present"
+        )
     segments = message.get("segments")
     if segments is not None:
         segments = validate_pinyin_segments(
@@ -153,6 +171,8 @@ def _validate_inference_request(message: Any) -> dict[str, Any]:
     }
     if domain is not None:
         result["domain"] = domain
+    if character_set is not None:
+        result["character_set"] = character_set
     if segments is not None:
         result["segments"] = segments
     return result
@@ -237,6 +257,7 @@ class RimeAIDaemonServer:
             raise DaemonConfigurationError(
                 "another RimeAI daemon is already running"
             ) from error
+        logger.info("daemon listening on %s", self.socket_path)
 
     async def close(self) -> None:
         if self._server is not None:
@@ -368,6 +389,11 @@ class RimeAIDaemonServer:
                         and isinstance(client_capabilities, list)
                         and NEURAL_LATE_CAPABILITY in client_capabilities
                     )
+                    logger.debug(
+                        "client hello client_id=%s late_sentences=%s",
+                        message["client_id"],
+                        client_wants_late_sentences,
+                    )
                     capabilities = list(BASE_CAPABILITIES)
                     if self.decision_log is not None:
                         capabilities.append(SENTENCE_FEEDBACK_CAPABILITY)
@@ -450,7 +476,35 @@ class RimeAIDaemonServer:
                     self._activity_notifier()
                 try:
                     request = _validate_inference_request(message)
-                except ValueError:
+                except ValueError as error:
+                    # 诊断插桩（LM-002 验证）：客户端字段非法的确切原因与
+                    # 字段规模，经 stderr 进 rimeai-daemon.log；不含内容。
+                    raw_context = message.get("context")
+                    raw_pinyin = message.get("pinyin")
+                    raw_candidates = message.get("candidates")
+                    context_len = (
+                        len(raw_context)
+                        if isinstance(raw_context, str)
+                        else -1
+                    )
+                    pinyin_len = (
+                        len(raw_pinyin) if isinstance(raw_pinyin, str) else -1
+                    )
+                    candidate_count = (
+                        len(raw_candidates)
+                        if isinstance(raw_candidates, list)
+                        else -1
+                    )
+                    print(
+                        f"invalid_request: {error}; "
+                        f"policy={message.get('context_policy')!r} "
+                        f"context_len={context_len} "
+                        f"pinyin_len={pinyin_len} "
+                        f"candidates={candidate_count} "
+                        f"segments={message.get('segments') is not None}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
                     request_id = (
                         message.get("request_id")
                         if isinstance(message.get("request_id"), str)
@@ -571,6 +625,7 @@ class RimeAIDaemonServer:
                 task.cancel()
             for task in list(neural_by_id.values()):
                 task.cancel()
+            logger.debug("client disconnected")
             writer.close()
             with contextlib.suppress(BrokenPipeError, ConnectionResetError):
                 await writer.wait_closed()
@@ -585,6 +640,18 @@ class RimeAIDaemonServer:
     ) -> None:
         loop = asyncio.get_running_loop()
         started_at = monotonic()
+        logger.debug(
+            "infer start request_id=%s pinyin=%s candidates=%d"
+            " allow_sentence=%s deadline_ms=%s context_policy=%s"
+            " context=%r",
+            request["request_id"],
+            _clip_pinyin(request["pinyin"]),
+            len(request["candidates"]),
+            request["allow_sentence"],
+            request["deadline_ms"],
+            request["context_policy"],
+            request["context"],
+        )
         try:
             future = loop.run_in_executor(
                 self._inference_executor,
@@ -598,6 +665,11 @@ class RimeAIDaemonServer:
         except asyncio.CancelledError:
             return
         except asyncio.TimeoutError:
+            logger.debug(
+                "infer timeout request_id=%s deadline_ms=%s",
+                request["request_id"],
+                request["deadline_ms"],
+            )
             self._record_engine_failure()
             await self._write(
                 writer,
@@ -609,6 +681,11 @@ class RimeAIDaemonServer:
             )
             return
         except Exception:
+            logger.warning(
+                "infer engine error request_id=%s",
+                request["request_id"],
+                exc_info=True,
+            )
             self._record_engine_failure()
             await self._write(
                 writer,
@@ -620,6 +697,9 @@ class RimeAIDaemonServer:
             )
             return
         if latest_revision.get(key) != request["revision"]:
+            logger.debug(
+                "infer result dropped (stale) request_id=%s", request["request_id"]
+            )
             return
         confidence = result.get("confidence") if isinstance(result, dict) else None
         decision = result.get("decision") if isinstance(result, dict) else None
@@ -687,6 +767,11 @@ class RimeAIDaemonServer:
                 and (ranked_candidate or sentence_suggestion)
             )
         ):
+            logger.warning(
+                "infer result failed validation request_id=%s decision=%r",
+                request["request_id"],
+                decision,
+            )
             self._record_engine_failure()
             await self._write(
                 writer,
@@ -698,6 +783,16 @@ class RimeAIDaemonServer:
             )
             return
         self._consecutive_failures = 0
+        logger.debug(
+            "infer result request_id=%s decision=%s ranked=%r sentence=%r"
+            " confidence=%.3f elapsed_ms=%.1f",
+            request["request_id"],
+            decision,
+            ranked_candidate,
+            sentence_suggestion,
+            float(confidence),
+            (monotonic() - started_at) * 1000,
+        )
         await self._write(
             writer,
             write_lock,
@@ -765,6 +860,11 @@ class RimeAIDaemonServer:
             # single-thread neural executor — keystrokes already
             # advanced the revision, so decoding it would be pure
             # wasted GPU work queued ahead of the live request.
+            logger.debug(
+                "neural late skipped (stale before dispatch)"
+                " request_id=%s",
+                request["request_id"],
+            )
             return
         loop = asyncio.get_running_loop()
         started_at = monotonic()
@@ -782,12 +882,29 @@ class RimeAIDaemonServer:
                 timeout=service.budget_ms / 1000,
             )
         except (asyncio.CancelledError, asyncio.TimeoutError):
+            logger.debug(
+                "neural late budget exceeded request_id=%s budget_ms=%s",
+                request["request_id"],
+                service.budget_ms,
+            )
             return
         except Exception:
+            logger.warning(
+                "neural late decode raised request_id=%s",
+                request["request_id"],
+                exc_info=True,
+            )
             return
         if payload is None:
+            logger.debug(
+                "neural late abstained request_id=%s", request["request_id"]
+            )
             return
         if latest_revision.get(key) != request["revision"]:
+            logger.debug(
+                "neural late dropped (stale after decode) request_id=%s",
+                request["request_id"],
+            )
             return
         suggestion = payload.get("suggestion")
         confidence = payload.get("confidence")
@@ -804,7 +921,22 @@ class RimeAIDaemonServer:
             or not 0 <= confidence <= 1
             or confidence < service.min_confidence
         ):
+            logger.debug(
+                "neural late failed gate request_id=%s confidence=%r"
+                " min_confidence=%.3f",
+                request["request_id"],
+                confidence,
+                service.min_confidence,
+            )
             return
+        logger.debug(
+            "neural late delivered request_id=%s sentence=%r"
+            " confidence=%.3f elapsed_ms=%.1f",
+            request["request_id"],
+            suggestion,
+            float(confidence),
+            (monotonic() - started_at) * 1000,
+        )
         await self._write(
             writer,
             write_lock,
