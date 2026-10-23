@@ -98,6 +98,17 @@ cp "${template}" "${staged_plist}"
 plutil -lint "${staged_plist}" >/dev/null
 
 launchctl bootout "${domain}/${label}" >/dev/null 2>&1 || true
+# bootout 是异步的：等旧任务真正离域后再 bootstrap，否则会撞
+# "Bootstrap failed: 5: Input/output error"（同 install_daemon_launch_agent.sh
+# 2026-10-23 的修复）。
+wait_attempt=0
+while (( wait_attempt < 50 )); do
+  if ! launchctl print "${domain}/${label}" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 0.1
+  wait_attempt=$((wait_attempt + 1))
+done
 install -m 600 "${staged_plist}" "${target_plist}"
 if ! launchctl bootstrap "${domain}" "${target_plist}"; then
   print -u2 "warning: cloud broker bootstrap failed; retrying once"

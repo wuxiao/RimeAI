@@ -1,4 +1,13 @@
 import Foundation
+import os
+
+/// LM-002 验证全链路插桩：infer→连接→hello→结果→熔断的生死链
+/// 经 unified log（subsystem fun.wwcn.rimeai, category daemon-client）
+/// 直接观察，消除推断。用后可整体移除。
+private let daemonClientLog = Logger(
+    subsystem: "fun.wwcn.rimeai",
+    category: "daemon-client"
+)
 
 extension Notification.Name {
     static let rimeAIDaemonStatusDidChange = Notification.Name(
@@ -77,6 +86,7 @@ final class DaemonClient: @unchecked Sendable {
     ) {
         queue.async { [self] in
             guard circuitBreaker.allowsRequest() else {
+                daemonClientLog.notice("infer rejected by circuit breaker: req=\(request.requestID, privacy: .public)")
                 publishStatus("熔断冷却中")
                 let result = SemanticInferenceResult(
                     status: "circuit_open",
@@ -231,6 +241,7 @@ private extension DaemonClient {
     }
 
     func handleTransportReady(generation: UInt64) {
+        daemonClientLog.notice("transport ready: gen=\(generation, privacy: .public)")
         guard connectionState.transportBecameReady(generation: generation),
               let hello = encodeLine(
                 DaemonHelloRequest(
@@ -253,6 +264,7 @@ private extension DaemonClient {
     func handleTransportClosed(
         reason: NDJSONUDSTransport.CloseReason
     ) {
+        daemonClientLog.notice("transport closed: reason=\(String(describing: reason), privacy: .public)")
         tearDownConnection(
             failPending: true,
             recordFailure: true,
@@ -321,6 +333,7 @@ private extension DaemonClient {
                 return
             }
             cancelHelloTimeout()
+            daemonClientLog.notice("hello accepted: model=\(hello.modelArtifactID, privacy: .public) caps=\(hello.capabilities.count, privacy: .public)")
             modelArtifactID = hello.modelArtifactID
             modelArtifacts = hello.modelArtifacts ?? []
             daemonOfflineLock = true
@@ -427,6 +440,7 @@ private extension DaemonClient {
     }
 
     func expire(requestID: String) {
+        daemonClientLog.notice("request expired: req=\(requestID, privacy: .public)")
         guard let request = pending.removeValue(forKey: requestID) else {
             return
         }
