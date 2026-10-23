@@ -609,15 +609,17 @@ extension DaemonClient {
     /// 把用户对已展示建议的裁决发往 daemon 决策日志（fire-and-forget，
     /// 无响应；未通告 capability 的旧 daemon 静默跳过，不计数不重试）。
     func sendSentenceFeedback(requestID: String, outcome: String) {
-        guard supportsSentenceFeedback,
-              let payload = encodeLine(
-                  DaemonSentenceFeedback(
-                      requestID: requestID,
-                      outcome: outcome
+        queue.async { [self] in
+            guard supportsSentenceFeedback,
+                  let payload = encodeLine(
+                      DaemonSentenceFeedback(
+                          requestID: requestID,
+                          outcome: outcome
+                      )
                   )
-              )
-        else { return }
-        transport.enqueueOutbound(data: payload, requestID: nil)
-        transport.flushOutbound()
+            else { return }
+            transport.enqueueOutbound(data: payload, requestID: nil)
+            transport.flushOutbound()
+        }
     }
 }
