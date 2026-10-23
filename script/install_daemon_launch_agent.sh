@@ -217,7 +217,17 @@ for _ in {1..20}; do
     bootstrap_succeeded=1
     break
   fi
-  sleep 0.1
+  # 服务已在域内（上一代 load/bootstrap 残留）时 bootstrap 报 I/O
+  # error：bootout 后 launchd 异步卸载，必须轮询等真正离开域才能
+  # 重新 bootstrap（盲重试必然连续失败）。
+  launchctl bootout "${domain}/${label}" 2>/dev/null || true
+  for _ in {1..25}; do
+    if ! launchctl print "${domain}/${label}" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 0.2
+  done
+  sleep 0.3
 done
 if (( ! bootstrap_succeeded )); then
   print -u2 "error: could not bootstrap ${label} after launchd retry window"
