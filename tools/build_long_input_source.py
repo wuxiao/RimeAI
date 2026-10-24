@@ -83,7 +83,7 @@ def derive_sample(
     pinyin_parts = lazy_pinyin(
         gold_text,
         style=Style.NORMAL,
-        errors=lambda _: [],
+        errors="ignore",
     )
     if (
         len(pinyin_parts) != len(gold_text)
@@ -202,8 +202,20 @@ def main() -> int:
         if derived is not None:
             by_domain.setdefault(derived["domain"], []).append(derived)
     per_domain = arguments.samples // 2
+    domains = sorted(by_domain)
+    if not domains:
+        print("error: no derivable samples", file=sys.stderr)
+        return 2
+    if len(domains) > 1 and arguments.samples % len(domains):
+        print(
+            f"error: --samples must divide evenly across "
+            f"{len(domains)} domains",
+            file=sys.stderr,
+        )
+        return 2
+    per_domain = arguments.samples // len(domains)
     selected: List[Dict[str, Any]] = []
-    for domain in ("developer", "general"):
+    for domain in domains:
         candidates = sorted(
             by_domain.get(domain, []),
             key=lambda sample: hashlib.sha256(

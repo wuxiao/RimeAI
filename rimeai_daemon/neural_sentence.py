@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
 import select
 import subprocess
@@ -53,6 +54,8 @@ DEFAULT_MIN_CONFIDENCE = 0.0
 # is a protocol violation, not something to buffer unbounded.
 MAX_RESPONSE_LINE_BYTES = 1 << 20
 _READ_CHUNK_BYTES = 65536
+
+logger = logging.getLogger(__name__)
 
 
 class NeuralSentenceConfigurationError(ValueError):
@@ -266,8 +269,23 @@ class NeuralSentenceService:
                 # cooldown cycles; the daemon keeps serving sync results.
                 self._disabled = True
                 self._recycle()
+                logger.warning(
+                    "neural arm disabled after %d cooldown cycles",
+                    self._cooldown_cycles,
+                )
             else:
                 self._recycle()
+                logger.warning(
+                    "neural arm cooldown #%d (%ss); worker recycled",
+                    self._cooldown_cycles,
+                    COOLDOWN_SECONDS,
+                )
+        else:
+            logger.warning(
+                "neural worker failure #%d/%d",
+                self._consecutive_failures,
+                CONSECUTIVE_FAILURE_LIMIT,
+            )
 
     def _worker(self) -> subprocess.Popen[bytes] | None:
         spawn_failed = False
@@ -312,8 +330,14 @@ class NeuralSentenceService:
         # Failure recording (which may call close()) stays outside the
         # state lock: threading.Lock is not reentrant.
         if spawn_failed:
+            logger.warning("neural worker spawn failed command=%s", self._command[0])
             self._record_failure()
             return None
+        logger.info(
+            "neural worker started restarts=%d command=%s",
+            self.stats["worker_restarts"],
+            self._command[0],
+        )
         return process
 
     def _read_response_line(
@@ -392,6 +416,7 @@ class NeuralSentenceService:
             request
         ):
             self.stats["abstained"] += 1
+            logger.debug("neural decode abstained: request ineligible")
             return None
         worker_request = {
             "schema_version": 1,
@@ -408,6 +433,9 @@ class NeuralSentenceService:
         process = self._worker()
         if process is None or process.stdin is None:
             self.stats["abstained"] += 1
+            logger.debug(
+                "neural decode abstained: no worker (cooldown/disabled/spawn)"
+            )
             return None
         now = monotonic()
         read_deadline = (
@@ -442,9 +470,11 @@ class NeuralSentenceService:
         if line is None:
             if self._is_interruption(process):
                 self.stats["abstained"] += 1
+                logger.debug("neural decode interrupted during read")
                 return None
             self._record_failure()
             self.stats["abstained"] += 1
+            logger.warning("neural worker read timed out or exited")
             return None
         try:
             response = json.loads(line)
@@ -474,6 +504,12 @@ class NeuralSentenceService:
             or confidence < self.min_confidence
         ):
             self.stats["abstained"] += 1
+            logger.debug(
+                "neural decode abstained: response below gate"
+                " confidence=%r min_confidence=%.3f",
+                confidence,
+                self.min_confidence,
+            )
             return None
         artifact_id = response.get("model_artifact_id")
         if isinstance(artifact_id, str) and artifact_id:

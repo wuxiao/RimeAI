@@ -356,7 +356,20 @@ func guardLadderDropsLateResults() throws {
         #expect(harness.shownTexts.isEmpty)
         #expect(harness.diagnostics.contains(.continuationAbstained))
     }
-    // structurally invalid response (punctuation in the text)
+    // structurally invalid response (mid-text punctuation still rejected)
+    do {
+        let harness = ContinuationHarness()
+        _ = harness.coordinator
+        harness.commit()
+        let request = try #require(harness.fireDebounce())
+        harness.deliver(
+            harness.makeResponse(for: request, text: "疑是，地上霜"),
+            for: request
+        )
+        #expect(harness.shownTexts.isEmpty)
+        #expect(harness.diagnostics.contains(.continuationAbstained))
+    }
+    // trailing punctuation is preserved end-to-end (2026-10-22)
     do {
         let harness = ContinuationHarness()
         _ = harness.coordinator
@@ -366,8 +379,7 @@ func guardLadderDropsLateResults() throws {
             harness.makeResponse(for: request, text: "疑是地上霜。"),
             for: request
         )
-        #expect(harness.shownTexts.isEmpty)
-        #expect(harness.diagnostics.contains(.continuationAbstained))
+        #expect(harness.shownTexts == ["疑是地上霜。"])
     }
 }
 

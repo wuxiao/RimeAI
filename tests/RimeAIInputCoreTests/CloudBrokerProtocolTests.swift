@@ -1026,9 +1026,14 @@ func continuationTextPolicyAllows() {
     let context = "床前明月光"
     // 正例：疑是地上霜
     #expect(ContinuationTextPolicy.allows(text: "疑是地上霜", context: context, confidence: 0.9))
-    // 含标点拒
-    #expect(!ContinuationTextPolicy.allows(text: "疑是地上霜。", context: context, confidence: 0.9))
-    // 超长拒（17 字）
+    // 尾部单个中文标点合法（标点不计入 2-16 汉字上限）
+    #expect(ContinuationTextPolicy.allows(text: "疑是地上霜。", context: context, confidence: 0.9))
+    #expect(ContinuationTextPolicy.allows(text: "低头思故乡？", context: context, confidence: 0.9))
+    // 句中标点拒；多个尾部标点拒；非集合标点拒
+    #expect(!ContinuationTextPolicy.allows(text: "疑是，地上霜", context: context, confidence: 0.9))
+    #expect(!ContinuationTextPolicy.allows(text: "疑是地上霜。。", context: context, confidence: 0.9))
+    #expect(!ContinuationTextPolicy.allows(text: "疑是地上霜…", context: context, confidence: 0.9))
+    // 超长拒（17 字，含尾部标点仍按汉字数拒）
     #expect(!ContinuationTextPolicy.allows(text: "一二三四五六七八九十一二三四五六七", context: context, confidence: 0.9))
     // 过短拒（1 字）
     #expect(!ContinuationTextPolicy.allows(text: "疑", context: context, confidence: 0.9))

@@ -606,3 +606,61 @@ func invalidateClearsNeuralLateExpectationSlot() {
     #expect(harness.appliedCandidates.isEmpty)
     #expect(harness.pipeline.presentation == .analyzing)
 }
+
+
+// MARK: - LM-002 对比行快照（本地/云端分两行展示）
+
+@Test @MainActor
+func neuralLateFrameSnapshotsLocalComparisonAndExpiresWithToken() {
+    let harness = NeuralLateHarness()
+    harness.typePinyin("qingzhixing", candidates: ["请执行"])
+    let token = harness.composition.token
+    guard let request = harness.runLocalSendCycle() else {
+        Issue.record("local request must be sent")
+        return
+    }
+    harness.pipeline.applyNeuralSentenceLate(
+        makeFrame(requestID: request.requestID, token: token)
+    )
+    // 迟到帧应用后：主槽为神经建议，本地快照可供对比行展示。
+    #expect(harness.pipeline.neuralLateApplied)
+    #expect(harness.pipeline.localComparisonSuggestion == "请执行命令")
+
+    // 击键推进 token：快照随失效链清空。
+    harness.typePinyin("q", candidates: ["请"])
+    #expect(harness.pipeline.localComparisonSuggestion == nil)
+    #expect(!harness.pipeline.neuralLateApplied)
+}
+
+@Test @MainActor
+func cloudTakeoverClearsNeuralLabelButLateFrameStillSnapshots() {
+    let harness = NeuralLateHarness()
+    harness.typePinyin("qingzhixing", candidates: ["请执行"])
+    let token = harness.composition.token
+    guard let request = harness.runLocalSendCycle() else {
+        Issue.record("local request must be sent")
+        return
+    }
+    // 云端先接管主槽（模拟 applyCloudGeneratedResult 的状态效果）。
+    harness.pipeline.cloudSuggestionApplied = true
+    harness.pipeline.presentation = .candidate(
+        text: "请执行命令",
+        decision: .sentenceSuggestion,
+        confidence: 0.9
+    )
+    harness.pipeline.neuralLateAppliedToken = nil
+
+    // 神经迟到帧晚到：主槽不动（云端所有权），但本地快照仍记录，
+    // 供对比行分两行展示。
+    harness.pipeline.applyNeuralSentenceLate(
+        makeFrame(requestID: request.requestID, token: token)
+    )
+    #expect(!harness.pipeline.neuralLateApplied)
+    guard case let .candidate(text, _, _) = harness.pipeline.presentation
+    else {
+        Issue.record("cloud suggestion must own the slot")
+        return
+    }
+    #expect(text == "请执行命令")
+    #expect(harness.pipeline.localComparisonSuggestion == "请执行命令")
+}

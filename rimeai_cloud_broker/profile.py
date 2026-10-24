@@ -64,6 +64,12 @@ class ProfileError(RuntimeError):
 def _validate_string_list(
     value: Any, *, maximum: int, clamp: bool = False
 ) -> list[str]:
+    if isinstance(value, str) and clamp:
+        # LLMs sometimes emit a bare string instead of a list; clamp
+        # mode accepts it as a single-item list rather than failing
+        # the round (a hard failure would keep the batch retrying
+        # forever on the same texts).
+        value = [value]
     if not isinstance(value, list):
         raise ProfileError("trait value must be a bounded list")
     if len(value) > maximum:
@@ -75,8 +81,14 @@ def _validate_string_list(
     items: list[str] = []
     for item in value:
         if not isinstance(item, str) or not item.strip():
+            if clamp:
+                continue
             raise ProfileError("trait items must be non-empty strings")
         if len(item) > MAX_PHRASE_LENGTH:
+            if clamp:
+                # Drop instead of slicing: a truncated phrase is worse
+                # than a missing one.
+                continue
             raise ProfileError("trait item exceeds the length cap")
         items.append(item.strip())
     return items
@@ -95,9 +107,17 @@ def _sanitize_traits(
     for key in ALLOWED_TRAIT_KEYS:
         if key not in raw or raw[key] is None:
             continue
-        items = _validate_string_list(
-            raw[key], maximum=TRAIT_ITEM_LIMITS[key], clamp=clamp
-        )
+        try:
+            items = _validate_string_list(
+                raw[key], maximum=TRAIT_ITEM_LIMITS[key], clamp=clamp
+            )
+        except ProfileError:
+            # Clamp mode (LLM output) drops the malformed key and keeps
+            # the salvageable ones; strict mode (stored payloads) still
+            # surfaces corruption.
+            if not clamp:
+                raise
+            continue
         if items:
             traits[key] = items
     return traits
@@ -590,7 +610,9 @@ class CloudProfileSummarizer:
             timeout=PROFILE_TIMEOUT_SECONDS,
         )
         content = _extract_content(response)
-        return _sanitize_traits(_decode_trait_object(content))
+        # The LLM owns this payload's shape; malformed keys/items are
+        # salvaged or dropped (clamp) instead of failing the round.
+        return _sanitize_traits(_decode_trait_object(content), clamp=True)
 
 
 def _extract_content(response: dict[str, Any]) -> str:

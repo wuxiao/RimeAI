@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -21,11 +22,14 @@ from rimeai_runtime.neural_ranker import (
 from rimeai_runtime.ngram_ranker import load_ngram_model
 from rimeai_runtime.pinyin_guard import PinyinGuard
 from rimeai_runtime.ranking import RankerError
+from rimeai_runtime.script_converter import SimplifiedScriptConverter
 
 from .fused_lm import FusedCharLM
 from .user_lm import UserLanguageModel
 
 SENTENCE_MIN_CONFIDENCE = 0.60
+
+logger = logging.getLogger(__name__)
 
 
 def _sha256_path(path: Path) -> str:
@@ -51,6 +55,7 @@ class LocalInferenceEngine:
         neural_device: str = "cpu",
         ranker_min_confidence: float = 0.55,
         user_lm_path: Path | None = None,
+        t2s_table_path: Path | None = None,
     ):
         if not 0 <= ranker_min_confidence <= 1:
             raise ValueError("ranker_min_confidence must be from 0 to 1")
@@ -92,6 +97,11 @@ class LocalInferenceEngine:
         self._static_scorer = StaticCharLM(language_model)
         self._ranker_min_confidence = ranker_min_confidence
         self._user_lm_path = user_lm_path
+        self._t2s_converter = (
+            SimplifiedScriptConverter.load(t2s_table_path)
+            if t2s_table_path is not None
+            else None
+        )
         self._user_lm: UserLanguageModel | None = None
         self._user_lm_mtime: float | None = None
         self._user_lm_size: int | None = None
@@ -149,6 +159,13 @@ class LocalInferenceEngine:
                 f"beam-{beam_config_sha256[:12]}:"
                 f"dict-{dictionary_sha256[:12]}"
             )
+        logger.info(
+            "engine loaded artifact_id=%s ranker=%s user_lm=%s t2s=%s",
+            self.artifact_id,
+            type(self._ranker).__name__,
+            self._user_lm_path,
+            self._t2s_converter is not None,
+        )
 
     def _refresh_user_lm(self, *, force: bool = False) -> None:
         """Reloads the consolidated user LM when its artifact changes.
@@ -181,10 +198,12 @@ class LocalInferenceEngine:
             self._user_lm = UserLanguageModel.load(path)
             self._user_lm_mtime = status.st_mtime
             self._user_lm_size = status.st_size
+            logger.debug("user LM reloaded path=%s", path)
         except ValueError:
             self._user_lm = None
             self._user_lm_mtime = None
             self._user_lm_size = None
+            logger.warning("user LM artifact invalid; cleared path=%s", path)
 
     def _apply_user_evidence(
         self, ranking: list[str], request: dict[str, Any]
@@ -207,6 +226,7 @@ class LocalInferenceEngine:
             return ranking
         if confidence <= 0 or not reranked:
             return ranking
+        logger.debug("user LM rerank applied domain=%s", domain)
         return reranked
 
     def _fused_scorer(self, request: dict[str, Any]) -> FusedCharLM | None:
@@ -285,6 +305,7 @@ class LocalInferenceEngine:
                     candidates=candidates,
                 )
         except RankerError:
+            logger.debug("ranker failed; using fallback n-gram ranker", exc_info=True)
             ranking, rank_confidence = self._fallback_ranker.rank(
                 context=request["context"],
                 candidates=candidates,
@@ -318,8 +339,23 @@ class LocalInferenceEngine:
                 )
             except Exception:
                 # Fail-closed: retry once with the default static scorer.
+                logger.warning(
+                    "fused sentence decode failed; retrying with static scorer",
+                    exc_info=True,
+                )
                 suggestion = self._decode_sentence(request, candidates, None)
             suggestion_text = suggestion.text
+            if (
+                self._t2s_converter is not None
+                and request.get("character_set") == "simplified"
+            ):
+                # Output-time script conversion: the beam scores in the
+                # traditional space; only the surfaced text adapts to
+                # the user's RimeAICharacterSet so the client script
+                # gate stops discarding accepted suggestions.
+                suggestion_text = self._t2s_converter.convert(
+                    suggestion_text
+                )
             sentence_confidence = suggestion.confidence
             if (
                 suggestion_text
@@ -333,11 +369,13 @@ class LocalInferenceEngine:
                 decision = "sentence_too_long"
                 ranked_candidate = ""
                 decision_confidence = 0.0
+                logger.debug("sentence decode rejected: too_long")
             elif getattr(suggestion, "reason", "") == "incomplete_candidate":
                 if decision != "ranked_candidate":
                     decision = "sentence_incomplete"
                     ranked_candidate = ""
                     decision_confidence = 0.0
+                    logger.debug("sentence decode rejected: incomplete_candidate")
         return {
             "decision": decision,
             "ranked_candidate": ranked_candidate,

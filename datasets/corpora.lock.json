@@ -18,6 +18,16 @@
       "derived_archive_sha256": "cfd65764ba09cb164b37f678a56f87152d8e82d8bac2c78e6ce16082bb4c272a",
       "license": "CC-BY-SA-2.5",
       "attribution": "Mozilla contributors"
+    },
+    {
+      "id": "zhwiki-20261001",
+      "domain": "general",
+      "url": "https://dumps.wikimedia.org/zhwiki/20261001/zhwiki-20261001-pages-articles.xml.bz2",
+      "sha1": "04d5eec3c249fdf8604b97f4435e019c60a4ec94",
+      "license": "CC-BY-SA-4.0",
+      "attribution": "Wikipedia contributors",
+      "additional_terms": "Wikimedia Foundation Terms of Use",
+      "variant_handling": "OpenCC t2s at sentence level; manual -{...}- conversion tags resolved to the zh-cn branch"
     }
   ],
   "tooling": {
@@ -30,6 +40,11 @@
       "version": "0.55.0",
       "license": "MIT",
       "wheel_sha256": "d53b1e8ad2cdb815fb2cb604ed3123372f5a28c6f447571244aca36fc62a286f"
+    },
+    "opencc-python-reimplemented": {
+      "version": "0.1.7",
+      "license": "Apache-2.0",
+      "wheel_sha256": "41b3b92943c7bed291f448e9c7fad4b577c8c2eae30fcfe5a74edf8818493aa6"
     }
   }
 }

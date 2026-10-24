@@ -234,6 +234,40 @@ def test_summarizer_truncates_a_single_oversized_entry_to_its_tail():
     assert huge.endswith(corpus)
 
 
+def test_summarizer_clamps_malformed_llm_traits():
+    # 模型偶尔会把 trait 值写成裸字符串/混入空项、非字符串项、超长项。
+    # summarize 面向 LLM 输出，必须走 clamp 容错：能捞的捞，坏的丢，
+    # 绝不抛 ProfileError——严格抛错会让 consolidation 批次无限重试
+    # 同一批文本（日志里实测的死循环）。
+    def transport(
+        path: str, payload: dict[str, Any], *, timeout: float
+    ) -> dict[str, Any]:
+        return _completion(
+            json.dumps(
+                {
+                    "register": "书面语",  # 裸字符串 → 单元素列表
+                    "cn_en_mixing": {"style": 1},  # 非 list 非 str → 丢该 key
+                    "signature_phrases": [  # 空项/非字符串项/超长项 → 跳过，保留好的
+                        "常用短语",
+                        "",
+                        123,
+                        "长" * 65,
+                    ],
+                    "vocabulary_domains": ["技术", "医学"],
+                },
+                ensure_ascii=False,
+            )
+        )
+
+    summarizer = CloudProfileSummarizer(transport)
+    traits = summarizer.summarize(["你好"], None)
+    assert traits == {
+        "register": ["书面语"],
+        "signature_phrases": ["常用短语"],
+        "vocabulary_domains": ["技术", "医学"],
+    }
+
+
 def test_summarizer_parses_strict_and_embedded_json():
     captured: dict[str, Any] = {}
 

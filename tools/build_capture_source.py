@@ -5,19 +5,20 @@ import bz2
 import hashlib
 import heapq
 import html
-import logging
 import json
+import logging
 import os
-from pathlib import Path
 import re
 import sys
 import tarfile
 import tempfile
+import xml.etree.ElementTree as ET
+from pathlib import Path
 from typing import Dict, Iterable, Iterator, List, Sequence, Set, Tuple
 from urllib.parse import quote
-import xml.etree.ElementTree as ET
 
 import jieba
+from opencc import OpenCC
 from pypinyin import Style, lazy_pinyin
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -35,6 +36,10 @@ MARKDOWN_LINK = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")
 MARKDOWN_CODE = re.compile(r"`[^`]*`")
 MARKDOWN_DIRECTIVE = re.compile(r"\{\{[^{}]*\}\}")
 WIKI_LINK = re.compile(r"\[\[(?:[^\]|]*\|)?([^\]]+)\]\]")
+WIKI_FILE_LINK = re.compile(
+    r"\[\[(?:File|Image|文件|檔案|图像|圖像)\s*:[^\]]*\]\]",
+    re.IGNORECASE,
+)
 WIKI_TEMPLATE = re.compile(r"\{\{[^{}]*\}\}")
 WIKI_REF = re.compile(r"<ref\b[^>]*>.*?</ref>|<ref\b[^>]*/>", re.DOTALL)
 
@@ -43,12 +48,14 @@ def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="build a deterministic RimeAI capture source from licensed corpora"
     )
-    parser.add_argument("--wikivoyage", required=True, type=Path)
-    parser.add_argument("--mdn", required=True, type=Path)
+    parser.add_argument("--wikivoyage", type=Path)
+    parser.add_argument("--mdn", type=Path)
+    parser.add_argument("--zhwiki", type=Path)
     parser.add_argument("--essay", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--general-samples", type=int, default=5000)
     parser.add_argument("--developer-samples", type=int, default=5000)
+    parser.add_argument("--zhwiki-samples", type=int, default=10000)
     return parser.parse_args()
 
 
@@ -79,6 +86,7 @@ def clean_markdown(raw: str) -> str:
 
 def clean_wikitext(raw: str) -> str:
     raw = WIKI_REF.sub(" ", raw)
+    raw = WIKI_FILE_LINK.sub(" ", raw)
     raw = WIKI_LINK.sub(r"\1", raw)
     for _ in range(5):
         updated = WIKI_TEMPLATE.sub(" ", raw)
@@ -133,6 +141,74 @@ def mdn_documents(archive_path: Path) -> Iterator[Tuple[str, str, str]]:
             url = "https://developer.mozilla.org/zh-CN/docs/" + quote(slug)
             text = source.read().decode("utf-8")
             yield relative_name, url, clean_markdown(text)
+
+
+WIKI_LANG_CONV = re.compile(r"-\{([^{}]*)\}-")
+
+
+def strip_language_converter(raw: str) -> str:
+    """Resolve `-{zh-cn:…;zh-tw:…}-` manual conversion tags.
+
+    Prefers the `zh-cn` branch, then the last labeled branch, then the
+    bare content (used for flag-only forms whose trailing segment is the
+    visible text).
+    """
+
+    def pick(match: re.Match[str]) -> str:
+        content = match.group(1)
+        fallback = content
+        labeled = [part for part in content.split(";") if ":" in part]
+        if labeled:
+            for part in labeled:
+                if part.strip().startswith("zh-cn:"):
+                    return part.split(":", 1)[1].strip()
+            fallback = labeled[-1].split(":", 1)[1].strip()
+        return fallback
+
+    return WIKI_LANG_CONV.sub(pick, raw)
+
+
+def zhwiki_documents(
+    path: Path, converter: OpenCC
+) -> Iterator[tuple[str, str, str]]:
+    """Namespace-0 articles from a zhwiki pages-articles dump.
+
+    Text is simplified (`t2s`) at sentence level: only sentences that
+    survive `normalized_sentences` are converted, so the cost stays
+    proportional to usable prose rather than the raw dump size.
+    """
+
+    with bz2.open(path, "rb") as source:
+        # Input is the sha1-verified official Wikimedia dump, not
+        # untrusted XML (same trust model as wikivoyage_documents).
+        for _, element in ET.iterparse(  # noqa: S314 - frozen dump input
+            source, events=("end",)
+        ):
+            if not element.tag.endswith("page"):
+                continue
+            title = element.findtext("./{*}title") or ""
+            namespace = element.findtext("./{*}ns")
+            text = element.findtext("./{*}revision/{*}text") or ""
+            if namespace == "0" and title and text:
+                url = "https://zh.wikipedia.org/wiki/" + quote(
+                    title.replace(" ", "_")
+                )
+                sentences = list(
+                    normalized_sentences(
+                        clean_wikitext(strip_language_converter(text))
+                    )
+                )
+                if sentences:
+                    # Re-join with the sentence punctuation: it acts as a
+                    # boundary marker, so re-splitting downstream yields
+                    # exactly the same sentence set (whitespace does not
+                    # survive the normalization inside the splitter).
+                    yield (
+                        title,
+                        url,
+                        converter.convert("。".join(sentences)),
+                    )
+            element.clear()
 
 
 def word_matches(sentence: str, vocabulary: Set[str]) -> Iterator[Tuple[int, str]]:
@@ -205,7 +281,7 @@ def collect_samples(
         pinyin_parts = lazy_pinyin(
             word,
             style=Style.NORMAL,
-            errors=lambda _: [],
+            errors="ignore",
         )
         if (
             len(pinyin_parts) != len(word)
@@ -251,49 +327,83 @@ def write_dataset(path: Path, samples: Sequence[Dict[str, object]]) -> None:
 
 def main() -> int:
     arguments = parse_arguments()
-    if arguments.general_samples < 1 or arguments.developer_samples < 1:
+    if not any((arguments.wikivoyage, arguments.mdn, arguments.zhwiki)):
+        print("error: at least one corpus path is required", file=sys.stderr)
+        return 2
+    counts = (
+        arguments.general_samples,
+        arguments.developer_samples,
+        arguments.zhwiki_samples,
+    )
+    if any(count < 1 for count in counts):
         print("error: sample counts must be positive", file=sys.stderr)
         return 2
     vocabulary = load_vocabulary(arguments.essay)
-    general = collect_samples(
-        wikivoyage_documents(arguments.wikivoyage),
-        vocabulary,
-        "zhwikivoyage",
-        "general",
-        "CC-BY-SA-4.0",
-        "20260701",
-        arguments.general_samples,
-    )
-    developer = collect_samples(
-        mdn_documents(arguments.mdn),
-        vocabulary,
-        "mdn-translated-content",
-        "developer",
-        "CC-BY-SA-2.5",
-        "9780b8cb15f9973e0bfbf5a5d60d3461b3d386ef",
-        arguments.developer_samples,
-    )
-    if len(general) < arguments.general_samples:
-        print(
-            f"error: only produced {len(general)} general samples",
-            file=sys.stderr,
+    corpora_plan = []
+    if arguments.wikivoyage is not None:
+        corpora_plan.append(
+            (
+                "zhwikivoyage",
+                wikivoyage_documents(arguments.wikivoyage),
+                "general",
+                "CC-BY-SA-4.0",
+                "20260701",
+                arguments.general_samples,
+            )
         )
-        return 2
-    if len(developer) < arguments.developer_samples:
-        print(
-            f"error: only produced {len(developer)} developer samples",
-            file=sys.stderr,
+    if arguments.mdn is not None:
+        corpora_plan.append(
+            (
+                "mdn-translated-content",
+                mdn_documents(arguments.mdn),
+                "developer",
+                "CC-BY-SA-2.5",
+                "9780b8cb15f9973e0bfbf5a5d60d3461b3d386ef",
+                arguments.developer_samples,
+            )
         )
-        return 2
-    samples = sorted(general + developer, key=lambda sample: str(sample["id"]))
+    if arguments.zhwiki is not None:
+        corpora_plan.append(
+            (
+                "zhwiki-20261001",
+                zhwiki_documents(arguments.zhwiki, OpenCC("t2s")),
+                "general",
+                "CC-BY-SA-4.0",
+                "20261001",
+                arguments.zhwiki_samples,
+            )
+        )
+    collected: list[dict[str, object]] = []
+    for corpus, documents, domain, license_id, revision, limit in corpora_plan:
+        produced = collect_samples(
+            documents,
+            vocabulary,
+            corpus,
+            domain,
+            license_id,
+            revision,
+            limit,
+        )
+        if len(produced) < limit:
+            print(
+                f"error: only produced {len(produced)} {corpus} samples",
+                file=sys.stderr,
+            )
+            return 2
+        collected.extend(produced)
+    samples = sorted(collected, key=lambda sample: str(sample["id"]))
     write_dataset(arguments.output, samples)
+    domain_counts: dict[str, int] = {}
+    for sample in samples:
+        domain = str(sample["domain"])
+        domain_counts[domain] = domain_counts.get(domain, 0) + 1
     report = {
         "schema_version": 1,
         "samples": len(samples),
-        "domains": {
-            "developer": len(developer),
-            "general": len(general),
+        "corpora": {
+            corpus: limit for corpus, _, _, _, _, limit in corpora_plan
         },
+        "domains": domain_counts,
         "sha256": hashlib.sha256(arguments.output.read_bytes()).hexdigest(),
     }
     print(json.dumps(report, ensure_ascii=False, sort_keys=True))

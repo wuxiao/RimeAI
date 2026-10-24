@@ -21,13 +21,28 @@
 - 每条样本的 `source.url` 指向具体 MDN 页面，`source.document` 保留固定
   提交中的相对路径。
 
+## 中文维基百科
+
+- 署名：Wikipedia 贡献者（条目历史页提供贡献者记录）。
+- 固定来源：`zhwiki-20261001-pages-articles.xml.bz2` 官方 dump。
+- 上游 SHA-1：`04d5eec3c249fdf8604b97f4435e019c60a4ec94`。
+- 许可证：[CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/)，
+  附加
+  [维基媒体基金会使用条款](https://foundation.wikimedia.org/wiki/Policy:Terms_of_Use)。
+- 每条样本的 `source.url` 指向具体条目；该条目的历史页提供贡献者记录。
+- Wikipedia® 与维基百科标志为 Wikimedia Foundation 注册商标；本数据仅
+  涉及文字内容，不构成商标使用或授权。
+
 ## 所做修改
 
 RimeAI 对上游材料进行了以下自动化修改：
 
 1. 去除模板、导航、代码块、HTML/Markdown/Wikitext 标记。
-2. 抽取有限长度中文句子并按源文档去重。
-3. 把句子拆为光标前上下文和目标词/长输入目标。
+2. 解析手动语言转换标记 `-{…}-`，优先采用 `zh-cn` 分支。
+3. 维基百科正文在句子级经 OpenCC `t2s`（opencc-python-reimplemented
+   0.1.7，Apache-2.0）转换为简体中文。
+4. 抽取有限长度中文句子并按源文档去重。
+5. 把句子拆为光标前上下文和目标词/长输入目标。
 4. 使用固定 pypinyin 版本生成无声调拼音。
 5. 使用固定 librime、schema 和 Rime 数据生成 Top-20 候选。
 6. 将训练 split 转换为字符 n-gram 计数和解码阈值。

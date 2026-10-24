@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
+import os
 import signal
 import socket
 import sys
@@ -19,6 +21,23 @@ from .neural_sentence import (
 )
 from .offline import install_offline_network_guard
 from .server import DaemonConfigurationError, RimeAIDaemonServer
+
+
+def _default_log_level() -> str:
+    level = os.environ.get("RIMEAI_LOG_LEVEL", "").strip().lower()
+    if level in {"debug", "info", "warning", "error"}:
+        return level
+    return "warning"
+
+
+def _configure_logging(level: str) -> None:
+    """stderr sink: the LaunchAgent redirects stderr to
+    rimeai-daemon.log, so this is the daemon's file log too."""
+    logging.basicConfig(
+        stream=sys.stderr,
+        level=getattr(logging, level.upper()),
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -87,6 +106,16 @@ def _parser() -> argparse.ArgumentParser:
             "min_confidence, model_type); omit to disable the tier"
         ),
     )
+    parser.add_argument(
+        "--log-level",
+        choices=("debug", "info", "warning", "error"),
+        default=_default_log_level(),
+        help=(
+            "daemon log verbosity on stderr (the LaunchAgent"
+            " redirects it to rimeai-daemon.log); default comes from"
+            " the RIMEAI_LOG_LEVEL environment variable or warning"
+        ),
+    )
     return parser
 
 
@@ -140,6 +169,15 @@ def _probe_running_daemon(
 
 
 async def _run(args: argparse.Namespace) -> None:
+    logger = logging.getLogger(__name__)
+    logger.info(
+        "daemon starting socket=%s neural_device=%s"
+        " neural_sentence_config=%s decision_log=%s",
+        args.socket,
+        args.neural_device,
+        args.neural_sentence_config,
+        not args.no_decision_log,
+    )
     # The cloud broker owns the idle consolidation loop (it holds the
     # credentials); the daemon only consumes the artifacts it produces.
     support_directory = (
@@ -148,6 +186,11 @@ async def _run(args: argparse.Namespace) -> None:
         / "Application Support"
         / "RimeAI"
     )
+    # Optional output-time t2s table, deployed beside the language
+    # model (dev: .rimeai/models/, installed: ~/Library/Application
+    # Support/RimeAI/models/). Missing table = no conversion, which
+    # keeps older deployments working unchanged.
+    t2s_table_path = args.language_model.parent / "t2s-simplified.json"
     engine = LocalInferenceEngine(
         language_model_path=args.language_model,
         beam_config_path=args.beam_config,
@@ -158,6 +201,9 @@ async def _run(args: argparse.Namespace) -> None:
         user_lm_path=(
             args.user_lm
             or support_directory / "language_profile" / "user-lm.json.gz"
+        ),
+        t2s_table_path=(
+            t2s_table_path if t2s_table_path.is_file() else None
         ),
     )
     neural_sentence_service = None
@@ -178,6 +224,9 @@ async def _run(args: argparse.Namespace) -> None:
         decision_log=decision_log,
     )
     await server.start()
+    logger.info(
+        "daemon ready socket=%s artifact_id=%s", args.socket, engine.artifact_id
+    )
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
     for signal_number in (signal.SIGINT, signal.SIGTERM):
@@ -191,6 +240,7 @@ async def _run(args: argparse.Namespace) -> None:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
+    _configure_logging(args.log_level)
     if (args.probe_socket is None) != (args.expected_artifact_id is None):
         parser.error(
             "--probe-socket and --expected-artifact-id must be used together"

@@ -23,11 +23,13 @@ source_beam_config="${project_root}/.rimeai/models/p0-beam-sentence-v3.json"
 source_rime_dictionary="${project_root}/.rimeai/rime/shared/luna_pinyin.dict.yaml"
 source_neural_model="${project_root}/.rimeai/models/rimeai-ranker-s-24m-v1"
 source_fusion_config="${project_root}/.rimeai/models/rimeai-ranker-s-24m-fusion-v2.json"
+source_t2s_table="${project_root}/.rimeai/models/t2s-simplified.json"
 language_model="${model_bundle_dir}/p0-char-ngram-v2.json.gz"
 beam_config="${model_bundle_dir}/p0-beam-sentence-v3.json"
 rime_dictionary="${model_bundle_dir}/luna_pinyin.dict.yaml"
 neural_model="${model_bundle_dir}/rimeai-ranker-s-24m-v1"
 fusion_config="${model_bundle_dir}/rimeai-ranker-s-24m-fusion-v2.json"
+t2s_table="${model_bundle_dir}/t2s-simplified.json"
 python_path=$(command -v python3)
 timestamp=$(date +%Y%m%d-%H%M%S)
 backup_plist="${HOME}/.Trash/${label}.previous-${timestamp}.plist"
@@ -61,7 +63,8 @@ for artifact in \
   "${source_beam_config}" \
   "${source_rime_dictionary}" \
   "${source_neural_model}/manifest.json" \
-  "${source_fusion_config}"; do
+  "${source_fusion_config}" \
+  "${source_t2s_table}"; do
   if [[ ! -f "${artifact}" ]]; then
     print -u2 "error: required daemon artifact is missing: ${artifact}"
     exit 2
@@ -129,6 +132,7 @@ install -m 600 "${source_rime_dictionary}" "${rime_dictionary}"
 rsync -a --delete --exclude='._*' \
   "${source_neural_model}/" "${neural_model}/"
 install -m 600 "${source_fusion_config}" "${fusion_config}"
+install -m 600 "${source_t2s_table}" "${t2s_table}"
 
 # Neural sentence arm: stage the decoder config with an absolute worker
 # command (the bundled daemon cannot resolve repo-relative paths).

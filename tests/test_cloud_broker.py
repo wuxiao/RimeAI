@@ -776,8 +776,15 @@ def test_debug_flag_logs_metadata_only_never_payloads(
 ):
     # P2-9：显式诊断开关只记录元数据（路径+字节数）；prompt/响应原文
     # 与凭据一律不落盘——此前完整 payload 写入 broker stderr 日志。
+    # 两个 flag 都要 patch，防开发者本机 ~/.config 里的真实
+    # cloud-debug-full 让该测试误失败。
     flag = tmp_path / "cloud-debug"
     monkeypatch.setattr(cloud_model_module, "DEBUG_FLAG", flag)
+    monkeypatch.setattr(
+        cloud_model_module,
+        "DEBUG_PAYLOAD_FLAG",
+        tmp_path / "cloud-debug-full",
+    )
 
     class FakeResponse:
         def read(self, limit=-1):
@@ -814,13 +821,88 @@ def test_debug_flag_logs_metadata_only_never_payloads(
     assert '"model"' not in err
     assert "机密上下文" not in err
     assert "secret" not in err
-    assert "usage" not in err
 
-    flag.unlink()
+
+def test_debug_full_flag_logs_payloads_for_development(
+    monkeypatch, tmp_path, capsys
+):
+    # 开发模式：cloud-debug-full 额外记录完整请求/响应 body，方便
+    # 联调时在 broker 日志里直接看到 prompt/响应原文；凭据仍然
+    # 永不落盘。只开 metadata flag（不开 full）时 payload 不出现。
+    meta_flag = tmp_path / "cloud-debug"
+    full_flag = tmp_path / "cloud-debug-full"
+    monkeypatch.setattr(cloud_model_module, "DEBUG_FLAG", meta_flag)
+    monkeypatch.setattr(cloud_model_module, "DEBUG_PAYLOAD_FLAG", full_flag)
+
+    class FakeResponse:
+        def read(self, limit=-1):
+            return b'{"message": {"content": "{}","usage": {}}}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    class FakeOpener:
+        def open(self, req, timeout=None):
+            return FakeResponse()
+
+    monkeypatch.setattr(
+        cloud_model_module.request, "build_opener", lambda *a, **k: FakeOpener()
+    )
+
+    ranker = CloudModelClient(api_key_loader=lambda: "secret")
+
+    # 第一步：只开 metadata flag → 无 payload 行。
+    meta_flag.touch()
+    ranker._post_json(
+        "/api/chat",
+        {"model": "m", "messages": [{"role": "user", "content": "开发调试"}]},
+        timeout=1,
+        api_key="secret",
+    )
+    err = capsys.readouterr().err
+    assert "[cloud-debug] ->" in err
+    assert "cloud-debug-payload" not in err
+
+    # 第二步：开 full flag → 请求/响应原文都出现，凭据仍不出现。
+    full_flag.touch()
+    ranker._post_json(
+        "/api/chat",
+        {"model": "m", "messages": [{"role": "user", "content": "开发调试"}]},
+        timeout=1,
+        api_key="secret",
+    )
+    err = capsys.readouterr().err
+    assert '[cloud-debug-payload] -> /api/chat' in err
+    assert "开发调试" in err
+    assert '[cloud-debug-payload] <- /api/chat' in err
+    assert '"usage"' in err
+    # Authorization 头永远不落盘。
+    assert "secret" not in err
+
+    # 第三步：两个 flag 都关掉 → 日志完全静默（开关真在生效）。
+    meta_flag.unlink()
+    full_flag.unlink()
     ranker._post_json(
         "/api/chat", {"model": "m"}, timeout=1, api_key="secret"
     )
     assert capsys.readouterr().err == ""
+
+
+def test_debug_payload_line_truncates_oversized_bodies():
+    from rimeai_cloud_broker.cloud_model import (
+        DEBUG_PAYLOAD_LIMIT,
+        _debug_payload_line,
+    )
+
+    huge = b"x" * (DEBUG_PAYLOAD_LIMIT + 1000)
+    line = _debug_payload_line("->", "/api/chat", huge)
+    assert "…truncated" in line
+    assert len(line) < len(huge)
+    small = b"ok"
+    assert "truncated" not in _debug_payload_line("<-", "/api/chat", small)
 
 
 def test_generated_sentence_bound_is_128_printable_characters():
@@ -1444,10 +1526,11 @@ def test_continuation_decisionless_contract_accepted():
 
 
 def test_continuation_rejects_non_han_text():
+    # 2026-10-22：尾部单个中文标点合法，但句中/非集合标点仍拒。
     ranker = StubCloudModelClient(
         {
             "decision": "generate",
-            "generated_text": "疑是地上霜。",
+            "generated_text": "疑是，地上霜",
             "confidence": 0.9,
             "reason": "context_match",
         }
@@ -1463,6 +1546,53 @@ def test_continuation_rejects_non_han_text():
         "confidence": None,
         "reason": "invalid_text",
     }
+
+
+def test_continuation_allows_trailing_punctuation():
+    # 尾部单个中文标点随短语一起返回；标点不计入 2-16 汉字上限。
+    ranker = StubCloudModelClient(
+        {
+            "decision": "generate",
+            "generated_text": "疑是地上霜。",
+            "confidence": 0.9,
+            "reason": "context_match",
+        }
+    )
+
+    result = ranker.rank_continuation(
+        validate_continuation_request(_continuation_request())
+    )
+
+    assert result == {
+        "decision": "generate",
+        "generated_text": "疑是地上霜。",
+        "confidence": 0.9,
+        "reason": "context_match",
+    }
+
+
+def test_continuation_rejects_double_trailing_punctuation():
+    # 多个尾部标点、省略号等非集合标点仍拒。
+    for text in ("疑是地上霜。。", "疑是地上霜…"):
+        ranker = StubCloudModelClient(
+            {
+                "decision": "generate",
+                "generated_text": text,
+                "confidence": 0.9,
+                "reason": "context_match",
+            }
+        )
+
+        result = ranker.rank_continuation(
+            validate_continuation_request(_continuation_request())
+        )
+
+        assert result == {
+            "decision": "abstain",
+            "generated_text": None,
+            "confidence": None,
+            "reason": "invalid_text",
+        }
 
 
 def test_continuation_rejects_low_confidence():
@@ -1543,12 +1673,20 @@ def test_continuation_ignores_history_generation_drift():
 def test_continuation_text_allows_unit():
     context = "床前明月光"
     assert continuation_text_allows("疑是地上霜", context, 0.8)
-    # 含标点
-    assert not continuation_text_allows("疑是地上霜。", context, 0.8)
+    # 尾部单个中文标点合法（标点不计入 2-16 汉字上限）
+    assert continuation_text_allows("疑是地上霜。", context, 0.8)
+    assert continuation_text_allows("低头思故乡？", context, 0.8)
+    # 句中标点拒；多个尾部标点拒；非集合标点拒
+    assert not continuation_text_allows("疑是，地上霜", context, 0.8)
+    assert not continuation_text_allows("疑是地上霜。。", context, 0.8)
+    assert not continuation_text_allows("疑是地上霜…", context, 0.8)
     # 少于 2 个汉字
     assert not continuation_text_allows("霜", context, 0.8)
-    # 超过 16 个汉字
+    assert not continuation_text_allows("霜。", context, 0.8)
+    # 超过 16 个汉字（标点不计入，17 汉字仍拒；16 汉字+标点放行）
     assert not continuation_text_allows("疑" * 17, context, 0.8)
+    assert not continuation_text_allows("疑" * 17 + "。", context, 0.8)
+    assert continuation_text_allows("疑" * 16 + "。", context, 0.8)
     # 低置信
     assert not continuation_text_allows("疑是地上霜", context, 0.64)
     # 复读 context 尾部

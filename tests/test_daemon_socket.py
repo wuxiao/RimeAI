@@ -432,6 +432,43 @@ def test_daemon_refuses_to_replace_an_active_socket():
         asyncio.run(scenario(Path(directory)))
 
 
+def _base_request():
+    return {
+        "request_id": "request-1",
+        "composition_id": "composition-1",
+        "revision": 1,
+        "app_session_id": "app-1",
+        "context_policy": "strict",
+        "context": "",
+        "pinyin": "mingling",
+        "candidates": ["明令", "命令"],
+        "deadline_ms": 400,
+        "allow_sentence": False,
+        "sensitive": False,
+    }
+
+
+def test_request_validation_passes_character_set_through():
+    base = _base_request()
+    base["character_set"] = "simplified"
+
+    validated = _validate_inference_request(base)
+
+    assert validated["character_set"] == "simplified"
+
+
+def test_request_validation_omits_character_set_by_default():
+    assert "character_set" not in _validate_inference_request(_base_request())
+
+
+def test_request_validation_rejects_unsupported_character_set():
+    base = _base_request()
+    base["character_set"] = "traditional"
+
+    with pytest.raises(ValueError, match="character_set"):
+        _validate_inference_request(base)
+
+
 def test_request_validation_accepts_only_bounded_ascii_pinyin():
     base = {
         "request_id": "request-1",

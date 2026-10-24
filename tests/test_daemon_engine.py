@@ -60,6 +60,7 @@ def _engine(
     segment="",
     segment_confidence=0.0,
     segment_reason="no_change",
+    t2s_converter=None,
 ):
     engine: Any = LocalInferenceEngine.__new__(LocalInferenceEngine)
     engine._ranker = _Ranker(ranking, confidence)
@@ -76,6 +77,7 @@ def _engine(
     engine._user_lm = None
     engine._user_lm_mtime = None
     engine._user_lm_size = None
+    engine._t2s_converter = t2s_converter
     return engine
 
 
@@ -586,3 +588,57 @@ def test_running_engine_reloads_user_lm_on_rewrite(tmp_path):
     os.utime(artifact, (stamped, stamped))
 
     assert engine.infer(dict(request))["decision"] == "same_top_candidate"
+
+
+class _StubConverter:
+    def convert(self, text):
+        return text.replace("氣", "气").replace("後", "后")
+
+
+def test_sentence_suggestion_converts_to_simplified_when_requested():
+    engine = _engine(
+        ["明令", "命令"],
+        0.0,
+        sentence="今天天氣很好",
+        sentence_confidence=0.9,
+        sentence_reason="suggestion",
+        t2s_converter=_StubConverter(),
+    )
+    request = _request(allow_sentence=True)
+    request["character_set"] = "simplified"
+
+    result = engine.infer(request)
+
+    assert result["decision"] == "sentence_suggestion"
+    assert result["sentence_suggestion"] == "今天天气很好"
+
+
+def test_sentence_suggestion_keeps_traditional_without_character_set():
+    engine = _engine(
+        ["明令", "命令"],
+        0.0,
+        sentence="今天天氣很好",
+        sentence_confidence=0.9,
+        sentence_reason="suggestion",
+        t2s_converter=_StubConverter(),
+    )
+
+    result = engine.infer(_request(allow_sentence=True))
+
+    assert result["sentence_suggestion"] == "今天天氣很好"
+
+
+def test_sentence_suggestion_skips_conversion_without_a_table():
+    engine = _engine(
+        ["明令", "命令"],
+        0.0,
+        sentence="今天天氣很好",
+        sentence_confidence=0.9,
+        sentence_reason="suggestion",
+    )
+    request = _request(allow_sentence=True)
+    request["character_set"] = "simplified"
+
+    result = engine.infer(request)
+
+    assert result["sentence_suggestion"] == "今天天氣很好"
