@@ -318,6 +318,12 @@ def main(argv: list[str] | None = None) -> int:
         "--api-key-file", type=Path, default=DEFAULT_API_KEY_FILE,
     )
     parser.add_argument(
+        "--seeds-file", type=Path, default=None,
+        help="pre-extracted pinyin seeds jsonl ({pinyin, syllables}) "
+        "-- bypasses dictionary sampling entirely (e.g. user-"
+        "distribution seeds from history)",
+    )
+    parser.add_argument(
         "--output", type=Path, required=True,
         help="output jsonl for build_sft_dataset --teacher-synthesis",
     )
@@ -325,12 +331,15 @@ def main(argv: list[str] | None = None) -> int:
 
     guard = PinyinGuard.from_rime_dictionary(args.dictionary)
     exclude_keys = _eval_pinyin_keys(args.eval_dataset)
-    entries = dictionary_word_entries(guard, args.dictionary)
-    seeds = sample_pinyin_seeds(
-        entries, count=args.count, seed=args.seed,
-        exclude_keys=exclude_keys,
-    )
-    if len(seeds) < args.count:
+    if args.seeds_file is not None:
+        seeds = _load_seeds_file(args.seeds_file, exclude_keys)
+    else:
+        entries = dictionary_word_entries(guard, args.dictionary)
+        seeds = sample_pinyin_seeds(
+            entries, count=args.count, seed=args.seed,
+            exclude_keys=exclude_keys,
+        )
+    if not args.seeds_file and len(seeds) < args.count:
         print(
             f"warning: only {len(seeds)}/{args.count} unique seeds sampled",
             file=sys.stderr,
@@ -384,6 +393,38 @@ def main(argv: list[str] | None = None) -> int:
         f"kept={stats['kept']} -> {args.output}"
     )
     return 0
+
+
+def _load_seeds_file(
+    path: Path, exclude_keys: set[str]
+) -> list[tuple[str, tuple[str, ...]]]:
+    """Pre-extracted seeds jsonl rows {pinyin, syllables} (e.g. user-
+    distribution seeds from history); evaluation-overlap keys are still
+    excluded defensively."""
+    seeds: list[tuple[str, tuple[str, ...]]] = []
+    seen: set[str] = set()
+    with path.open(encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            pinyin = record.get("pinyin")
+            syllables = record.get("syllables")
+            if (
+                isinstance(pinyin, str)
+                and pinyin
+                and pinyin not in exclude_keys
+                and pinyin not in seen
+                and isinstance(syllables, list)
+                and all(isinstance(s, str) and s for s in syllables)
+            ):
+                seen.add(pinyin)
+                seeds.append((pinyin, tuple(syllables)))
+    return seeds
 
 
 def _eval_pinyin_keys(path: Path) -> set[str]:
