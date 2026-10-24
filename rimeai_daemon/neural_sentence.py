@@ -54,6 +54,9 @@ DEFAULT_MIN_CONFIDENCE = 0.0
 # is a protocol violation, not something to buffer unbounded.
 MAX_RESPONSE_LINE_BYTES = 1 << 20
 _READ_CHUNK_BYTES = 65536
+# 公平窗口下限：worker 已证明的最快周转若低于此值（如 echo 型
+# stub），用它抬底，避免单次超快回包把 sliver 守卫压没。
+_MIN_FAIR_TURN_SECONDS = 0.05
 
 logger = logging.getLogger(__name__)
 
@@ -178,6 +181,11 @@ class NeuralSentenceService:
         # first read after a spawn gets the cold-start grace window.
         self._warm = False
         self._cold_start_until = 0.0
+        # worker 历史最快一次“写请求→有效应答”周转（合入
+        # _MIN_FAIR_TURN_SECONDS 后作为公平窗口基准）：小于它的
+        # 读窗口在物理上不可能得到应答，不应记为 worker 失败。
+        # 0.0 表示尚无现测数据（守卫不生效）。
+        self._fastest_turn_seconds = 0.0
         self._closing = False
         self._closed = False
         self._disabled = False
@@ -410,7 +418,11 @@ class NeuralSentenceService:
         releases the executor slot at budget time instead of occupying
         it for the full ``timeout_ms`` (reveal B-F5/C-F2). A cold
         worker's first read may exceed the deadline up to the cold-start
-        grace window (loading the model is not a decode failure)."""
+        grace window (loading the model is not a decode failure).
+        A decode whose budget was already exhausted while queued
+        abstains without a failure verdict (stale budget is not a
+        worker fault), and only an on-time response marks the worker
+        warm (2026-10-23 cold-start breaker incident)."""
         self.stats["requests"] += 1
         if not request.get("allow_sentence") or not _eligible_request(
             request
@@ -438,14 +450,38 @@ class NeuralSentenceService:
             )
             return None
         now = monotonic()
-        read_deadline = (
+        # 调用方自己的读截止（daemon 下传的交付预算；直调时为
+        # timeout_ms）：既是读停止点，也是“准时”判定的基准。
+        budget_deadline = (
             deadline if deadline is not None
             else now + self._timeout_seconds
         )
+        read_deadline = budget_deadline
         if not self._warm:
             read_deadline = max(
                 read_deadline, self._cold_start_until
             )
+        if read_deadline <= now or (
+            # sliver 守卫：窗口短于 worker 已证明的最快周转时，物理
+            # 上不可能等到应答——这是排队把预算耗成零头，不是 worker
+            # 的失败，不计熔断。（冷启动豁免不受影响：豁免读的窗口
+            # 被抬到 _cold_start_until，远大于周转。）
+            self._fastest_turn_seconds > 0.0
+            and read_deadline - now
+            < max(
+                self._fastest_turn_seconds,
+                _MIN_FAIR_TURN_SECONDS,
+            )
+        ):
+            # 预算在排队中已耗尽/只剩零头（单执行线程上冷启动首读
+            # 会阻塞后续 decode，等轮到它们时 deadline 已过期或仅剩
+            # sliver）：答案不可能按时交付，这是交付侧的 staleness，
+            # 不是 worker 的失败——不写请求、不计熔断，直接弃权。
+            self.stats["abstained"] += 1
+            logger.debug(
+                "neural decode abstained: budget exhausted before read"
+            )
+            return None
         try:
             process.stdin.write(
                 (
@@ -488,8 +524,27 @@ class NeuralSentenceService:
             self._record_failure()
             self.stats["abstained"] += 1
             return None
-        self._warm = True
         self._consecutive_failures = 0
+        # 记录本次“写请求→有效应答”的实测周转，取历史最小值作为
+        # 公平窗口基准（冷启动含加载的长周转不会抬高它）。
+        turn_seconds = monotonic() - now
+        if (
+            self._fastest_turn_seconds == 0.0
+            or turn_seconds < self._fastest_turn_seconds
+        ):
+            self._fastest_turn_seconds = turn_seconds
+        if monotonic() <= budget_deadline:
+            self._warm = True
+        else:
+            # 只有在调用方预算内答对的响应才算“热”：靠冷启动豁免
+            # 救回的迟到应答只证明 worker 存活，不能证明它能在预
+            # 算内服务。若迟到也置热，仍排在冷启动窗口内的后续请
+            # 求会被剥掉豁免、被排队残留的 sliver 预算误记 failure
+            # （2026-10-23 一秒三连败熔断的根因）。任何有效应答
+            # （含迟到）都重置连续失败计数：存活即非连败。
+            logger.debug(
+                "neural late answer within grace: worker stays cold"
+            )
         suggestion = response.get("suggestion")
         confidence = response.get("confidence")
         if (

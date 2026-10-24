@@ -95,6 +95,21 @@ def _write_worker_script(directory: Path, behavior: str) -> Path:
                         "confidence": 0.5,
                         "model_artifact_id": "stub:mlx-8bit:v3",
                     }}
+                elif behavior == "cold_burst":
+                    # 首次请求模拟冷启动（加载模型+建索引），其后每个
+                    # 请求固定 inference 延迟——用于冷启动排队级联回归。
+                    import time
+                    if not getattr(sys.modules[__name__], "_loaded", False):
+                        sys.modules[__name__]._loaded = True
+                        time.sleep(0.7)
+                    time.sleep(0.25)
+                    response = {{
+                        "schema_version": 1,
+                        "request_id": request["request_id"],
+                        "suggestion": "请执行命令",
+                        "confidence": 0.5,
+                        "model_artifact_id": "stub:mlx-8bit:v3",
+                    }}
                 elif behavior == "assert_no_stats":
                     if "stats" in request:
                         sys.stdout.write("not json\\n")
@@ -743,6 +758,153 @@ def test_cold_start_grace_prevents_mid_load_kill(
         assert payload is not None
         assert service.stats["delivered"] == 1
         assert service.stats["failures"] == 0
+    finally:
+        service.close()
+
+
+# --------------------------------------------------------------------------
+# 2026-10-23 冷启动豁免排队级联：单执行线程上冷启动首读阻塞后续
+# decode，等轮到它们时 dispatch 时刻的预算已过期/只剩零头；旧代码
+# 把这类 sliver 超时记为 worker failure，一秒内三连败把刚加载完的
+# 健康 worker 熔断回收。修复：预算耗尽/零头守卫弃权不计失败，
+# 准时应答才算热（迟到应答不断剥夺排队请求的豁免）。
+
+
+def test_cold_start_grace_covers_requests_queued_behind_first_read(
+    tmp_path: Path,
+) -> None:
+    # 事故主于回归：冷启动首读（慢响应、超普通 budget 但在豁免
+    # 内）成功后，紧随其后排队的冷启动时代请求（deadline 均为
+    # dispatch 时刻算出、已过期/只剩零头）不得 record_failure，
+    # 不得进 cooldown，且 worker 存活可继续交付。
+    script = _write_worker_script(tmp_path, "cold_burst")
+    service = NeuralSentenceService(
+        _config([sys.executable, str(script)], timeout_ms=5000),
+        project_root=tmp_path,
+    )
+    try:
+        t0 = monotonic()
+        # 首读：0.6s 预算，但冷启动加载 0.7s+——豁免窗口内等到应答
+        assert service.decode(
+            _request(request_id="req-0"), deadline=t0 + 0.6
+        ) is not None
+        # 模拟在首读期间已 dispatch 的排队请求（dispatch 时刻分别为
+        # ~t0+0.15/0.45/0.5s，预算 0.6s）：执行时 deadline 已过期。
+        for request_id, dispatched in (
+            ("req-1", 0.15),
+            ("req-2", 0.45),
+            ("req-3", 0.5),
+        ):
+            service.decode(
+                _request(request_id=request_id),
+                deadline=t0 + dispatched + 0.6,
+            )
+        # 不 record_failure、不进 cooldown
+        assert service.stats["failures"] == 0
+        assert service._cooldown_cycles == 0
+        assert monotonic() >= service._cooldown_until
+        # 排队请求由豁免接管（迟到应答）或快速弃权，worker 未被回收
+        assert service.stats["worker_restarts"] == 1
+        assert service.stats["delivered"] >= 3
+        # 熔断未触发：新请求正常交付，臂存活
+        assert service.decode(
+            _request(request_id="req-fresh"),
+            deadline=monotonic() + 2.0,
+        ) is not None
+        assert service.stats["failures"] == 0
+    finally:
+        service.close()
+
+
+def test_budget_exhausted_before_start_abstains_without_failure(
+    tmp_path: Path,
+) -> None:
+    # 入口预算守卫：热 worker 下，deadline 在 decode 启动前就已过期
+    # （排队耗尽）→ 弃权且不计 failure，worker 不受影响。
+    script = _write_worker_script(tmp_path, "echo")
+    service = NeuralSentenceService(
+        _config([sys.executable, str(script)], timeout_ms=5000),
+        project_root=tmp_path,
+    )
+    try:
+        assert service.decode(_request()) is not None
+        assert service._warm  # echo 准时应答，已热
+        started = monotonic()
+        payload = service.decode(
+            _request(request_id="req-stale"),
+            deadline=monotonic() - 0.05,
+        )
+        assert payload is None
+        assert monotonic() - started < 0.5  # 快速弃权，不占读窗口
+        assert service.stats["failures"] == 0
+        assert service.stats["abstained"] == 1
+        # worker 仍健在：新请求正常交付
+        assert service.decode(
+            _request(request_id="req-next"),
+            deadline=monotonic() + 2.0,
+        ) is not None
+    finally:
+        service.close()
+
+
+def test_sliver_window_below_fastest_turn_abstains_without_failure(
+    tmp_path: Path,
+) -> None:
+    # sliver 守卫：热 worker 每次周转实测 ~0.4s，窗口只剩 0.15s 时
+    # 物理上等不到应答——弃权不计 failure（旧代码在此误记失败，
+    # 冷启动突发尾部三连败触发熔断）。
+    script = _write_worker_script(tmp_path, "slow_first")
+    service = NeuralSentenceService(
+        _config([sys.executable, str(script)], timeout_ms=5000),
+        project_root=tmp_path,
+    )
+    try:
+        # 首读无 deadline 限制：0.4s 周转准时应答，已热，最快周转 >= 0.4s
+        assert service.decode(_request()) is not None
+        assert service._warm
+        assert service._fastest_turn_seconds >= 0.4
+        started = monotonic()
+        payload = service.decode(
+            _request(request_id="req-sliver"),
+            deadline=monotonic() + 0.15,
+        )
+        assert payload is None
+        assert monotonic() - started < 0.35  # 快速弃权，不等满窗口
+        assert service.stats["failures"] == 0
+        assert service.stats["abstained"] == 1
+        # 充足窗口的请求仍正常交付（守卫不影响真读）
+        assert service.decode(
+            _request(request_id="req-full"),
+            deadline=monotonic() + 2.0,
+        ) is not None
+        assert service.stats["failures"] == 0
+    finally:
+        service.close()
+
+
+def test_true_timeouts_on_live_window_still_trip_breaker(
+    tmp_path: Path,
+) -> None:
+    # 熔断语义锁定：热 worker 对看得到完整窗口的请求持续沉默 →
+    # 真超时仍逐次记 failure，三连败照常进 cooldown（守卫只豁免
+    # 排队耗尽的 sliver/过期窗口，不豁免真超时）。
+    script = _write_worker_script(tmp_path, "echo_then_silent")
+    service = NeuralSentenceService(
+        _config([sys.executable, str(script)], timeout_ms=5000),
+        project_root=tmp_path,
+    )
+    try:
+        assert service.decode(_request()) is not None  # 预热并置热
+        for i in range(3):
+            payload = service.decode(
+                _request(request_id=f"req-silent-{i}"),
+                deadline=monotonic() + 0.5,
+            )
+            assert payload is None
+        assert service.stats["failures"] == 3
+        assert service._cooldown_cycles == 1
+        assert monotonic() < service._cooldown_until
+        assert service.stats["worker_restarts"] == 1  # 回收过一次
     finally:
         service.close()
 
