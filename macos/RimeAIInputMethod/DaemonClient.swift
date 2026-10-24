@@ -1,9 +1,11 @@
 import Foundation
 import os
 
-/// LM-002 验证全链路插桩：infer→连接→hello→结果→熔断的生死链
-/// 经 unified log（subsystem fun.wwcn.rimeai, category daemon-client）
-/// 直接观察，消除推断。用后可整体移除。
+/// 守护进程客户端低频高价值诊断日志：握手拒绝详情与连接
+/// 关闭原因经 unified log（subsystem fun.wwcn.rimeai,
+/// category daemon-client）直接观察。2026-10-23 五连根因
+/// 均已修复，高频噪音（每次击键/建连的插桩）已按
+/// 「低频高价值保留、高频噪音移除」收敛清理。
 private let daemonClientLog = Logger(
     subsystem: "fun.wwcn.rimeai",
     category: "daemon-client"
@@ -86,7 +88,6 @@ final class DaemonClient: @unchecked Sendable {
     ) {
         queue.async { [self] in
             guard circuitBreaker.allowsRequest() else {
-                daemonClientLog.notice("infer rejected by circuit breaker: req=\(request.requestID, privacy: .public)")
                 publishStatus("熔断冷却中")
                 let result = SemanticInferenceResult(
                     status: "circuit_open",
@@ -241,7 +242,6 @@ private extension DaemonClient {
     }
 
     func handleTransportReady(generation: UInt64) {
-        daemonClientLog.notice("transport ready: gen=\(generation, privacy: .public)")
         guard connectionState.transportBecameReady(generation: generation),
               let hello = encodeLine(
                 DaemonHelloRequest(
@@ -352,7 +352,6 @@ private extension DaemonClient {
                 return
             }
             cancelHelloTimeout()
-            daemonClientLog.notice("hello accepted: model=\(hello.modelArtifactID, privacy: .public) caps=\(hello.capabilities.count, privacy: .public)")
             modelArtifactID = hello.modelArtifactID
             modelArtifacts = hello.modelArtifacts ?? []
             daemonOfflineLock = true
@@ -459,7 +458,6 @@ private extension DaemonClient {
     }
 
     func expire(requestID: String) {
-        daemonClientLog.notice("request expired: req=\(requestID, privacy: .public)")
         guard let request = pending.removeValue(forKey: requestID) else {
             return
         }
