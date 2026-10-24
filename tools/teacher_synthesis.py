@@ -225,7 +225,12 @@ def synth(
     ask_teacher: Callable[[str], str | None],
     *,
     seeds: Sequence[tuple[str, tuple[str, ...]]],
+    concurrency: int = 1,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Teacher calls optionally run in a thread pool (each worker gets
+    its own ask_teacher handle — the CLI builds one CloudModelClient
+    per thread to avoid sharing the decision cache); alignment and
+    row assembly stay single-threaded and deterministic."""
     rows: list[dict[str, Any]] = []
     stats = {
         "requested": len(seeds),
@@ -234,17 +239,39 @@ def synth(
         "kept": 0,
     }
     now_ms = int(time.time() * 1000)
-    for index, (pinyin, syllables) in enumerate(seeds):
+
+    def one(seed: tuple[str, tuple[str, ...]]) -> tuple[int, str | None]:
+        pinyin, syllables = seed
         sentence = ask_teacher(pinyin)
-        if sentence is None:
+        return (
+            0 if sentence is not None else 1,
+            None
+            if sentence is None
+            else (
+                sentence
+                if alignment_filter(guard, sentence, pinyin, syllables)
+                else ""
+            ),
+        )
+
+    if concurrency <= 1:
+        outcomes = map(one, seeds)
+    else:
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=concurrency) as pool:
+            outcomes = list(pool.map(one, seeds))
+
+    for index, (status, sentence) in enumerate(outcomes):
+        if status == 1:
             stats["teacher_abstain_or_error"] += 1
             continue
-        if not alignment_filter(guard, sentence, pinyin, syllables):
+        if not sentence:
             stats["alignment_dropped"] += 1
             continue
         rows.append(
             {
-                "pinyin": pinyin,
+                "pinyin": seeds[index][0],
                 "chosen": sentence,
                 "rejected": None,
                 "weight": WEIGHT_TEACHER_SYNTHESIS,
@@ -279,6 +306,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
+        "--concurrency", type=int, default=4,
+        help="parallel teacher requests (each thread its own client; "
+        "default 4)",
+    )
+    parser.add_argument(
         "--eval-dataset", type=Path, default=DEFAULT_EVAL_DATASET,
         help="frozen evaluation jsonl whose pinyin keys are excluded",
     )
@@ -304,15 +336,28 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
 
-    client = CloudModelClient(
-        api_key_loader=lambda: load_api_key(args.api_key_file)
-    )
+    # 每线程独立 CloudModelClient（决策缓存/journal 不跨线程共享；造数
+    # 场景拼音唯一、缓存命中率约零，无重复调用代价）。
+    import threading
+
+    thread_local = threading.local()
+
+    def ask_teacher(pinyin: str) -> str | None:
+        client = getattr(thread_local, "client", None)
+        if client is None:
+            client = CloudModelClient(
+                api_key_loader=lambda: load_api_key(args.api_key_file)
+            )
+            thread_local.client = client
+        return teacher_sentence(
+            client, model_id=DEFAULT_MODEL_ID, pinyin=pinyin
+        )
+
     rows, stats = synth(
         guard,
-        lambda pinyin: teacher_sentence(
-            client, model_id=DEFAULT_MODEL_ID, pinyin=pinyin
-        ),
+        ask_teacher,
         seeds=seeds,
+        concurrency=args.concurrency,
     )
     _write_private(
         args.output,
