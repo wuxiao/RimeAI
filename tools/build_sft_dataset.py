@@ -87,6 +87,25 @@ def load_decision_rows(path: Path) -> list[dict[str, Any]]:
     ]
 
 
+def load_teacher_rows(path: Path) -> list[dict[str, Any]]:
+    """Rows from tools/teacher_synthesis.py output (jsonl). Field
+    validation happens in build_pairs so one bad line only drops
+    itself, never the whole mix."""
+    rows: list[dict[str, Any]] = []
+    with path.open(encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(record, dict):
+                rows.append(record)
+    return rows
+
+
 def load_cloud_rows(path: Path) -> list[dict[str, Any]]:
     with sqlite3.connect(path) as db:
         rows = db.execute(
@@ -175,6 +194,7 @@ def build_pairs(
     decision_rows: list[dict[str, Any]],
     cloud_rows: list[dict[str, Any]],
     history_rows: list[dict[str, Any]],
+    teacher_rows: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     """Builds (pairs, stats); pairs carry a private ``_created_at_ms``
     for deterministic ordering, stripped before writing."""
@@ -187,6 +207,8 @@ def build_pairs(
         "cloud_unadopted_skipped": 0,
         "unsupported_source_skipped": 0,
         "duplicates_dropped": 0,
+        "teacher_rows_loaded": 0,
+        "teacher_invalid_dropped": 0,
     }
     candidates: list[dict[str, Any]] = []
 
@@ -262,7 +284,35 @@ def build_pairs(
             created_at_ms=row["created_at_ms"],
         )
 
-    candidates.sort(key=lambda pair: pair["_created_at_ms"])
+    # 教师合成行（glm-5.3 序列级，对齐过滤器已在 teacher_synthesis 把
+    # 关）：同键与真实数据冲突时真实数据优先（排序第二键，真实在前）。
+    for row in teacher_rows or []:
+        pinyin, chosen, weight = (
+            row.get("pinyin"), row.get("chosen"), row.get("weight"),
+        )
+        if (
+            not isinstance(pinyin, str) or not pinyin
+            or not isinstance(chosen, str) or not chosen
+            or not isinstance(weight, (int, float))
+        ):
+            stats["teacher_invalid_dropped"] += 1
+            continue
+        stats["teacher_rows_loaded"] += 1
+        emit(
+            pinyin=pinyin,
+            chosen=chosen,
+            rejected=None,
+            weight=float(weight),
+            source="teacher_synthesis",
+            created_at_ms=int(row.get("created_at_ms", 0)),
+        )
+
+    candidates.sort(
+        key=lambda pair: (
+            pair["_created_at_ms"],
+            1 if pair["source"] == "teacher_synthesis" else 0,
+        )
+    )
     seen: set[tuple[str, str, str | None]] = set()
     pairs: list[dict[str, Any]] = []
     by_source: dict[str, int] = {}
@@ -307,6 +357,7 @@ def build_outputs(
     decision_log: Path,
     cloud_decisions: Path | None,
     history_db: Path | None,
+    teacher_synthesis: Path | None,
     eval_dataset: Path,
     min_samples: int,
     overlapped: set[str],
@@ -345,6 +396,9 @@ def build_outputs(
                 str(cloud_decisions) if cloud_decisions else None
             ),
             "history_db": str(history_db) if history_db else None,
+            "teacher_synthesis": (
+                str(teacher_synthesis) if teacher_synthesis else None
+            ),
         },
         "interval": {
             "from_created_at_ms": min(timestamps) if timestamps else None,
@@ -389,6 +443,12 @@ def main(argv: list[str] | None = None) -> int:
         "rejected suggestions (same pinyin within the join window)",
     )
     parser.add_argument(
+        "--teacher-synthesis", type=Path, default=None,
+        help="teacher_synthesis.py jsonl — glm-5.3 sequence-level "
+        "teacher rows mixed in (weight from the row, real data wins "
+        "on key collision)",
+    )
+    parser.add_argument(
         "--eval-dataset", type=Path, default=DEFAULT_EVAL_DATASET,
         help="frozen evaluation jsonl for the leak check",
     )
@@ -414,7 +474,14 @@ def main(argv: list[str] | None = None) -> int:
     history_rows = (
         load_history_commits(args.history_db) if args.history_db else []
     )
-    pairs, stats = build_pairs(decision_rows, cloud_rows, history_rows)
+    teacher_rows = (
+        load_teacher_rows(args.teacher_synthesis)
+        if args.teacher_synthesis
+        else []
+    )
+    pairs, stats = build_pairs(
+        decision_rows, cloud_rows, history_rows, teacher_rows
+    )
 
     eval_keys = eval_pinyin_set(args.eval_dataset)
     overlapped = leak_pinyin(pairs, eval_keys)
@@ -441,6 +508,7 @@ def main(argv: list[str] | None = None) -> int:
         decision_log=args.decision_log,
         cloud_decisions=args.cloud_decisions,
         history_db=args.history_db,
+        teacher_synthesis=args.teacher_synthesis,
         eval_dataset=args.eval_dataset,
         min_samples=args.min_samples,
         overlapped=overlapped,
