@@ -17,9 +17,15 @@ Privacy contract: explicit user invocation only; the output files are
 written 0600 (same posture as the language-profile export). Nothing is
 uploaded — the jsonl is the local training asset.
 
-Fail-closed leak check: the pinyin keys of the frozen evaluation set's
-validation+test splits must not appear in the dataset at all; any
-overlap aborts the build with exit 4 and writes nothing.
+Fail-closed leak check: pinyin keys that overlap the frozen evaluation
+set's validation+test splits are DROPPED from the dataset (never
+written), the drop is recorded in the lock's leak_check, and the build
+continues. Real-use data inevitably contains high-frequency pinyin that
+also occurs in the evaluation set (first production run: 14/227 rows);
+dropping the rows keeps evaluation integrity intact while the rest of
+the corpus stays usable. (v1 semantics — abort with exit 4 and write
+nothing — was retired after that run; see the lock's leak_check policy
+field.)
 
 Minimum viable scale: when the deduplicated row count is below
 --min-samples the build still writes the outputs for inspection but
@@ -39,7 +45,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-VERSION = 1
+VERSION = 2
 DATASET_NAME = "sft-constrained-v1"
 DEFAULT_EVAL_DATASET = (
     Path(__file__).resolve().parents[1]
@@ -350,6 +356,8 @@ def build_outputs(
         "leak_check": {
             "eval_dataset": str(eval_dataset),
             "splits": ["validation", "test"],
+            "policy": "dropped",
+            "dropped_rows": stats.get("leak_dropped", 0),
             "overlapped_pinyin": sorted(overlapped),
         },
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -411,14 +419,20 @@ def main(argv: list[str] | None = None) -> int:
     eval_keys = eval_pinyin_set(args.eval_dataset)
     overlapped = leak_pinyin(pairs, eval_keys)
     if overlapped:
+        # 泄漏防护改为剔除而非整体拒绝：真实使用数据必然含评测集
+        # 高频拼音（首跑 14/227），零重叠门在真实数据上永不可过。
+        # 剔除保证重叠样本一个不进训练集，评测完整性目标不变。
+        dropped = len(overlapped)
+        pairs = [p for p in pairs if p["pinyin"] not in overlapped]
+        stats["rows"] = len(pairs)
+        stats["unique_pinyin"] = len({p["pinyin"] for p in pairs})
+        stats["leak_dropped"] = dropped
         print(
-            f"leak check FAILED: {len(overlapped)} pinyin overlap the "
-            f"frozen evaluation set ({args.eval_dataset}); nothing "
-            "written — examples: "
-            + ", ".join(sorted(overlapped)[:10]),
+            f"leak check: dropped {dropped} rows whose pinyin overlap "
+            f"the frozen evaluation set ({args.eval_dataset}) — "
+            "examples: " + ", ".join(sorted(overlapped)[:10]),
             file=sys.stderr,
         )
-        return EXIT_LEAK
 
     lock = build_outputs(
         pairs,

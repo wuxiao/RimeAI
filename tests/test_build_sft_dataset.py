@@ -321,10 +321,15 @@ def test_main_below_min_samples_reports_and_marks_unusable(tmp_path: Path):
     assert lock["min_samples"] == 10
 
 
-def test_main_aborts_on_leak_without_writing(tmp_path: Path):
+def test_main_drops_overlapped_rows_and_writes(tmp_path: Path):
+    # v2 语义：重叠样本剔除后继续写出，不再整体拒绝（真实数据必含
+    # 评测集高频拼音，零重叠门永不可过）。
     daemon = make_daemon_db(
         tmp_path / "decision_log.db",
-        [(1_000, "local_rank", "r1", "ceshi", "测试", "adopted")],
+        [
+            (1_000, "local_rank", "r1", "ceshi", "测试", "adopted"),
+            (2_000, "local_rank", "r2", "anzhuang", "安装", "adopted"),
+        ],
     )
     eval_path = make_eval_dataset(
         tmp_path / "eval.jsonl", ("test", "ceshi")
@@ -338,6 +343,20 @@ def test_main_aborts_on_leak_without_writing(tmp_path: Path):
             "--min-samples", "1",
         ]
     )
-    assert code == builder.EXIT_LEAK
-    assert not (output / "sft-constrained-v1.jsonl").exists()
-    assert not (output / "sft-constrained-v1.lock.json").exists()
+    assert code == builder.EXIT_OK
+    jsonl = (output / "sft-constrained-v1.jsonl").read_text(
+        encoding="utf-8"
+    ).splitlines()
+    assert len(jsonl) == 1
+    assert "anzhuang" in jsonl[0]
+    assert "ceshi" not in jsonl[0]
+    lock = json.loads(
+        (output / "sft-constrained-v1.lock.json").read_text(encoding="utf-8")
+    )
+    leak = lock["leak_check"]
+    assert leak["policy"] == "dropped"
+    assert leak["dropped_rows"] == 1
+    assert leak["overlapped_pinyin"] == ["ceshi"]
+    assert lock["counts"]["leak_dropped"] == 1
+    assert lock["counts"]["rows"] == 1
+    assert lock["usable"] is True
