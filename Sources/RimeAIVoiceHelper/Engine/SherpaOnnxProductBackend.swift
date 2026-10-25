@@ -41,6 +41,7 @@ struct SherpaOnnxRecognizerConfiguration: Equatable, Sendable {
     var decoderBytes: Data?
     var joinerBytes: Data?
     var tokensBytes: Data?
+    var bpeVocabularyBytes: Data?
     let sampleRateHertz: Int
     let featureDimension: Int
     let numberOfThreads: Int
@@ -1393,10 +1394,12 @@ final class SherpaOnnxProductBackendLoader:
             bound.encoderBytes = bytesFor("encoder.onnx")
             bound.decoderBytes = bytesFor("decoder.onnx")
             bound.joinerBytes = nil
+            bound.bpeVocabularyBytes = nil
         } else {
             bound.encoderBytes = bytesFor("encoder.onnx")
             bound.decoderBytes = bytesFor("decoder.onnx")
             bound.joinerBytes = bytesFor("joiner.onnx")
+            bound.bpeVocabularyBytes = bytesFor("bpe.vocab")
         }
         bound.tokensBytes = bytesFor("tokens.txt")
         return bound
@@ -1880,7 +1883,7 @@ private struct SystemSherpaOnnxRuntime:
                 bufferMode ? "" : configuration.tokensPath
             )
             config.model_config.bpe_vocab = try strings.copy(
-                configuration.bpeVocabularyPath
+                bufferMode ? "" : configuration.bpeVocabularyPath
             )
         }
         config.model_config.num_threads = Int32(
@@ -1928,6 +1931,7 @@ private struct SystemSherpaOnnxRuntime:
             || configuration.decoderBytes != nil
             || configuration.joinerBytes != nil
             || configuration.tokensBytes != nil
+            || configuration.bpeVocabularyBytes != nil
         guard anyPresent else {
             return ([], false, isParaformer)
         }
@@ -1947,6 +1951,30 @@ private struct SystemSherpaOnnxRuntime:
             throw SherpaOnnxProductBackendError
                 .recognizerInitializationFailed
         }
+        // bpe 组完整性（fail-closed）：transducer manifest 合同要求
+        // bpe_vocab_path——路径非空时字节必须非空；无 bpe cohort 路径
+        // 为空时字节必须为空。任一不一致抛错，防静默回退 pathname。
+        if !configuration.bpeVocabularyPath.isEmpty {
+            guard let bpeBytes = configuration.bpeVocabularyBytes else {
+                throw SherpaOnnxProductBackendError
+                    .recognizerInitializationFailed
+            }
+            return (
+                [
+                    encoderBytes,
+                    decoderBytes,
+                    joinerBytes,
+                    tokensBytes,
+                    bpeBytes,
+                ],
+                true,
+                false
+            )
+        }
+        guard configuration.bpeVocabularyBytes == nil else {
+            throw SherpaOnnxProductBackendError
+                .recognizerInitializationFailed
+        }
         return (
             [encoderBytes, decoderBytes, joinerBytes, tokensBytes],
             true,
@@ -1961,13 +1989,8 @@ private struct SystemSherpaOnnxRuntime:
         pinned: [UnsafeRawBufferPointer],
         isParaformer: Bool
     ) {
-        config.model_config.tokens_buf = pinned
-            .last?.baseAddress?
-            .assumingMemoryBound(to: CChar.self)
-        config.model_config.tokens_buf_size = Int32(
-            pinned.last?.count ?? 0
-        )
         if isParaformer {
+            // [encoder, decoder, tokens]
             config.model_config.paraformer.encoder_buf = pinned[0]
                 .baseAddress?.assumingMemoryBound(to: CChar.self)
             config.model_config.paraformer.encoder_buf_size = Int32(
@@ -1978,7 +2001,11 @@ private struct SystemSherpaOnnxRuntime:
             config.model_config.paraformer.decoder_buf_size = Int32(
                 pinned[1].count
             )
+            config.model_config.tokens_buf = pinned[2]
+                .baseAddress?.assumingMemoryBound(to: CChar.self)
+            config.model_config.tokens_buf_size = Int32(pinned[2].count)
         } else {
+            // [encoder, decoder, joiner, tokens]（+ bpe，路径非空时）
             config.model_config.transducer.encoder_buf = pinned[0]
                 .baseAddress?.assumingMemoryBound(to: CChar.self)
             config.model_config.transducer.encoder_buf_size = Int32(
@@ -1994,6 +2021,16 @@ private struct SystemSherpaOnnxRuntime:
             config.model_config.transducer.joiner_buf_size = Int32(
                 pinned[2].count
             )
+            config.model_config.tokens_buf = pinned[3]
+                .baseAddress?.assumingMemoryBound(to: CChar.self)
+            config.model_config.tokens_buf_size = Int32(pinned[3].count)
+            if pinned.count == 5 {
+                config.model_config.bpe_vocab_buf = pinned[4]
+                    .baseAddress?.assumingMemoryBound(to: CChar.self)
+                config.model_config.bpe_vocab_buf_size = Int32(
+                    pinned[4].count
+                )
+            }
         }
     }
 }
@@ -2026,7 +2063,7 @@ private func withModelBytesPinned<R>(
     _ body: ([UnsafeRawBufferPointer]) throws -> R
 ) rethrows -> R {
     // 嵌套函数不能标注 rethrows，故按固定组数展开（paraformer 3 /
-    // transducer 4）。指针不逃逸 body 闭包。
+    // transducer 4，含 bpe 5）。指针不逃逸 body 闭包。
     switch buffers.count {
     case 3:
         return try buffers[0].withUnsafeBytes { encoderPointer in
@@ -2051,6 +2088,24 @@ private func withModelBytesPinned<R>(
                             joinerPointer,
                             tokensPointer
                         ])
+                    }
+                }
+            }
+        }
+    case 5:
+        return try buffers[0].withUnsafeBytes { encoderPointer in
+            try buffers[1].withUnsafeBytes { decoderPointer in
+                try buffers[2].withUnsafeBytes { joinerPointer in
+                    try buffers[3].withUnsafeBytes { tokensPointer in
+                        try buffers[4].withUnsafeBytes { bpePointer in
+                            try body([
+                                encoderPointer,
+                                decoderPointer,
+                                joinerPointer,
+                                tokensPointer,
+                                bpePointer
+                            ])
+                        }
                     }
                 }
             }

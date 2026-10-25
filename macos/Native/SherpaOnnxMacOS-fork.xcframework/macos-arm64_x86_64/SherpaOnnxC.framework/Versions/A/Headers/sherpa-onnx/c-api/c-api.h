@@ -296,6 +296,12 @@ typedef struct SherpaOnnxOnlineModelConfig {
   const char *modeling_unit;
   /** Path to the BPE vocabulary file when BPE is used. */
   const char *bpe_vocab;
+  /** Optional in-memory BPE vocabulary. Used instead of @c bpe_vocab when
+   * non-NULL.
+   */
+  const char *bpe_vocab_buf;
+  /** Size in bytes of @c bpe_vocab_buf, excluding the trailing '\0'. */
+  int32_t bpe_vocab_buf_size;
   /** Optional in-memory tokens data. Used instead of @c tokens when non-NULL.
    */
   const char *tokens_buf;

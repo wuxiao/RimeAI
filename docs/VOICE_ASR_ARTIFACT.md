@@ -349,11 +349,18 @@ root revalidate）保留，替换 source 会被拒绝且不影响已传入的模
 `macos/Native/SherpaOnnxMacOS-fork.xcframework` 为 repo 内
 binaryTarget（primary identity），重建用 `script/build_sherpa_fork.sh`。
 snapshot pathname 模式作为回归对照保留（`ModelTransport.snapshotPathname`，
-既有 33 项 P1/P2 合同不变）；buffer 模式新增 4 项回归：hostile same-UID
-前验后替换（bytes 不受影响 + 后验拒绝）、重复构造（独立字节流）、坏模型
-fail-closed（无临时产物）与绑定断言（无 snapshot 目录残留）。已知边界：
-`bpe_vocab` 无上游 buffer API，产品 cohort 不使用该文件；若未来 cohort 引入，
-该单一文件的 pathname 例外须重新评估。只有“已验证制品 + buffer 绑定 + 后端
+既有 33 项 P1/P2 合同不变）；buffer 模式回归共 5 项：hostile same-UID
+前验后替换 encoder（bytes 不受影响 + 后验拒绝）、hostile same-UID 前验后
+替换 bpe.vocab（同上）、重复构造（独立字节流）、坏模型 fail-closed（越过
+config 校验、失败于模型字节、无临时产物）与绑定断言（无 snapshot 目录残留）。
+`bpe_vocab` 窗口同轮收口（2026-10-26 补丁）：产品 zipformer cohort 明确
+使用 `model/bpe.vocab`（sealer 冻结清单含该文件，`modeling_unit=cjkchar+bpe`，
+manifest 将 `bpe_vocab_path` 列为 transducer 必填键），此前的 swap-and-restore
+pathname 窗口对其余文件成立、对 bpe 亦成立；fork 补 `bpe_vocab_buf`（C API
+字段 + `OnlineModelConfig::Validate` 的 buf 分支与 buf/文件冲突拒绝 +
+`Ssentencepiece` 从已验证内存字节构造），Swift 侧传递已验证 bpe 字节并在
+buffer 模式清空路径——transducer 五文件（encoder/decoder/joiner/tokens/
+bpe_vocab）全链路无 pathname open。只有“已验证制品 + buffer 绑定 + 后端
 成功加载探针”的受控 factory 才能生成产品运行 descriptor；公开 API 不能自行
 声明该资格。
 

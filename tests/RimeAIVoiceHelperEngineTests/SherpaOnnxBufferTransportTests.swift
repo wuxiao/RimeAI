@@ -39,10 +39,17 @@ struct SherpaOnnxBufferTransportTests {
         #expect(
             configuration.tokensBytes == Data("tokens\n".utf8)
         )
+        #expect(
+            configuration.bpeVocabularyBytes == Data("bpe\n".utf8)
+        )
         // pathname 字段保持 manifest 绝对路径（对照），非 snapshot 目录。
         #expect(
             configuration.encoderPath
                 == fixture.artifactDirectory.path + "/model/encoder.onnx"
+        )
+        #expect(
+            configuration.bpeVocabularyPath
+                == fixture.artifactDirectory.path + "/model/bpe.vocab"
         )
         #expect(runtime.makeRecognizerCount == 1)
         // 无 snapshot 目录残留。
@@ -98,6 +105,47 @@ struct SherpaOnnxBufferTransportTests {
         )
     }
 
+    @Test(
+        "hostile same-UID 前验后替换 bpe.vocab：bytes 不受影响且后验拒绝"
+    )
+    func bufferTransportSurvivesHostileBpeVocabReplacement() async throws {
+        let fixture = try SherpaBackendStoreFixture()
+        defer { fixture.remove() }
+        let bpeFile = fixture.path("model/bpe.vocab")
+        let original = try Data(contentsOf: bpeFile)
+        let runtime = SherpaBackendFakeRuntime(
+            recognizer: SherpaBackendFakeRecognizer(),
+            afterModelReads: { _ in
+                // 同 UID 攻击窗口：前验完成、recognizer 构造进行时
+                // 原地替换 bpe source（swap-and-restore 型攻击对已传入
+                // 字节流不可达）。
+                try Data("hostile-bpe-payload".utf8)
+                    .write(to: bpeFile, options: .atomic)
+            }
+        )
+        let loader = SherpaOnnxProductBackendLoader(
+            runtime: runtime,
+            transport: .buffer
+        )
+
+        await #expect(throws: SherpaOnnxProductBackendError.self) {
+            _ = try fixture.load(using: loader)
+        }
+        let configuration = try #require(runtime.capturedConfiguration)
+        #expect(configuration.bpeVocabularyBytes == original)
+        #expect(
+            configuration.bpeVocabularyBytes
+                != Data("hostile-bpe-payload".utf8)
+        )
+        let parentPath = fixture.artifactDirectory
+            .deletingLastPathComponent().path
+        let entries = try FileManager.default
+            .contentsOfDirectory(atPath: parentPath)
+        #expect(
+            !entries.contains { $0.hasPrefix(".rimeai-sherpa-runtime-") }
+        )
+    }
+
     @Test("重复构造消费同一已验证字节流且互相独立")
     func bufferTransportRepeatedLoadsShareVerifiedBytes() throws {
         let fixture = try SherpaBackendStoreFixture()
@@ -120,6 +168,10 @@ struct SherpaOnnxBufferTransportTests {
         #expect(first.decoderBytes == second.decoderBytes)
         #expect(first.joinerBytes == second.joinerBytes)
         #expect(first.tokensBytes == second.tokensBytes)
+        #expect(first.bpeVocabularyBytes == second.bpeVocabularyBytes)
+        #expect(
+            first.bpeVocabularyBytes == Data("bpe\n".utf8)
+        )
         #expect(
             first.encoderBytes == Data("encoder\n".utf8)
         )
@@ -158,6 +210,10 @@ struct SherpaOnnxBufferTransportTests {
         #expect(
             !nativeOutput.contains("you can not provide a tokens_buf")
         )
+        // bpe 同样走 buffer：路径已清空，若 fork Validate 无 bpe_vocab_buf
+        // 分支（"bpe_vocab: '' does not exist"）或 Swift 未清路径
+        // （bpe_vocab_buf + 文件冲突），stderr 必含 "bpe_vocab" 而变红。
+        #expect(!nativeOutput.contains("bpe_vocab"))
 
         // 无 snapshot 目录、无任何临时产物。
         let parentPath = fixture.artifactDirectory

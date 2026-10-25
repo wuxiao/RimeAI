@@ -1,5 +1,5 @@
 diff --git a/sherpa-onnx/c-api/c-api.cc b/sherpa-onnx/c-api/c-api.cc
-index 8e80db9..12b095c 100644
+index 8e80db9..934ddb1 100644
 --- a/sherpa-onnx/c-api/c-api.cc
 +++ b/sherpa-onnx/c-api/c-api.cc
 @@ -109,6 +109,40 @@ static sherpa_onnx::OnlineRecognizerConfig GetOnlineRecognizerConfig(
@@ -43,8 +43,22 @@ index 8e80db9..12b095c 100644
    recognizer_config.model_config.zipformer2_ctc.model =
        SHERPA_ONNX_OR(config->model_config.zipformer2_ctc.model, "");
  
+@@ -120,6 +154,13 @@ static sherpa_onnx::OnlineRecognizerConfig GetOnlineRecognizerConfig(
+         config->model_config.tokens_buf, config->model_config.tokens_buf_size);
+   }
+ 
++  if (config->model_config.bpe_vocab_buf &&
++      config->model_config.bpe_vocab_buf_size > 0) {
++    recognizer_config.model_config.bpe_vocab_buf = std::string(
++        config->model_config.bpe_vocab_buf,
++        config->model_config.bpe_vocab_buf_size);
++  }
++
+   recognizer_config.model_config.nemo_ctc.model =
+       SHERPA_ONNX_OR(config->model_config.nemo_ctc.model, "");
+ 
 diff --git a/sherpa-onnx/c-api/c-api.h b/sherpa-onnx/c-api/c-api.h
-index 3d464a6..fcfd51a 100644
+index 3d464a6..ae0361a 100644
 --- a/sherpa-onnx/c-api/c-api.h
 +++ b/sherpa-onnx/c-api/c-api.h
 @@ -188,6 +188,24 @@ typedef struct SherpaOnnxOnlineTransducerModelConfig {
@@ -90,6 +104,60 @@ index 3d464a6..fcfd51a 100644
  } SherpaOnnxOnlineParaformerModelConfig;
  
  /**
+@@ -267,6 +296,12 @@ typedef struct SherpaOnnxOnlineModelConfig {
+   const char *modeling_unit;
+   /** Path to the BPE vocabulary file when BPE is used. */
+   const char *bpe_vocab;
++  /** Optional in-memory BPE vocabulary. Used instead of @c bpe_vocab when
++   * non-NULL.
++   */
++  const char *bpe_vocab_buf;
++  /** Size in bytes of @c bpe_vocab_buf, excluding the trailing '\0'. */
++  int32_t bpe_vocab_buf_size;
+   /** Optional in-memory tokens data. Used instead of @c tokens when non-NULL.
+    */
+   const char *tokens_buf;
+diff --git a/sherpa-onnx/csrc/online-model-config.cc b/sherpa-onnx/csrc/online-model-config.cc
+index eafe1cb..8caf564 100644
+--- a/sherpa-onnx/csrc/online-model-config.cc
++++ b/sherpa-onnx/csrc/online-model-config.cc
+@@ -162,10 +162,19 @@ bool OnlineModelConfig::Validate() const {
+ 
+   if (!modeling_unit.empty() &&
+       (modeling_unit == "bpe" || modeling_unit == "cjkchar+bpe")) {
+-    if (!FileExists(bpe_vocab)) {
++    if (bpe_vocab_buf.empty() && !FileExists(bpe_vocab)) {
+       SHERPA_ONNX_LOGE("bpe_vocab: '%s' does not exist", bpe_vocab.c_str());
+       return false;
+     }
++    // SECURITY-001 (RimeAI frozen fork): reject the ambiguous
++    // buffer+file combination, mirroring the tokens_buf strictness.
++    if (!bpe_vocab_buf.empty() && FileExists(bpe_vocab)) {
++      SHERPA_ONNX_LOGE(
++          "you can not provide a bpe_vocab_buf and a bpe_vocab file: '%s', "
++          "at the same time, which is confusing",
++          bpe_vocab.c_str());
++      return false;
++    }
+   }
+ 
+   if (!provider_config.Validate()) {
+diff --git a/sherpa-onnx/csrc/online-model-config.h b/sherpa-onnx/csrc/online-model-config.h
+index d82559a..2ef80ff 100644
+--- a/sherpa-onnx/csrc/online-model-config.h
++++ b/sherpa-onnx/csrc/online-model-config.h
+@@ -47,6 +47,11 @@ struct OnlineModelConfig {
+   std::string modeling_unit = "cjkchar";
+   std::string bpe_vocab;
+ 
++  /// SECURITY-001 (RimeAI frozen fork): if bpe_vocab_buf is non-empty,
++  /// the BPE vocabulary is loaded from the buffer instead of from the
++  /// "bpe_vocab" file.
++  std::string bpe_vocab_buf;
++
+   /// if tokens_buf is non-empty,
+   /// the tokens will be loaded from the buffer instead of from the
+   /// "tokens" file
 diff --git a/sherpa-onnx/csrc/online-paraformer-model-config.cc b/sherpa-onnx/csrc/online-paraformer-model-config.cc
 index a2ee802..947fc6a 100644
 --- a/sherpa-onnx/csrc/online-paraformer-model-config.cc
@@ -211,6 +279,24 @@ index 918ad5d..beb5e64 100644
      return std::make_unique<OnlineRecognizerParaformerImpl>(config);
    }
  
+diff --git a/sherpa-onnx/csrc/online-recognizer-transducer-impl.h b/sherpa-onnx/csrc/online-recognizer-transducer-impl.h
+index 7e438a9..9cd537d 100644
+--- a/sherpa-onnx/csrc/online-recognizer-transducer-impl.h
++++ b/sherpa-onnx/csrc/online-recognizer-transducer-impl.h
+@@ -107,7 +107,12 @@ class OnlineRecognizerTransducerImpl : public OnlineRecognizerImpl {
+     model_->SetFeatureDim(config.feat_config.feature_dim);
+ 
+     if (config.decoding_method == "modified_beam_search") {
+-      if (!config_.model_config.bpe_vocab.empty()) {
++      if (!config_.model_config.bpe_vocab_buf.empty()) {
++        // SECURITY-001 (RimeAI frozen fork): verified in-memory bytes; do
++        // not open the bpe_vocab pathname.
++        std::istringstream iss(config_.model_config.bpe_vocab_buf);
++        bpe_encoder_ = std::make_unique<ssentencepiece::Ssentencepiece>(iss);
++      } else if (!config_.model_config.bpe_vocab.empty()) {
+         bpe_encoder_ = std::make_unique<ssentencepiece::Ssentencepiece>(
+             config_.model_config.bpe_vocab);
+       }
 diff --git a/sherpa-onnx/csrc/online-transducer-model-config.cc b/sherpa-onnx/csrc/online-transducer-model-config.cc
 index aaafc8a..44e16a3 100644
 --- a/sherpa-onnx/csrc/online-transducer-model-config.cc
