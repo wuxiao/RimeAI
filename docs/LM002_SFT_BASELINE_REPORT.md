@@ -261,7 +261,7 @@ decoder 句准确率照常有效；empty 19/48 三模型同值，为约束下无
 
 | 制品 | ①冻结（需≥0.9420） | ①真实（需≥0.8533） | ②miss（需≤30） | ③reg（≤11） | ④p50（≤138ms） |
 | --- | --- | --- | --- | --- | --- |
-| 0.5B-mix1 | 0.9343 ✗(-0.77pp) | 0.8542 ✓（§10.5：泄漏承载；干净集 0.8857 = 基线，门②按干净口径不达标） | 49 ✗ | 10 ✓ | ~124ms ✓ |
+| 0.5B-mix1 | 0.9343 ✗(-0.77pp) | 0.8542 ✓（§10.5：泄漏承载；干净集 0.8857 = 基线，门①真实侧按干净口径 0.8857 < 0.9057 不达标） | 49 ✗ | 10 ✓ | ~124ms ✓ |
 | 1.5B-mix1 | **0.9497 ✓(+2.77pp)** | 0.8333 ✗(+0.0pp) | 37 ✗ | 12 ✗(微超 1) | 180ms ✗(×1.56) |
 
 两制品互补卡门：0.5B-mix1 缺冻结侧（0.77pp）与 miss 桶（19
@@ -297,7 +297,7 @@ B 实验：1.5B-mix1 当本地教师（约束解码造数 4027 种子：kept 394
 ——教师占比安全线 ≤10% 的相对结论不受影响（lm002e 与 mix1 同
 在含泄漏的 46/48 集上对比，-6.5pp 差距不可能是泄漏解释的）。
 
-### 10.5 彻底干净留出集（2026-10-25）：结论反转——mix1 真实分布增益为 0，+2.1pp 系训练记忆
+### 10.5 干净留出集 v3（键级干净 + sft 尾部零 verbatim；zhwiki 子串已披露）（2026-10-25）：结论反转——mix1 真实分布增益为 0，+2.1pp 系训练记忆
 
 > 更正记录：本节首版曾误以重建后的 `datasets/sft-constrained-v1.jsonl`
 > （4137 行，重建时泄漏检查 v2 已剔 13 行）为"训练侧键来源"，得出
@@ -308,18 +308,20 @@ B 实验：1.5B-mix1 当本地教师（约束解码造数 4027 种子：kept 394
 > 行的 verbatim 泄漏（`。打交道的`、`。不知不觉`、`。各行各业` 等）。
 
 **泄漏审计**（对 mix1 训练快照 899 行 sft 尾部做文本级匹配）：
-holdout 48 行中 11 行 gold_text verbatim 出现在训练文本中
+holdout 48 行中 **12 行** gold_text verbatim 出现在训练文本中
 （dajiaodaode/daduoshuoren/google/yiqiaobutong/buzhibujue/
-fuzhashijian/gehanggeye/nibujuede/bingpupianyi/thun/moni）；
+fuzhashijian/gehanggeye/nibujuede/bingpupianyi/thun/moni/**baidu**
+——训练行 `。baidu` 与 google/thun/moni 同类；v2 剔 baidu 后残差
+11 行，下文泄漏子集统计 7/11 vs 8/11 即该 v2 子集）；
 保守剔除全部 13 个 holdout∩`leak_check.overlapped_pinyin` 键
-（11 verbatim + baidu + qwen）后 `real-holdout-v3.jsonl` 为
+（12 verbatim + qwen）后 `real-holdout-v3.jsonl` 为
 35 行，与 overlapped_pinyin 键级交集 = 0、与训练快照 **sft 尾部
 （899 行）**文本级 verbatim 交集 = 0（双重验证均 0；zhwiki 8044
 行部分含 7 个 v3 gold 文本的 4 字/英文子串偶现——sousuoyinqing
 ×9、doubuyuanyi、daduoshuren、china/ipad/model/continue——为
 长文偶然子串非训练样本对齐，键级交集 0 不受影响）：
 
-| 制品 | 冻结集 | 47/v2（仅剔 baidu，含 11 泄漏行） | 35/v3（彻底干净） |
+| 制品 | 冻结集 | 47/v2（仅剔 baidu，含 11 泄漏行） | 35/v3（键级干净 + sft 尾部零 verbatim） |
 | --- | --- | --- | --- |
 | 基线（无 SFT） | 0.9220 | 0.8298 | **0.8857** |
 | 0.5B-mix1 | 0.9343 | 0.8511（+2.1pp） | **0.8857（+0.0pp）** |
@@ -337,8 +339,11 @@ fuzhashijian/gehanggeye/nibujuede/bingpupianyi/thun/moni）；
    响——两者在同一含泄漏集上对比；
 4. **LM-002 门口径更正**：mix1 不满足门①（冻结集 +1.2pp <
    +2pp）且真实分布零泛化增益，制品继续不替换；教师路线
-   （§10.6 起）须以彻底干净 holdout（本节 35 行版口径）为门②
-   评测基础，禁止再用含训练键的留出集报真实分布增益；
+   （§10.6 起）须以干净 holdout（本节 35 行版口径，键级干净 +
+   sft 尾部零 verbatim）为门①真实侧评测基础（干净基线 0.8857
+   → 门①真实线 = 0.9057；门②仍为 model_path_miss 桶，见
+   CONTINUOUS_OPTIMIZATION_LOOP_DESIGN §4），禁止再用含训练键的
+   留出集报真实分布增益；
 5. 冻结集增益（zhwiki 域 +1.2pp）与 zhwiki 训练数据同源同域，
    冻结集数字本身即带记忆成分（冻结评测 1060 键与训练语料无
    键重叠，但域内泛化与记忆的分解待后续）。
