@@ -28,9 +28,17 @@ Pipeline:
      "teacher_synthesis", created_at_ms}. Files are 0600 (privacy
      posture of the language-profile export).
 
-Explicit user invocation only; nothing is uploaded — the teacher call
-is the same generate/abstain product contract already covered by the
-cloud privacy center.
+Explicit user invocation only. PRIVACY POSTURE (reveal 2026-10-24,
+replaces the earlier "nothing is uploaded" claim): the teacher call
+sends the seed PINYIN to the cloud endpoint exactly like the product's
+cloud-correction path does (same endpoint, same data class, same
+CloudModelClient contract). Pinyin is within the product's cloud
+contract; no keystrokes, context, or candidate lists ever leave the
+machine. When --seeds-file carries user-distribution seeds, those
+pinyin strings are derived from local history and leave the machine
+under the same cloud contract — pass dictionary-sampled seeds if that
+is not acceptable. Nothing else is uploaded; outputs stay local
+(0600).
 """
 
 from __future__ import annotations
@@ -217,6 +225,10 @@ def alignment_filter(
         return False
     if len(text) != len(syllables):
         return False
+    # 锚定（reveal R1 P1-2 / R3 P2）：音节必须顺序拼出 typed pinyin；
+    # 未锚定的音节列表可让词典根本无法复现的拼音通过 fuzzy 分支。
+    if "".join(syllables) != pinyin:
+        return False
     return fuzzy_segment_ok(guard, text, list(syllables))
 
 
@@ -392,6 +404,13 @@ def main(argv: list[str] | None = None) -> int:
         f"alignment_dropped={stats['alignment_dropped']} "
         f"kept={stats['kept']} -> {args.output}"
     )
+    if stats["kept"] == 0:
+        # 全空产出不冒充成功（reveal R3 P2）。
+        print(
+            "teacher synthesis kept 0 rows — treat as failure",
+            file=sys.stderr,
+        )
+        return 1
     return 0
 
 
@@ -421,7 +440,9 @@ def _load_seeds_file(
                 and pinyin not in seen
                 and isinstance(syllables, list)
                 and all(isinstance(s, str) and s for s in syllables)
+                and "".join(syllables) == pinyin
             ):
+                # 锚定校验（reveal R1 P1-2）：音节必须精确拼出拼音。
                 seen.add(pinyin)
                 seeds.append((pinyin, tuple(syllables)))
     return seeds

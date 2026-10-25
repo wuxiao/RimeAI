@@ -84,6 +84,10 @@ SIDECAR_MIN_PHRASE_HIT_RATE = 0.30
 # accuracy, p50 280.534ms. Loop regression floors keep ~2pp accuracy and
 # 1.5x latency of headroom; promotion thresholds live in LM-002.
 MODEL_MIN_SENTENCE_ACCURACY = 0.90
+# 留出集地板（reveal R3 P1 裁决）：真实用户分布的自身基线 0.8333
+# 低于冻结集 0.9220，套用同一 0.90 地板会恒 fail——回归地板按各自
+# 基线标定（0.8333 - 0.05 容差 ≈ 0.78，防回归不卡积累期）。
+MODEL_HOLDOUT_MIN_SENTENCE_ACCURACY = 0.78
 MODEL_FROZEN_P50_MS = 280.534
 MODEL_MAX_P50_FACTOR = 1.5
 
@@ -235,8 +239,14 @@ def check_sidecar(
     return _gate("sidecar", metrics, notes)
 
 
-def check_model(summary: dict[str, Any]) -> dict[str, Any]:
-    """Gate 2 on an evaluate-sentence stdout summary dict."""
+def check_model(
+    summary: dict[str, Any],
+    *,
+    min_sentence_accuracy: float = MODEL_MIN_SENTENCE_ACCURACY,
+) -> dict[str, Any]:
+    """Gate 2 on an evaluate-sentence stdout summary dict. The floor
+    is parameterized per dataset leg (frozen vs real holdout have
+    different baselines; reveal 2026-10-24)."""
     metrics: list[dict[str, Any]] = []
     notes: list[str] = []
     sentence = (summary.get("metrics") or {}).get("sentence_accuracy")
@@ -246,9 +256,9 @@ def check_model(summary: dict[str, Any]) -> dict[str, Any]:
                 "sentence_accuracy",
                 sentence,
                 ">=",
-                MODEL_MIN_SENTENCE_ACCURACY,
+                min_sentence_accuracy,
                 "pass"
-                if sentence >= MODEL_MIN_SENTENCE_ACCURACY
+                if sentence >= min_sentence_accuracy
                 else "fail",
             )
         )
@@ -452,7 +462,31 @@ def run_model_gate(
                 [_metric("model_summary_json", None, "json", None, "fail")],
                 [error or "unreadable model summary"],
             )
-        return check_model(summary)
+        # 单一 summary 只覆盖一条腿（reveal R3 P1：model-summary 路径
+        # 曾完全绕过留出集）——另一条腿显式 pending，不冒充双集通过。
+        frozen_gate = check_model(summary)
+        metrics = [
+            _metric(
+                f"frozen_{m['name']}", m["value"],
+                m["comparison"], m["threshold"], m["status"],
+            )
+            for m in frozen_gate["metrics"]
+        ]
+        metrics.append(
+            _metric(
+                "holdout_sentence_accuracy", None, ">=",
+                MODEL_HOLDOUT_MIN_SENTENCE_ACCURACY, "pending",
+            )
+        )
+        return _gate(
+            "model",
+            metrics,
+            frozen_gate["notes"]
+            + [
+                "--model-summary covers the frozen leg only; the "
+                "holdout leg is pending until --run-model-gate",
+            ],
+        )
     if not run:
         return _gate(
             "model",
@@ -555,7 +589,10 @@ def run_model_gate(
             "model", metrics,
             frozen_gate["notes"] + [holdout_completed.stdout[-2000:]],
         )
-    holdout_gate = check_model(holdout_summary)
+    holdout_gate = check_model(
+        holdout_summary,
+        min_sentence_accuracy=MODEL_HOLDOUT_MIN_SENTENCE_ACCURACY,
+    )
     # 双数据集最差语义：指标带前缀合并（_gate 取最差状态），notes 合并。
     merged_metrics = [
         _metric(
@@ -685,8 +722,8 @@ def main(argv: list[str] | None = None) -> int:
             rime_dictionary=DEFAULT_RIME_DICTIONARY,
             holdout_samples=(
                 args.holdout_samples
-                if str(args.holdout_samples) not in ("", "none")
-                and args.holdout_samples is not None
+                if args.holdout_samples is not None
+                and str(args.holdout_samples) not in ("", "none", ".")
                 else None
             ),
         )

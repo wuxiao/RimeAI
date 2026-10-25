@@ -231,8 +231,10 @@ class TestMixIntoDataset:
                 encoding="utf-8"
             )
         )
-        assert lock["counts"]["teacher_rows_loaded"] == 2
+        assert lock["counts"]["teacher_rows_loaded"] == 1
+        assert lock["counts"]["teacher_shadowed_by_real"] == 1
         assert lock["counts"]["teacher_invalid_dropped"] == 1
-        # ceshi 真实行与教师行同键：教师行被 duplicates_dropped。
-        assert lock["counts"]["duplicates_dropped"] == 1
+        # ceshi 教师行与真实行同拼音：让位（矛盾金标不共存），
+        # 不再走 duplicates_dropped 路径。
+        assert lock["counts"]["duplicates_dropped"] == 0
         assert lock["sources"]["teacher_synthesis"].endswith("teacher.jsonl")
