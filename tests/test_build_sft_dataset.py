@@ -142,6 +142,26 @@ def test_rejected_joins_history_for_the_chosen_side(tmp_path: Path):
     assert pair["weight"] == builder.WEIGHT_REJECTED_WITH_HISTORY
 
 
+def test_rejected_whose_commit_equals_suggestion_is_degenerate(
+    tmp_path: Path,
+):
+    daemon = make_daemon_db(
+        tmp_path / "decision_log.db",
+        [(1_000, "local_sentence", "r1", "mingling", "命令", "rejected")],
+    )
+    history = make_history_db(
+        tmp_path / "history.sqlite3",
+        [(30_000, "mingling", "命令")],
+    )
+    pairs, stats = builder.build_pairs(
+        builder.load_decision_rows(daemon),
+        [],
+        builder.load_history_commits(history),
+    )
+    assert pairs == []
+    assert stats["degenerate_dropped"] == 1
+
+
 def test_rejected_outside_window_is_unresolved(tmp_path: Path):
     daemon = make_daemon_db(
         tmp_path / "decision_log.db",

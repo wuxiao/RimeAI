@@ -124,10 +124,10 @@ private final class FeedbackHarness: @unchecked Sendable {
 
     @MainActor
     @discardableResult
-    func displayRankedResult() -> SemanticInferenceRequest? {
+    func displayRankedResult(text: String = "你好") -> SemanticInferenceRequest? {
         _ = composition.replaceInput(
             pinyin: "nihao",
-            candidates: ["拟好", "你好"]
+            candidates: [text]
         )
         let token = composition.token
         pipeline.scheduleInference(
@@ -144,7 +144,7 @@ private final class FeedbackHarness: @unchecked Sendable {
                 compositionID: request.compositionID,
                 revision: request.revision,
                 appSessionID: request.appSessionID,
-                rankedCandidate: "你好",
+                rankedCandidate: text,
                 sentenceSuggestion: nil,
                 confidence: 0.9,
                 decision: .rankedCandidate
@@ -204,6 +204,35 @@ func selectionOverrideEmitsRejected() {
         harness.sentenceFeedback == [
             FeedbackHarness.Record(requestID: request.requestID, outcome: "rejected")
         ]
+    )
+}
+
+@Test @MainActor
+func sameTextMainCandidateCommitsAsAdoptedViaMain() {
+    // 首选一致合并场景（2026-10-24 神经臂假阴性裁决）：Space 上屏
+    // 文本与展示建议逐字相同 → adopted_via_main（保留路径信息）；
+    // 文本不同才是真 rejected。
+    let harness = FeedbackHarness()
+    guard let request = harness.displayRankedResult(text: "提高") else {
+        Issue.record("ranked result must be displayed")
+        return
+    }
+    harness.pipeline.markDisplayedSuggestionRejected(committedText: "提高")
+    #expect(
+        harness.sentenceFeedback == [
+            FeedbackHarness.Record(
+                requestID: request.requestID,
+                outcome: "adopted_via_main"
+            )
+        ]
+    )
+    harness.pipeline.setDisplayedFeedback(
+        requestID: "r2", cloud: false, text: "微调"
+    )
+    harness.pipeline.markDisplayedSuggestionRejected(committedText: "调整")
+    #expect(
+        harness.sentenceFeedback.count == 2
+            && harness.sentenceFeedback.last?.outcome == "rejected"
     )
 }
 
