@@ -274,61 +274,88 @@ B 实验：1.5B-mix1 当本地教师（约束解码造数 4027 种子：kept 394
 的 -4.3pp**）——教师占比 32% 的稀释伤害超过规模红利，与 §10
 单调稀释律一致。
 
-**无泄漏 holdout 重测**（剔除两教师文件键后 46/48）：
+**holdout 重测**（当时仅剔除两教师文件键后 46/48——**该集仍含
+9 个真实行泄漏键**，见 §10.5 更正）：
 
-| 制品 | 冻结集 | 无泄漏真实 holdout |
+| 制品 | 冻结集 | 46/48 部分净化版 |
 | --- | --- | --- |
 | 基线 | 0.9220 | 0.8261 |
-| 0.5B-mix1（API 教师 10%） | 0.9343 | **0.8478（+2.2pp，增益真实）** |
+| 0.5B-mix1（API 教师 10%） | 0.9343 | 0.8478（+2.2pp） |
 | 0.5B-lm002e（本地教师 32%） | 0.9322 | 0.7826（-4.3pp） |
 
-结论：mix1 的真实增益经受住去记忆检验（+2.2pp 与原 +2.1pp 同
-量级）；本地教师高占比配方否决——教师占比安全线 ≤10%（与
-mix1 同水位）。
+~~结论：mix1 的真实增益经受住去记忆检验~~（**2026-10-25 §10.5
+作废**：46/48 版仍含 9 个 verbatim 训练泄漏行，mix1 增益由泄漏
+行承载，彻底干净 35 行集上为 +0.0pp）；本地教师高占比配方否决
+——教师占比安全线 ≤10% 的相对结论不受影响（lm002e 与 mix1 同
+在含泄漏的 46/48 集上对比，-6.5pp 差距不可能是泄漏解释的）。
 
-### 10.5 彻底干净留出集（2026-10-25）：唯一真实泄漏键 baidu，增益稳定 +2.1pp
+### 10.5 彻底干净留出集（2026-10-25）：结论反转——mix1 真实分布增益为 0，+2.1pp 系训练记忆
 
-按 §10.4 遗留解法执行：以训练侧全集键（zhwiki 语料 4214 键 ∪
-sft-constrained-v1 4117 键）逐键核验 holdout 48 键——lock 的
-`leak_check.overlapped_pinyin` 27 键中与 holdout 相交的 13 键里，
-12 键已随 sft-constrained-v1 重建时的泄漏检查 v2 剔除（不在
-当前任何训练源），唯一实际泄漏 = `baidu`（zhwiki 语料侧，
-holdout 侧行为英文直通行 real-holdout-0008）。剔除后
-`real-holdout-v2.jsonl`（47 行）与训练侧全集键交集 = 0：
+> 更正记录：本节首版曾误以重建后的 `datasets/sft-constrained-v1.jsonl`
+> （4137 行，重建时泄漏检查 v2 已剔 13 行）为"训练侧键来源"，得出
+> "唯一泄漏 = baidu、增益稳定 +2.1pp"的错误结论。该验证是同义反复：
+> mix1 实际训练用的是训练时快照
+> `.rimeai/sft-lm002d-mix1/train.jsonl`（8943 行 = zhwiki 8044 +
+> sft ×1 899 行，manifest 钉死），快照 sft 尾部仍含 11 个 holdout
+> 行的 verbatim 泄漏（`。打交道的`、`。不知不觉`、`。各行各业` 等）。
 
-| 制品 | 冻结集 | 46/48 近似版 | 47/v2 彻底干净 |
+**泄漏审计**（对 mix1 训练快照 899 行 sft 尾部做文本级匹配）：
+holdout 48 行中 11 行 gold_text verbatim 出现在训练文本中
+（dajiaodaode/daduoshuoren/google/yiqiaobutong/buzhibujue/
+fuzhashijian/gehanggeye/nibujuede/bingpupianyi/thun/moni）；
+保守剔除全部 13 个 holdout∩`leak_check.overlapped_pinyin` 键
+（11 verbatim + baidu + qwen）后 `real-holdout-v3.jsonl` 为
+35 行，与 overlapped_pinyin 键级交集 = 0、与训练快照文本级
+交集 = 0（双重验证均 0）：
+
+| 制品 | 冻结集 | 47/v2（仅剔 baidu，含 11 泄漏行） | 35/v3（彻底干净） |
 | --- | --- | --- | --- |
-| 基线（无 SFT） | 0.9220 | 0.8261 | 0.8261→**0.8298** |
-| 0.5B-mix1 | 0.9343 | 0.8478（+2.2pp） | **0.8511（+2.1pp）** |
+| 基线（无 SFT） | 0.9220 | 0.8298 | **0.8857** |
+| 0.5B-mix1 | 0.9343 | 0.8511（+2.1pp） | **0.8857（+0.0pp）** |
 
-（基线 46/48 版 0.8261 对应剔 2 教师；v2 剔 1 键 baidu 后为
-0.8298；两版增益同量级。）结论：**去记忆检验彻底通过**——
-mix1 在零训练键交集的留出集上增益 +2.1pp 与近似版一致，
-真实分布增益不是记忆泄漏；制品门①（冻结集 +2pp）仍差
-0.8pp，制品继续不替换，随数据积累重评。
+（泄漏子集本身：基线 7/11，mix1 8/11——mix1 记住了训练行。）
 
-复现（重建与评估）：
+**结论（反转）**：
+
+1. **mix1 在真实分布上的 +2.1pp 增益完全由 11 个 verbatim 训练
+   泄漏行承载**——彻底干净 35 行集上基线 = mix1 = 0.8857，
+   +0.0pp；"真实分布增益"是训练记忆，不是泛化；
+2. §10.4 的"mix1 增益经受住去记忆检验"作废（46/48 版剔的只是
+   教师文件键，9 个真实行泄漏键仍在）；
+3. 教师占比相对结论（lm002e 32% 比 mix1 10% 差 6.5pp）不受影
+   响——两者在同一含泄漏集上对比；
+4. **LM-002 门口径更正**：mix1 不满足门①（冻结集 +1.2pp <
+   +2pp）且真实分布零泛化增益，制品继续不替换；教师路线
+   （§10.6 起）须以彻底干净 holdout（本节 35 行版口径）为门②
+   评测基础，禁止再用含训练键的留出集报真实分布增益；
+5. 冻结集增益（zhwiki 域 +1.2pp）与 zhwiki 训练数据同源同域，
+   冻结集数字本身即带记忆成分（冻结评测 1060 键与训练语料无
+   键重叠，但域内泛化与记忆的分解待后续）。
+
+复现（保守键级重建 + 双重验证 + 双模型评估）：
 
 ```bash
-# 重建 v2（剔训练侧全集键，交集核验 0）
+# 重建 v3：剔除全部 holdout∩overlapped_pinyin 键，输出交集证明 0
 python3 -c "
 import json
-tk={r['pinyin'] for r in map(json.loads,open('datasets/sft-constrained-v1.jsonl'))}|{r['pinyin'] for r in map(json.loads,open('.rimeai/datasets/p0-zhwiki-librime-1.17.0-luna-simp.jsonl'))}
-hold=list(map(json.loads,open('.rimeai/datasets/real-holdout-v1.jsonl')))
-out=[r for r in hold if r['pinyin'] not in tk]
-open('.rimeai/datasets/real-holdout-v2.jsonl','w').write(''.join(json.dumps(r,ensure_ascii=False)+chr(10) for r in out))
-print(len(out), 'rows; intersection =', len({r['pinyin'] for r in out}&tk))"
+ov = set(json.load(open('datasets/sft-constrained-v1.lock.json'))['leak_check']['overlapped_pinyin'])
+hold = list(map(json.loads, open('.rimeai/datasets/real-holdout-v1.jsonl')))
+out = [r for r in hold if r['pinyin'] not in ov]
+open('.rimeai/datasets/real-holdout-v3.jsonl','w').write(''.join(json.dumps(r, ensure_ascii=False)+chr(10) for r in out))
+tr = [json.loads(l)['text'] for l in open('.rimeai/sft-lm002d-mix1/train.jsonl')][-899:]
+vt = sum(1 for r in out if any(r['gold_text'] in t for t in tr))
+print(len(out), 'rows; key-intersection =', len({r['pinyin'] for r in out} & ov), '; verbatim-in-train =', vt)"
 
-# 双模型评估（基线 / mix1）
+# 双模型评估（基线 / mix1，均 0.8857）
 RIMEAI_MLX_MODEL_DIR="$PWD/.rimeai/models/qwen2.5-0.5b-mlx-8bit-v1" \
   .venv/bin/python -m rimeai_eval evaluate-sentence \
-  .rimeai/datasets/real-holdout-v2.jsonl \
+  .rimeai/datasets/real-holdout-v3.jsonl \
   --decoder-config examples/constrained_mlx_decoder.json \
   --rime-dictionary .rimeai/rime/shared/luna_pinyin.dict.yaml \
   --split test
 RIMEAI_MLX_MODEL_DIR="$PWD/.rimeai/models/qwen2.5-0.5b-mlx-8bit-lm002d-mix1-v1" \
   .venv/bin/python -m rimeai_eval evaluate-sentence \
-  .rimeai/datasets/real-holdout-v2.jsonl \
+  .rimeai/datasets/real-holdout-v3.jsonl \
   --decoder-config examples/constrained_mlx_decoder.json \
   --rime-dictionary .rimeai/rime/shared/luna_pinyin.dict.yaml \
   --split test
