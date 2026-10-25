@@ -230,6 +230,37 @@ def load_scenarios(path: Path) -> list[dict[str, Any]]:
             raise KeyboardCollectionError(
                 f"{path}:{line_number}: duplicate id '{scenario['id']}'"
             )
+        repair_probe = scenario.get("repair_probe", False)
+        if not isinstance(repair_probe, bool):
+            raise KeyboardCollectionError(
+                f"{path}:{line_number}: repair_probe must be a boolean"
+            )
+        if repair_probe:
+            # 回修链探针（KBD-008）：部分选词后 ← 回修。仅限
+            # partial-selection 类别；回修次数与重打拼音必填。
+            if scenario["category"] != "partial-selection":
+                raise KeyboardCollectionError(
+                    f"{path}:{line_number}: repair_probe requires the "
+                    "partial-selection category"
+                )
+            count = scenario.get("backspace_count")
+            if (
+                not isinstance(count, int)
+                or isinstance(count, bool)
+                or count < 1
+            ):
+                raise KeyboardCollectionError(
+                    f"{path}:{line_number}: scenario "
+                    f"'{scenario['id']}' needs backspace_count >= 1 "
+                    "for the repair probe"
+                )
+            retype = scenario.get("repair_retype")
+            if not isinstance(retype, str) or not retype:
+                raise KeyboardCollectionError(
+                    f"{path}:{line_number}: scenario "
+                    f"'{scenario['id']}' needs a non-empty repair_retype "
+                    "for the repair probe"
+                )
         identifiers.add(scenario["id"])
         scenarios.append(scenario)
     if {row["category"] for row in scenarios} != set(KEYBOARD_CATEGORIES):
@@ -303,12 +334,48 @@ def collect(
                 keys = ["="] * page + (
                     ["space"] if slot == 0 and page == 0 else [str(slot + 1)]
                 )
-                if scenario["category"] == "partial-selection":
+                if (
+                    scenario["category"] == "partial-selection"
+                    and not scenario.get("repair_probe", False)
+                ):
+                    # 回修探针场景保留部分选词中间态（不上屏），
+                    # 由回修链接管后续提交。
                     keys.append("space")
 
         select_keys(keys)
         time.sleep(0.5)
         final_text = read_document()
+
+        # KBD-008 回修链探针：部分选词后未上屏，此刻文档文本即预编辑
+        # 区中间态（前缀 + 剩余拼音）。← 回修后验证前缀保留与剩余
+        # 拼音收缩，重打尾段后 space 整句上屏。
+        repair_probe = bool(scenario.get("repair_probe", False))
+        repair_prefix_preserved = False
+        repair_remaining_shrunk = False
+        repair_committed = False
+        repair_mid_text_before: str | None = None
+        repair_mid_text_after: str | None = None
+        if repair_probe:
+            repair_mid_text_before = final_text
+            for _ in range(int(scenario["backspace_count"])):
+                send_key("backspace")
+            time.sleep(0.4)
+            repair_mid_text_after = read_document()
+            repair_prefix_preserved = repair_mid_text_after.startswith(
+                scenario["pool_text"]
+            )
+            repair_remaining_shrunk = (
+                len(repair_mid_text_after)
+                < len(repair_mid_text_before)
+            )
+            for char in scenario["repair_retype"]:
+                send_key(char)
+            time.sleep(0.5)
+            send_key("space")
+            time.sleep(0.5)
+            final_text = read_document()
+            repair_committed = final_text == scenario["expected_text"]
+
         accepted = (
             scenario["category"] != "delete-composition"
             and final_text == scenario["expected_text"]
@@ -347,11 +414,18 @@ def collect(
             "reverted": reverted,
             "backspace_probe": scenario["backspace_probe"],
             "backspace_cleared": backspace_cleared,
+            "repair_probe": repair_probe,
         }
         if candidate_rank is not None:
             record["candidate_rank"] = candidate_rank
         if text_after_revert is not None:
             record["text_after_revert"] = text_after_revert
+        if repair_probe:
+            record["repair_prefix_preserved"] = repair_prefix_preserved
+            record["repair_remaining_shrunk"] = repair_remaining_shrunk
+            record["repair_committed"] = repair_committed
+            record["repair_mid_text_before"] = repair_mid_text_before
+            record["repair_mid_text_after"] = repair_mid_text_after
         observations.append(record)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)

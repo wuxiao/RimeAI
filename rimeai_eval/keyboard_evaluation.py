@@ -97,6 +97,30 @@ def load_keyboard_observations(path: Path) -> List[Dict[str, Any]]:
         _require_bool(record, "reverted", line_number)
         _require_bool(record, "backspace_probe", line_number)
         _require_bool(record, "backspace_cleared", line_number)
+        repair_probe = record.get("repair_probe", False)
+        if not isinstance(repair_probe, bool):
+            raise KeyboardEvaluationError(
+                f"line {line_number}: repair_probe must be a boolean"
+            )
+        if repair_probe:
+            # 回修链探针（KBD-008 收集器增强）：三项行为结果必填——
+            # 预编辑区前缀保留 / 剩余拼音回修（收缩且前缀未破）/ 最终
+            # 整句上屏。
+            _require_bool(
+                record, "repair_prefix_preserved", line_number
+            )
+            _require_bool(
+                record, "repair_remaining_shrunk", line_number
+            )
+            _require_bool(
+                record, "repair_committed", line_number
+            )
+            for field in ("repair_mid_text_before", "repair_mid_text_after"):
+                value = record.get(field)
+                if value is not None and not isinstance(value, str):
+                    raise KeyboardEvaluationError(
+                        f"line {line_number}: {field} must be a string"
+                    )
         candidate_rank = record.get("candidate_rank")
         if candidate_rank is not None and (
             not isinstance(candidate_rank, int)
@@ -148,6 +172,18 @@ def _slice_metrics(observations: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
         for row in observations
         if row["backspace_probe"]
     )
+    repair_rows = [
+        row for row in observations if row.get("repair_probe")
+    ]
+    repair_prefix_preserved = sum(
+        row["repair_prefix_preserved"] for row in repair_rows
+    )
+    repair_remaining_shrunk = sum(
+        row["repair_remaining_shrunk"] for row in repair_rows
+    )
+    repair_committed = sum(
+        row["repair_committed"] for row in repair_rows
+    )
     return {
         "samples": samples,
         "candidate_pool_inclusion": _ratio(
@@ -157,6 +193,15 @@ def _slice_metrics(observations: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
         "accepted": _ratio(accepted, len(selection_observations)),
         "reverted": _ratio(reverted, revert_samples),
         "backspace_cleared": _ratio(backspace_cleared, backspace_samples),
+        "repair_prefix_preserved": _ratio(
+            repair_prefix_preserved, len(repair_rows)
+        ),
+        "repair_remaining_pinyin": _ratio(
+            repair_remaining_shrunk, len(repair_rows)
+        ),
+        "repair_committed": _ratio(
+            repair_committed, len(repair_rows)
+        ),
     }
 
 
@@ -188,6 +233,9 @@ def evaluate_keyboard_observations(
             "revert_samples": sum(row["revert_probe"] for row in observations),
             "backspace_samples": sum(
                 row["backspace_probe"] for row in observations
+            ),
+            "repair_samples": sum(
+                1 for row in observations if row.get("repair_probe")
             ),
         },
         "slices": {

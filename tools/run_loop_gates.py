@@ -300,8 +300,15 @@ def check_e2e(report: dict[str, Any]) -> dict[str, Any]:
         "accepted",
         "reverted",
         "backspace_cleared",
+        # KBD-008 回修链指标：报告含该指标时必须为 1.0；旧报告无此键
+        # 则跳过（向后兼容）。
+        "repair_prefix_preserved",
+        "repair_remaining_pinyin",
+        "repair_committed",
     ):
         value = overall.get(name)
+        if value is None:
+            continue
         metrics.append(
             _metric(
                 f"overall_{name}",
