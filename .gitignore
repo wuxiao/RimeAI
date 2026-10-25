@@ -44,6 +44,10 @@ graphify-out/
 python-dist/
 reports/
 
+# SFT datasets exported from local daemon user behavior (contains personal typing history)
+datasets/sft-constrained-*.jsonl
+datasets/sft-constrained-*.lock.json
+
 # Local environment files (keep a checked-in example, if present)
 .env
 .env.*
@@ -53,3 +57,5 @@ reports/
 # never commit a copy that contains a real key)
 secrets/cloud.env
 !secrets/cloud.env.example
+# Teacher synthesis products (training assets; user-seeded rows carry user pinyin distribution)
+datasets/teacher-synthesis-*.jsonl

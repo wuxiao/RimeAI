@@ -58,6 +58,9 @@ DEFAULT_HISTORY_DB = (
 DEFAULT_FROZEN_SAMPLES = (
     PROJECT_ROOT / ".rimeai/datasets/p0-librime-1.17.0-luna-simp.jsonl"
 )
+DEFAULT_HOLDOUT_SAMPLES = (
+    PROJECT_ROOT / ".rimeai/datasets/real-holdout-v1.jsonl"
+)
 DEFAULT_BASELINE_MODEL = (
     PROJECT_ROOT / ".rimeai/models/p0-char-ngram-v2.json.gz"
 )
@@ -435,7 +438,12 @@ def run_model_gate(
     frozen_samples: Path,
     decoder_config: Path,
     rime_dictionary: Path,
+    holdout_samples: Path | None = None,
 ) -> dict[str, Any]:
+    """Model-layer gate. The frozen set always runs; when a real
+    holdout dataset exists (LM-004 accumulation, per the loop design)
+    it runs additionally with the same floors — the gate takes the
+    worst of both, matching the LM-002 dual-dataset posture."""
     if model_summary is not None:
         summary, error = _load_json(model_summary)
         if summary is None:
@@ -491,7 +499,82 @@ def run_model_gate(
             [_metric("evaluate_sentence_stdout", None, "json", None, "fail")],
             [completed.stdout[-2000:]],
         )
-    return check_model(summary)
+    frozen_gate = check_model(summary)
+    if holdout_samples is None:
+        return frozen_gate
+    if not holdout_samples.is_file():
+        metrics = list(frozen_gate["metrics"])
+        metrics.append(
+            _metric("holdout_dataset_present", False, "==", True, "pending")
+        )
+        return _gate(
+            "model",
+            metrics,
+            frozen_gate["notes"]
+            + [f"real holdout missing: {holdout_samples} (pending until "
+               "LM-004 accumulation rebuilds it)"],
+        )
+    holdout_completed = _run_command(
+        [
+            sys.executable,
+            "-m",
+            "rimeai_eval",
+            "evaluate-sentence",
+            str(holdout_samples),
+            "--decoder-config",
+            str(decoder_config),
+            "--rime-dictionary",
+            str(rime_dictionary),
+            "--split",
+            "test",
+        ]
+    )
+    if holdout_completed.returncode != 0:
+        metrics = list(frozen_gate["metrics"])
+        metrics.append(
+            _metric(
+                "holdout_evaluate_run",
+                holdout_completed.returncode,
+                "==",
+                0,
+                "fail",
+            )
+        )
+        return _gate(
+            "model", metrics,
+            frozen_gate["notes"] + [holdout_completed.stderr[-2000:]],
+        )
+    try:
+        holdout_summary = json.loads(holdout_completed.stdout)
+    except json.JSONDecodeError:
+        metrics = list(frozen_gate["metrics"])
+        metrics.append(
+            _metric("holdout_stdout", None, "json", None, "fail")
+        )
+        return _gate(
+            "model", metrics,
+            frozen_gate["notes"] + [holdout_completed.stdout[-2000:]],
+        )
+    holdout_gate = check_model(holdout_summary)
+    # 双数据集最差语义：指标带前缀合并（_gate 取最差状态），notes 合并。
+    merged_metrics = [
+        _metric(
+            f"frozen_{m['name']}", m["value"],
+            m["comparison"], m["threshold"], m["status"],
+        )
+        for m in frozen_gate["metrics"]
+    ] + [
+        _metric(
+            f"holdout_{m['name']}", m["value"],
+            m["comparison"], m["threshold"], m["status"],
+        )
+        for m in holdout_gate["metrics"]
+    ]
+    return _gate(
+        "model",
+        merged_metrics,
+        list(dict.fromkeys(frozen_gate["notes"] + holdout_gate["notes"])),
+    )
 
 
 def run_e2e_gate(
@@ -557,6 +640,14 @@ def main(argv: list[str] | None = None) -> int:
         help="verify an existing evaluate-sentence stdout JSON",
     )
     parser.add_argument(
+        "--holdout-samples",
+        type=Path,
+        default=DEFAULT_HOLDOUT_SAMPLES,
+        help="real-history holdout jsonl run additionally in the model "
+        "gate (worst-of-both floors; missing file keeps the metric "
+        "pending), pass an empty path value to disable",
+    )
+    parser.add_argument(
         "--e2e-report", type=Path, default=DEFAULT_E2E_REPORT
     )
     parser.add_argument(
@@ -592,6 +683,12 @@ def main(argv: list[str] | None = None) -> int:
             frozen_samples=DEFAULT_FROZEN_SAMPLES,
             decoder_config=DEFAULT_DECODER_CONFIG,
             rime_dictionary=DEFAULT_RIME_DICTIONARY,
+            holdout_samples=(
+                args.holdout_samples
+                if str(args.holdout_samples) not in ("", "none")
+                and args.holdout_samples is not None
+                else None
+            ),
         )
     if "e2e" in selected:
         gates["e2e"] = run_e2e_gate(

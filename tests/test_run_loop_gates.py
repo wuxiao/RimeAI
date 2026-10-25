@@ -157,6 +157,73 @@ def test_model_fails_above_latency_budget():
     assert gates.check_model(report)["verdict"] == "fail"
 
 
+def _run_model_gate_with_stub(
+    monkeypatch, tmp_path, *, frozen, holdout, holdout_exists=True
+):
+    """stub 两次 evaluate-sentence 子进程（frozen/holdout 各一次）。"""
+    frozen_samples = tmp_path / "frozen.jsonl"
+    frozen_samples.write_text("{}\n", encoding="utf-8")
+    holdout_samples = tmp_path / "holdout.jsonl"
+    if holdout_exists:
+        holdout_samples.write_text("{}\n", encoding="utf-8")
+    outputs = iter(
+        [
+            __import__("subprocess").CompletedProcess(
+                [], 0, stdout=json.dumps(frozen), stderr=""
+            ),
+            __import__("subprocess").CompletedProcess(
+                [], 0, stdout=json.dumps(holdout), stderr=""
+            ),
+        ]
+    )
+
+    def fake_run(command):
+        return next(outputs)
+
+    monkeypatch.setattr(gates, "_run_command", fake_run)
+    return gates.run_model_gate(
+        run=True,
+        model_summary=None,
+        frozen_samples=frozen_samples,
+        decoder_config=tmp_path / "decoder.json",
+        rime_dictionary=tmp_path / "dict.yaml",
+        holdout_samples=holdout_samples if holdout_exists else holdout_samples,
+    )
+
+
+def test_model_gate_merges_holdout_worst_of_both(monkeypatch, tmp_path):
+    gate = _run_model_gate_with_stub(
+        monkeypatch, tmp_path,
+        frozen=MODEL_PASS,
+        holdout=MODEL_PASS,
+    )
+    assert gate["verdict"] == "pass"
+    names = [m["name"] for m in gate["metrics"]]
+    assert "frozen_sentence_accuracy" in names
+    assert "holdout_sentence_accuracy" in names
+    # 留出集挂掉时整体 fail（双数据集最差语义）。
+    bad_holdout = json.loads(json.dumps(MODEL_PASS))
+    bad_holdout["metrics"]["sentence_accuracy"] = 0.5
+    gate = _run_model_gate_with_stub(
+        monkeypatch, tmp_path,
+        frozen=MODEL_PASS, holdout=bad_holdout,
+    )
+    assert gate["verdict"] == "fail"
+    found = {m["name"]: m["status"] for m in gate["metrics"]}
+    assert found["frozen_sentence_accuracy"] == "pass"
+    assert found["holdout_sentence_accuracy"] == "fail"
+
+
+def test_model_gate_missing_holdout_stays_pending(monkeypatch, tmp_path):
+    gate = _run_model_gate_with_stub(
+        monkeypatch, tmp_path,
+        frozen=MODEL_PASS, holdout=None, holdout_exists=False,
+    )
+    assert gate["verdict"] == "pending"
+    names = [m["name"] for m in gate["metrics"]]
+    assert "holdout_dataset_present" in names
+
+
 def test_e2e_passes_on_real_v3_shape():
     gate = gates.check_e2e(json.loads(json.dumps(E2E_PASS)))
     assert gate["verdict"] == "pass"
