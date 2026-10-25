@@ -446,6 +446,81 @@ final class SherpaOnnxProductBackendLoader:
         )
     }
 
+    /// SECURITY-001：打开并绑定单个 runtime 文件。清单项存在性、
+    /// manifest 绝对路径一致性、openat（root fd 防护）、同 fd SHA-256
+    /// 前验；buffer 模式下从同一已验证 fd pread 全量字节——验证的
+    /// 字节即传入 recognizer 的字节，ORT 不 open pathname（同 UID
+    /// 攻击者对路径的替换不可达字节流）。失败时关闭 fd 后抛错。
+    private static func bindRuntimeFile(
+        relativePath: String,
+        displayPath: String,
+        artifactDirectoryPath: String,
+        inventory: [String: VoiceASRArtifactManifest.InventoryEntry],
+        rootDescriptor: Int32,
+        transport: ModelTransport
+    ) throws -> SherpaOnnxBoundRuntimeFile {
+        guard let expected = inventory[relativePath] else {
+            throw SherpaOnnxProductBackendError
+                .unsupportedArtifactContract
+        }
+        let expectedPath = artifactDirectoryPath + "/" + relativePath
+        guard displayPath.utf8.elementsEqual(expectedPath.utf8) else {
+            throw SherpaOnnxProductBackendError
+                .unsafeModelPath(relativePath)
+        }
+        let descriptor = try openRuntimeFile(
+            relativePath: relativePath,
+            displayPath: displayPath,
+            rootDescriptor: rootDescriptor,
+            expectedBytes: expected.bytes
+        )
+        let digest: String
+        do {
+            digest = try descriptorSHA256(descriptor)
+        } catch {
+            close(descriptor)
+            throw error
+        }
+        guard digest == expected.sha256,
+              lseek(descriptor, 0, SEEK_SET) == 0
+        else {
+            close(descriptor)
+            throw SherpaOnnxProductBackendError
+                .modelFileUnavailable(displayPath)
+        }
+        var status = stat()
+        guard fstat(descriptor, &status) == 0 else {
+            close(descriptor)
+            throw SherpaOnnxProductBackendError
+                .modelFileUnavailable(displayPath)
+        }
+        let bytes: Data?
+        if transport == .buffer {
+            do {
+                bytes = try descriptorReadAllBytes(
+                    descriptor,
+                    expectedBytes: expected.bytes,
+                    displayPath: displayPath
+                )
+            } catch {
+                close(descriptor)
+                throw error
+            }
+        } else {
+            bytes = nil
+        }
+        return SherpaOnnxBoundRuntimeFile(
+            descriptor: descriptor,
+            relativePath: relativePath,
+            displayPath: displayPath,
+            expectedBytes: expected.bytes,
+            expectedSHA256: expected.sha256,
+            device: status.st_dev,
+            inode: status.st_ino,
+            bytes: bytes
+        )
+    }
+
     private static func openRuntimeFiles(
         for artifact: VoiceASRVerifiedArtifact,
         configuration: SherpaOnnxRecognizerConfiguration,
@@ -476,69 +551,13 @@ final class SherpaOnnxProductBackendLoader:
         var boundFiles: [SherpaOnnxBoundRuntimeFile] = []
         do {
             for (relativePath, path) in paths {
-                guard let expected = inventory[relativePath] else {
-                    throw SherpaOnnxProductBackendError
-                        .unsupportedArtifactContract
-                }
-                let expectedPath = artifact.artifactDirectory.path
-                    + "/" + relativePath
-                guard path.utf8.elementsEqual(expectedPath.utf8) else {
-                    throw SherpaOnnxProductBackendError
-                        .unsafeModelPath(relativePath)
-                }
-                let descriptor = try openRuntimeFile(
+                boundFiles.append(try bindRuntimeFile(
                     relativePath: relativePath,
                     displayPath: path,
+                    artifactDirectoryPath: artifact.artifactDirectory.path,
+                    inventory: inventory,
                     rootDescriptor: rootDescriptor,
-                    expectedBytes: expected.bytes
-                )
-                let digest: String
-                do {
-                    digest = try descriptorSHA256(descriptor)
-                } catch {
-                    close(descriptor)
-                    throw error
-                }
-                guard digest == expected.sha256,
-                      lseek(descriptor, 0, SEEK_SET) == 0
-                else {
-                    close(descriptor)
-                    throw SherpaOnnxProductBackendError
-                        .modelFileUnavailable(path)
-                }
-                var status = stat()
-                guard fstat(descriptor, &status) == 0 else {
-                    close(descriptor)
-                    throw SherpaOnnxProductBackendError
-                        .modelFileUnavailable(path)
-                }
-                // SECURITY-001 buffer 模式：SHA 验证后从同一已验证 fd
-                // pread 全量字节；recognizer 构造只用这些字节，ORT 不再
-                // open pathname（同 UID 攻击者对路径的替换不可达字节流）。
-                let bytes: Data?
-                if transport == .buffer {
-                    do {
-                        bytes = try descriptorReadAllBytes(
-                            descriptor,
-                            expectedBytes: expected.bytes,
-                            displayPath: path
-                        )
-                    } catch {
-                        close(descriptor)
-                        throw error
-                    }
-                } else {
-                    bytes = nil
-                }
-                boundFiles.append(SherpaOnnxBoundRuntimeFile(
-                    descriptor: descriptor,
-                    relativePath: relativePath,
-                    displayPath: path,
-                    expectedBytes: expected.bytes,
-                    expectedSHA256: expected.sha256,
-                    device: status.st_dev,
-                    inode: status.st_ino,
-                    bytes: bytes
+                    transport: transport
                 ))
             }
             guard Set(boundFiles.map(\.identity)).count
@@ -1753,13 +1772,17 @@ private struct SystemSherpaOnnxRuntime:
         configuration: SherpaOnnxRecognizerConfiguration
     ) throws -> any SherpaOnnxRecognizerRunning {
         let strings = SherpaOnnxCStringArena()
+        // SECURITY-001：模型字节缓冲模式（详见 resolveModelBuffers 注释）。
+        // 先解析缓冲模式，再构建基础 C 配置：buffer 模式下基础 C 配置
+        // 不携带任何模型/tokens pathname（见 makeBaseCConfiguration
+        // 注释），否则上游 OnlineModelConfig::Validate 会拒绝
+        // “tokens_buf + tokens 文件同时存在”的组合。
+        let resolvedBuffers = try Self.resolveModelBuffers(configuration)
         var config = try Self.makeBaseCConfiguration(
             configuration,
-            strings: strings
+            strings: strings,
+            bufferMode: resolvedBuffers.bufferMode
         )
-
-        // SECURITY-001：模型字节缓冲模式（详见 resolveModelBuffers 注释）。
-        let resolvedBuffers = try Self.resolveModelBuffers(configuration)
 
         var recognizer: OpaquePointer?
         if resolvedBuffers.bufferMode {
@@ -1813,9 +1836,16 @@ private struct SystemSherpaOnnxRuntime:
     }
 
     /// 构造 sherpa C 配置的 pathname/标量部分（不含模型缓冲字段）。
+    /// 构建除模型缓冲外的 C 配置基础字段。buffer 模式下模型/tokens
+    /// pathname 一律传空串：上游 OnlineModelConfig::Validate 拒绝
+    /// tokens_buf 与 tokens 文件同时存在，且模型级 Validate 在缓冲
+    /// 非空时早退不触碰路径——清空路径既通过校验，也在结构上保证
+    /// “buffer 模式无 pathname 跨越 C 边界”。bpe_vocab 无上游 buffer
+    /// API，保留路径（SECURITY-001 已注明的例外）。
     private static func makeBaseCConfiguration(
         _ configuration: SherpaOnnxRecognizerConfiguration,
-        strings: SherpaOnnxCStringArena
+        strings: SherpaOnnxCStringArena,
+        bufferMode: Bool
     ) throws -> SherpaOnnxOnlineRecognizerConfig {
         var config = SherpaOnnxOnlineRecognizerConfig()
         config.feat_config.sample_rate = Int32(
@@ -1828,26 +1858,26 @@ private struct SystemSherpaOnnxRuntime:
             == VoiceASRArtifactManifest.Runtime.ModelType.paraformer.rawValue
         if isParaformer {
             config.model_config.paraformer.encoder = try strings.copy(
-                configuration.encoderPath
+                bufferMode ? "" : configuration.encoderPath
             )
             config.model_config.paraformer.decoder = try strings.copy(
-                configuration.decoderPath
+                bufferMode ? "" : configuration.decoderPath
             )
             config.model_config.tokens = try strings.copy(
-                configuration.tokensPath
+                bufferMode ? "" : configuration.tokensPath
             )
         } else {
             config.model_config.transducer.encoder = try strings.copy(
-                configuration.encoderPath
+                bufferMode ? "" : configuration.encoderPath
             )
             config.model_config.transducer.decoder = try strings.copy(
-                configuration.decoderPath
+                bufferMode ? "" : configuration.decoderPath
             )
             config.model_config.transducer.joiner = try strings.copy(
-                configuration.joinerPath
+                bufferMode ? "" : configuration.joinerPath
             )
             config.model_config.tokens = try strings.copy(
-                configuration.tokensPath
+                bufferMode ? "" : configuration.tokensPath
             )
             config.model_config.bpe_vocab = try strings.copy(
                 configuration.bpeVocabularyPath
@@ -1999,19 +2029,28 @@ private func withModelBytesPinned<R>(
     // transducer 4）。指针不逃逸 body 闭包。
     switch buffers.count {
     case 3:
-        return try buffers[0].withUnsafeBytes { a in
-            try buffers[1].withUnsafeBytes { b in
-                try buffers[2].withUnsafeBytes { c in
-                    try body([a, b, c])
+        return try buffers[0].withUnsafeBytes { encoderPointer in
+            try buffers[1].withUnsafeBytes { decoderPointer in
+                try buffers[2].withUnsafeBytes { tokensPointer in
+                    try body([
+                        encoderPointer,
+                        decoderPointer,
+                        tokensPointer
+                    ])
                 }
             }
         }
     case 4:
-        return try buffers[0].withUnsafeBytes { a in
-            try buffers[1].withUnsafeBytes { b in
-                try buffers[2].withUnsafeBytes { c in
-                    try buffers[3].withUnsafeBytes { d in
-                        try body([a, b, c, d])
+        return try buffers[0].withUnsafeBytes { encoderPointer in
+            try buffers[1].withUnsafeBytes { decoderPointer in
+                try buffers[2].withUnsafeBytes { joinerPointer in
+                    try buffers[3].withUnsafeBytes { tokensPointer in
+                        try body([
+                            encoderPointer,
+                            decoderPointer,
+                            joinerPointer,
+                            tokensPointer
+                        ])
                     }
                 }
             }
