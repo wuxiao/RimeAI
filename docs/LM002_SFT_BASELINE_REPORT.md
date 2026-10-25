@@ -193,6 +193,9 @@ glm-5.3 造数 931，usable=true）。同超参（lr 1e-4 / batch 4 / seed 42
 
 ### 10.1 真实历史留出集（2026-10-24 深夜）：趋势反转，混合×1 双集全正
 
+> ⚠️ 2026-10-25 更正（§10.5）：本节"真实 +2.1pp"系训练记忆（11 行
+> verbatim 泄漏），干净 35 行集上 +0.0pp。结论 2 已划线标注。
+
 门①③要求冻结集与真实历史留出集双跑。留出集构建：history
 整句提交去重（拼音+文本）后排除冻结评测集拼音重叠，时间 80/20
 切分，尾部 48 样本（candidates=[gold] 占位，基线恒 1.0 无意义，
@@ -209,8 +212,11 @@ decoder 句准确率照常有效；empty 19/48 三模型同值，为约束下无
 
 1. **对照臂在真实分布上比基线还差**——zhwiki 技术域 SFT 在用户
    分布上是过拟合伤害；单冻结集数字会完全误导制品选择；
-2. **混合 ×1 是唯一双集都不劣于基线的配方**（冻结 +1.2pp /
-   真实 +2.1pp）——门①按“现制品=当前部署基座 0.9220”口径差
+2. ~~**混合 ×1 是唯一双集都不劣于基线的配方**（冻结 +1.2pp /
+   真实 +2.1pp）~~（**2026-10-25 §10.5 更正**：本节 48 行留出集
+   含 11 行 verbatim 训练泄漏，0.8542/+2.1pp 系训练记忆；彻底
+   干净 35 行集上基线 = mix1 = 0.8857（+0.0pp），真实分布无
+   泛化增益）——门①按“现制品=当前部署基座 0.9220”口径差
    0.8pp（+1.2 < +2），门③ reg 10 ≤ 基线 11 ✓；
 3. 新数据的作用面确认是**真实分布**——教师造数的种子应从真实
    用户拼音分布采样（history 高频词组合）而非随机词典词，
@@ -241,8 +247,10 @@ decoder 句准确率照常有效；empty 19/48 三模型同值，为约束下无
 | D 混合 ×1 + 用户教师 + 2400 iters（mix2） | 0.9322 | 0.8333 |
 | D 纯新数据 | 0.7084 | 未评 |
 
-**结论：mix1 是当前最佳候选制品**（唯一双集全正：冻结 +1.2pp
-/ 真实 +2.1pp）；门①差 0.8pp。配方搜索在当前数据规模（真实
+~~**结论：mix1 是当前最佳候选制品**（唯一双集全正：冻结 +1.2pp
+/ 真实 +2.1pp）~~（**2026-10-25 §10.5 更正**：真实 +2.1pp 系训练
+记忆，干净 35 行集 +0.0pp；mix1 仍为配方搜索中的相对最优与后续
+重跑基线，但"真实分布增益"表述作废）；门①差 0.8pp。配方搜索在当前数据规模（真实
 +教师 ~1000 行）已到收益边界——下一步依赖真实数据积累周期
 （decision_log 预计数周内到数千行）后重跑 mix 配方；教师造数
 随 --seeds-file 已就绪随时扩充用户分布数据。
@@ -253,7 +261,7 @@ decoder 句准确率照常有效；empty 19/48 三模型同值，为约束下无
 
 | 制品 | ①冻结（需≥0.9420） | ①真实（需≥0.8533） | ②miss（需≤30） | ③reg（≤11） | ④p50（≤138ms） |
 | --- | --- | --- | --- | --- | --- |
-| 0.5B-mix1 | 0.9343 ✗(-0.77pp) | 0.8542 ✓ | 49 ✗ | 10 ✓ | ~124ms ✓ |
+| 0.5B-mix1 | 0.9343 ✗(-0.77pp) | 0.8542 ✓（§10.5：泄漏承载；干净集 0.8857 = 基线，门②按干净口径不达标） | 49 ✗ | 10 ✓ | ~124ms ✓ |
 | 1.5B-mix1 | **0.9497 ✓(+2.77pp)** | 0.8333 ✗(+0.0pp) | 37 ✗ | 12 ✗(微超 1) | 180ms ✗(×1.56) |
 
 两制品互补卡门：0.5B-mix1 缺冻结侧（0.77pp）与 miss 桶（19
@@ -305,8 +313,11 @@ holdout 48 行中 11 行 gold_text verbatim 出现在训练文本中
 fuzhashijian/gehanggeye/nibujuede/bingpupianyi/thun/moni）；
 保守剔除全部 13 个 holdout∩`leak_check.overlapped_pinyin` 键
 （11 verbatim + baidu + qwen）后 `real-holdout-v3.jsonl` 为
-35 行，与 overlapped_pinyin 键级交集 = 0、与训练快照文本级
-交集 = 0（双重验证均 0）：
+35 行，与 overlapped_pinyin 键级交集 = 0、与训练快照 **sft 尾部
+（899 行）**文本级 verbatim 交集 = 0（双重验证均 0；zhwiki 8044
+行部分含 7 个 v3 gold 文本的 4 字/英文子串偶现——sousuoyinqing
+×9、doubuyuanyi、daduoshuren、china/ipad/model/continue——为
+长文偶然子串非训练样本对齐，键级交集 0 不受影响）：
 
 | 制品 | 冻结集 | 47/v2（仅剔 baidu，含 11 泄漏行） | 35/v3（彻底干净） |
 | --- | --- | --- | --- |
@@ -344,7 +355,7 @@ out = [r for r in hold if r['pinyin'] not in ov]
 open('.rimeai/datasets/real-holdout-v3.jsonl','w').write(''.join(json.dumps(r, ensure_ascii=False)+chr(10) for r in out))
 tr = [json.loads(l)['text'] for l in open('.rimeai/sft-lm002d-mix1/train.jsonl')][-899:]
 vt = sum(1 for r in out if any(r['gold_text'] in t for t in tr))
-print(len(out), 'rows; key-intersection =', len({r['pinyin'] for r in out} & ov), '; verbatim-in-train =', vt)"
+print(len(out), 'rows; key-intersection =', len({r['pinyin'] for r in out} & ov), '; verbatim-in-sft-tail =', vt)"
 
 # 双模型评估（基线 / mix1，均 0.8857）
 RIMEAI_MLX_MODEL_DIR="$PWD/.rimeai/models/qwen2.5-0.5b-mlx-8bit-v1" \
