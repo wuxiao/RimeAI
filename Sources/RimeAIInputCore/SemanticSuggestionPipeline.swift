@@ -323,8 +323,10 @@ public final class SemanticSuggestionPipeline: @unchecked Sendable {
         return neuralLateAppliedToken == composition.token
     }
     /// 当前展示槽中可反馈建议的来源标识（LM-003）：requestID + 是否
-    /// 云端（云端走 broker 反馈帧，本地/神经迟到帧走 daemon）。
-    var displayedFeedback: (requestID: String, cloud: Bool)?
+    /// 云端（云端走 broker 反馈帧，本地/神经迟到帧走 daemon）+ 展示
+    /// 文本（用于「内容一致即采纳」比对：首选一致合并场景下 Space
+    /// 上屏与建议同文，语义上是采纳而非拒绝）。
+    var displayedFeedback: (requestID: String, cloud: Bool, text: String?)?
     var pendingCloudRequestID: String?
     /// 分段向后重推（KBD-006）：防抖任务与在途请求 ID 集合。
     var suffixRefinementTask: (any SemanticSuggestionTask)?
@@ -406,10 +408,22 @@ public final class SemanticSuggestionPipeline: @unchecked Sendable {
         emitDisplayedFeedback("adopted")
     }
 
-    /// 用户选了其他候选（数字/Space 提交 Rime 首选），展示槽中的
-    /// 建议被拒绝。
-    public func markDisplayedSuggestionRejected() {
-        emitDisplayedFeedback("rejected")
+    /// 用户选了其他候选（数字/Space 提交 Rime 候选）。首选一致合并
+    /// 场景下，上屏文本与展示建议完全一致时语义上是采纳（用户看到
+    /// 并上屏了这个建议的内容），记 adopted_via_main 保留路径信息；
+    /// 只有提交文本与建议不同才是真拒绝（2026-10-24 神经臂假阴性
+    /// 裁决：实测 15 个 rejected 里 ~10 个提交文本逐字相同）。
+    public func markDisplayedSuggestionRejected(
+        committedText: String? = nil
+    ) {
+        if let text = displayedFeedback?.text,
+           let committed = committedText,
+           !text.isEmpty,
+           text == committed {
+            emitDisplayedFeedback("adopted_via_main")
+        } else {
+            emitDisplayedFeedback("rejected")
+        }
     }
 
     /// 输入周期结束（新周期/重置）时建议未被处理。
@@ -431,7 +445,9 @@ public final class SemanticSuggestionPipeline: @unchecked Sendable {
     }
 
     /// 登记展示槽建议的来源；云端接管本地建议时先发 superseded。
-    func setDisplayedFeedback(requestID: String, cloud: Bool) {
+    func setDisplayedFeedback(
+        requestID: String, cloud: Bool, text: String? = nil
+    ) {
         if let existing = displayedFeedback,
            !existing.cloud,
            cloud,
@@ -441,7 +457,7 @@ public final class SemanticSuggestionPipeline: @unchecked Sendable {
                 "superseded"
             )
         }
-        displayedFeedback = (requestID, cloud)
+        displayedFeedback = (requestID, cloud, text)
     }
 
     /// No candidates and no mixed suggestion: collapse the slot to the

@@ -41,6 +41,10 @@ SOURCES = (
 OUTCOMES = (
     "pending",
     "adopted",
+    # 内容一致即采纳（2026-10-24 神经臂假阴性裁决）：首选一致合并
+    # 场景下 Space 上屏与展示建议同文，语义上是采纳；保留路径信息
+    # 与 adopted 区分（Tab 采纳 vs 主候选路径同文上屏）。
+    "adopted_via_main",
     "rejected",
     "superseded",
     "expired",

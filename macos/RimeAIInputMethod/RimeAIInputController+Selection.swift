@@ -78,7 +78,9 @@ extension RimeAIInputController {
                 pipeline.markDisplayedSuggestionAdopted()
             } else {
                 settings.record(.mainAccepted)
-                pipeline.markDisplayedSuggestionRejected()
+                pipeline.markDisplayedSuggestionRejected(
+                    committedText: appliedTransition.committedText
+                )
             }
             return
         }
@@ -120,7 +122,9 @@ extension RimeAIInputController {
             pipeline.markDisplayedSuggestionAdopted()
         } else {
             settings.record(.mainAccepted)
-            pipeline.markDisplayedSuggestionRejected()
+            pipeline.markDisplayedSuggestionRejected(
+                committedText: appliedTransition.committedText
+            )
         }
     }
 

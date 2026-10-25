@@ -249,13 +249,15 @@ def build_pairs(
             # Display-order artifact, not a preference signal.
             stats["superseded_skipped"] += 1
             continue
-        if outcome == "adopted":
+        if outcome in ("adopted", "adopted_via_main"):
+            # adopted_via_main（2026-10-24）：首选一致合并场景下 Space
+            # 上屏与建议同文——与 Tab 采纳同权重直出（内容被采纳）。
             emit(
                 pinyin=row["pinyin"],
                 chosen=row["suggestion"],
                 rejected=None,
                 weight=WEIGHT_ADOPTED,
-                source=f"daemon/{source}/adopted",
+                source=f"daemon/{source}/{outcome}",
                 created_at_ms=row["created_at_ms"],
             )
             continue

@@ -242,7 +242,9 @@ extension SemanticSuggestionPipeline {
             )
             historySource = .localSemantic
             cloudCandidate = nil
-            setDisplayedFeedback(requestID: requestID, cloud: false)
+            setDisplayedFeedback(
+                requestID: requestID, cloud: false, text: sanitized
+            )
             emit(.diagnostic(.resultShown))
             emit(.suggestionSlotChanged)
             return
@@ -286,7 +288,7 @@ extension SemanticSuggestionPipeline {
             localSentenceText = candidate
             localSentenceToken = token
         }
-        setDisplayedFeedback(requestID: requestID, cloud: false)
+        setDisplayedFeedback(requestID: requestID, cloud: false, text: candidate)
         emit(.diagnostic(.resultShown))
         if decision == .sentenceSuggestion {
             emit(.diagnostic(.sentenceSuggestionShown))
@@ -395,7 +397,10 @@ extension SemanticSuggestionPipeline {
         localSentenceText = appliedLocalText
         localSentenceToken = expectedToken
         if let lateRequestID = frame.requestID {
-            setDisplayedFeedback(requestID: lateRequestID, cloud: false)
+            setDisplayedFeedback(
+                requestID: lateRequestID, cloud: false,
+                text: appliedLocalText
+            )
         }
         emit(.diagnostic(.resultShown))
         emit(.diagnostic(.sentenceSuggestionShown))
