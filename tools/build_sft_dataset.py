@@ -27,6 +27,14 @@ the corpus stays usable. (v1 semantics — abort with exit 4 and write
 nothing — was retired after that run; see the lock's leak_check policy
 field.)
 
+Degenerate pairs: when the history join resolves a rejected
+suggestion's chosen side to the same string, the pair states no
+preference (under pairwise losses it is zero-gradient or worse) and is
+dropped and counted as ``degenerate_dropped``. Typical causes are
+overlapping candidates across sources (the same text shown by both the
+local and neural candidate lists) and a re-commit of the rejected text
+via another path. (v3)
+
 Minimum viable scale: when the deduplicated row count is below
 --min-samples the build still writes the outputs for inspection but
 marks ``usable: false`` in the lock and exits 3 — "insufficient data,
@@ -45,7 +53,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-VERSION = 2
+VERSION = 3
 DATASET_NAME = "sft-constrained-v1"
 DEFAULT_EVAL_DATASET = (
     Path(__file__).resolve().parents[1]
@@ -206,9 +214,11 @@ def build_pairs(
         "cloud_abstain_skipped": 0,
         "cloud_unadopted_skipped": 0,
         "unsupported_source_skipped": 0,
+        "degenerate_dropped": 0,
         "duplicates_dropped": 0,
         "teacher_rows_loaded": 0,
         "teacher_invalid_dropped": 0,
+        "teacher_shadowed_by_real": 0,
     }
     candidates: list[dict[str, Any]] = []
 
@@ -257,6 +267,13 @@ def build_pairs(
         if chosen is None:
             stats["unresolved_rejected"] += 1
             continue
+        if chosen == row["suggestion"]:
+            # "prefer X over X" — the history join matched the rejected
+            # text itself (overlapping candidates across sources, or the
+            # user re-committed the same text by another path). Zero
+            # preference signal; keep it out of the pairwise mix.
+            stats["degenerate_dropped"] += 1
+            continue
         emit(
             pinyin=row["pinyin"],
             chosen=chosen,
@@ -285,17 +302,32 @@ def build_pairs(
         )
 
     # 教师合成行（glm-5.3 序列级，对齐过滤器已在 teacher_synthesis 把
-    # 关）：同键与真实数据冲突时真实数据优先（排序第二键，真实在前）。
+    # 关）：同键与真实数据冲突时真实数据优先（排序第二键，真实在前）；
+    # 同拼音已被真实行覆盖的教师行整体让位（矛盾金标不共存——真实
+    # 偏好优先，教师行只作覆盖补充，reveal R1/R3 裁决）。
+    real_pinyins = {
+        pair["pinyin"] for pair in candidates
+        if pair["source"] != "teacher_synthesis"
+    }
     for row in teacher_rows or []:
         pinyin, chosen, weight = (
             row.get("pinyin"), row.get("chosen"), row.get("weight"),
         )
+        created = row.get("created_at_ms", 0)
         if (
             not isinstance(pinyin, str) or not pinyin
             or not isinstance(chosen, str) or not chosen
+            or isinstance(weight, bool)
             or not isinstance(weight, (int, float))
+            or isinstance(created, bool)
+            or not isinstance(created, (int, float))
         ):
+            # 坏行只丢自己（reveal R1 P1：null/非数字 created_at_ms
+            # 曾让整个构建崩溃）。
             stats["teacher_invalid_dropped"] += 1
+            continue
+        if pinyin in real_pinyins:
+            stats["teacher_shadowed_by_real"] += 1
             continue
         stats["teacher_rows_loaded"] += 1
         emit(
@@ -304,7 +336,7 @@ def build_pairs(
             rejected=None,
             weight=float(weight),
             source="teacher_synthesis",
-            created_at_ms=int(row.get("created_at_ms", 0)),
+            created_at_ms=int(created),
         )
 
     candidates.sort(
@@ -359,6 +391,7 @@ def build_outputs(
     history_db: Path | None,
     teacher_synthesis: Path | None,
     eval_dataset: Path,
+    holdout_eval: Path | None,
     min_samples: int,
     overlapped: set[str],
 ) -> dict[str, Any]:
@@ -409,9 +442,14 @@ def build_outputs(
         "usable": stats["rows"] >= min_samples,
         "leak_check": {
             "eval_dataset": str(eval_dataset),
+            "holdout_dataset": (
+                str(holdout_eval) if holdout_eval else None
+            ),
             "splits": ["validation", "test"],
             "policy": "dropped",
             "dropped_rows": stats.get("leak_dropped", 0),
+            "dropped_rows_frozen": stats.get("leak_dropped_frozen", 0),
+            "dropped_rows_holdout": stats.get("leak_dropped_holdout", 0),
             "overlapped_pinyin": sorted(overlapped),
         },
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -449,6 +487,13 @@ def main(argv: list[str] | None = None) -> int:
         "on key collision)",
     )
     parser.add_argument(
+        "--holdout-eval", type=Path, default=None,
+        help="real-history holdout jsonl whose pinyin keys are also "
+        "excluded from the training set (dual-dataset leak posture, "
+        "reveal 2026-10-24); dropped rows counted separately in the "
+        "lock",
+    )
+    parser.add_argument(
         "--eval-dataset", type=Path, default=DEFAULT_EVAL_DATASET,
         help="frozen evaluation jsonl for the leak check",
     )
@@ -484,20 +529,44 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     eval_keys = eval_pinyin_set(args.eval_dataset)
-    overlapped = leak_pinyin(pairs, eval_keys)
+    # 留出集泄漏防线（reveal R2-01/R3-P0 裁决）：真实历史既供给训练
+    # 又当门侧留出评估时，重叠键的指标是记忆不是泛化——留出键
+    # 与冻结评测集同口径剔除，lock 分记两套 dropped。
+    holdout_keys: set[str] = set()
+    if args.holdout_eval is not None and args.holdout_eval.is_file():
+        holdout_keys = eval_pinyin_set(args.holdout_eval)
+    overlapped = leak_pinyin(pairs, eval_keys | holdout_keys)
     if overlapped:
-        # 泄漏防护改为剔除而非整体拒绝：真实使用数据必然含评测集
+        # 泄漏防护为剔除而非整体拒绝：真实使用数据必然含评测集
         # 高频拼音（首跑 14/227），零重叠门在真实数据上永不可过。
         # 剔除保证重叠样本一个不进训练集，评测完整性目标不变。
         dropped = len(overlapped)
+        frozen_only = {p for p in overlapped if p in eval_keys}
+        holdout_only = {
+            p for p in overlapped if p in holdout_keys and p not in eval_keys
+        }
         pairs = [p for p in pairs if p["pinyin"] not in overlapped]
         stats["rows"] = len(pairs)
         stats["unique_pinyin"] = len({p["pinyin"] for p in pairs})
         stats["leak_dropped"] = dropped
+        stats["leak_dropped_frozen"] = len(frozen_only)
+        stats["leak_dropped_holdout"] = len(holdout_only)
+        # by_source 口径对齐（reveal R3：泄漏剔除后需重算，否则
+        # sum(by_source) != rows 自相矛盾）。
+        stats["by_source"] = {}  # type: ignore[assignment]
+        for p in pairs:
+            stats["by_source"][p["source"]] = (  # type: ignore[index]
+                stats["by_source"].get(p["source"], 0) + 1  # type: ignore[union-attr]
+            )
         print(
             f"leak check: dropped {dropped} rows whose pinyin overlap "
-            f"the frozen evaluation set ({args.eval_dataset}) — "
-            "examples: " + ", ".join(sorted(overlapped)[:10]),
+            f"the frozen evaluation set ({args.eval_dataset})"
+            + (
+                f" or the real holdout ({args.holdout_eval})"
+                if holdout_keys
+                else ""
+            )
+            + " — examples: " + ", ".join(sorted(overlapped)[:10]),
             file=sys.stderr,
         )
 
@@ -512,6 +581,7 @@ def main(argv: list[str] | None = None) -> int:
         eval_dataset=args.eval_dataset,
         min_samples=args.min_samples,
         overlapped=overlapped,
+        holdout_eval=args.holdout_eval,
     )
     print(
         f"{lock['dataset']}: {stats['rows']} rows "
@@ -523,6 +593,13 @@ def main(argv: list[str] | None = None) -> int:
             f"数据不足：去重后 {stats['rows']} 行 < 最小可用规模 "
             f"{args.min_samples} 行，不启动训练（lock 已标记 "
             "usable=false）",
+            file=sys.stderr,
+        )
+        return EXIT_USABLE
+    if stats["rows"] == 0:
+        # 全量被剔/无有效行（reveal R3 P2：kept=0 曾仍 exit 0 写空集）。
+        print(
+            "数据集为空：无任何行留存，不产出可用制品",
             file=sys.stderr,
         )
         return EXIT_USABLE
