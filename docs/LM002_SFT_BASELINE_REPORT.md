@@ -284,9 +284,55 @@ B 实验：1.5B-mix1 当本地教师（约束解码造数 4027 种子：kept 394
 
 结论：mix1 的真实增益经受住去记忆检验（+2.2pp 与原 +2.1pp 同
 量级）；本地教师高占比配方否决——教师占比安全线 ≤10%（与
-mix1 同水位）。留出集自身仍含 ~11 个真实行泄漏键（真实行键未
-逐条复原，近似可用）；彻底解法=下次重建时以 lock 的
-leak_check.overlapped_pinyin 为准重切 holdout。
+mix1 同水位）。
+
+### 10.5 彻底干净留出集（2026-10-25）：唯一真实泄漏键 baidu，增益稳定 +2.1pp
+
+按 §10.4 遗留解法执行：以训练侧全集键（zhwiki 语料 4214 键 ∪
+sft-constrained-v1 4117 键）逐键核验 holdout 48 键——lock 的
+`leak_check.overlapped_pinyin` 27 键中与 holdout 相交的 13 键里，
+12 键已随 sft-constrained-v1 重建时的泄漏检查 v2 剔除（不在
+当前任何训练源），唯一实际泄漏 = `baidu`（zhwiki 语料侧，
+holdout 侧行为英文直通行 real-holdout-0008）。剔除后
+`real-holdout-v2.jsonl`（47 行）与训练侧全集键交集 = 0：
+
+| 制品 | 冻结集 | 46/48 近似版 | 47/v2 彻底干净 |
+| --- | --- | --- | --- |
+| 基线（无 SFT） | 0.9220 | 0.8261 | 0.8261→**0.8298** |
+| 0.5B-mix1 | 0.9343 | 0.8478（+2.2pp） | **0.8511（+2.1pp）** |
+
+（基线 46/48 版 0.8261 对应剔 2 教师；v2 剔 1 键 baidu 后为
+0.8298；两版增益同量级。）结论：**去记忆检验彻底通过**——
+mix1 在零训练键交集的留出集上增益 +2.1pp 与近似版一致，
+真实分布增益不是记忆泄漏；制品门①（冻结集 +2pp）仍差
+0.8pp，制品继续不替换，随数据积累重评。
+
+复现（重建与评估）：
+
+```bash
+# 重建 v2（剔训练侧全集键，交集核验 0）
+python3 -c "
+import json
+tk={r['pinyin'] for r in map(json.loads,open('datasets/sft-constrained-v1.jsonl'))}|{r['pinyin'] for r in map(json.loads,open('.rimeai/datasets/p0-zhwiki-librime-1.17.0-luna-simp.jsonl'))}
+hold=list(map(json.loads,open('.rimeai/datasets/real-holdout-v1.jsonl')))
+out=[r for r in hold if r['pinyin'] not in tk]
+open('.rimeai/datasets/real-holdout-v2.jsonl','w').write(''.join(json.dumps(r,ensure_ascii=False)+chr(10) for r in out))
+print(len(out), 'rows; intersection =', len({r['pinyin'] for r in out}&tk))"
+
+# 双模型评估（基线 / mix1）
+RIMEAI_MLX_MODEL_DIR="$PWD/.rimeai/models/qwen2.5-0.5b-mlx-8bit-v1" \
+  .venv/bin/python -m rimeai_eval evaluate-sentence \
+  .rimeai/datasets/real-holdout-v2.jsonl \
+  --decoder-config examples/constrained_mlx_decoder.json \
+  --rime-dictionary .rimeai/rime/shared/luna_pinyin.dict.yaml \
+  --split test
+RIMEAI_MLX_MODEL_DIR="$PWD/.rimeai/models/qwen2.5-0.5b-mlx-8bit-lm002d-mix1-v1" \
+  .venv/bin/python -m rimeai_eval evaluate-sentence \
+  .rimeai/datasets/real-holdout-v2.jsonl \
+  --decoder-config examples/constrained_mlx_decoder.json \
+  --rime-dictionary .rimeai/rime/shared/luna_pinyin.dict.yaml \
+  --split test
+```
 
 ## 复现命令
 
