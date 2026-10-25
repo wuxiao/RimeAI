@@ -332,9 +332,30 @@ native 调用后检测篡改，但不是 hostile same-UID 对手的密码学 san
 身份的另一进程可能在“前验完成→ORT 打开 pathname”之间 rename/替换 snapshot
 文件，使替换字节先进入 native parser，也可能 `chmod` 或原地改写 owner-owned bytes；
 后验能拒绝结果，但不能撤销 parser 已读取的字节。当前威胁模型明确不声称覆盖任意
-同 UID 恶意进程。长期封闭该窗口需要上游 fd/buffer/`pread` loader API，或对冻结
-cohort 维护受审补丁。只有“已验证制品 + 快照绑定 + 后端成功加载探针”的
-受控 factory 才能生成产品运行 descriptor；公开 API 不能自行声明该资格。
+同 UID 恶意进程。
+
+**SECURITY-001 窗口消除（2026-10-26，pathname 同 UID 例外收口）**：上游
+v1.13.8 与 master 均无模型 buffer 加载 API（仅 tokens_buf），证据裁决后落地
+冻结 fork——基线 v1.13.6（tag commit 1cb484af）+
+`third-party/sherpa-onnx-v1.13.6-buffer-loader.patch`（zipformer/zipformer2/
+paraformer 三族 csrc 构造增加 buffer 优先分支，C API 透出
+`encoder_buf`/`decoder_buf`/`joiner_buf` + `tokens_buf` 既有字段，fork 身份
+`1cb484af-rimeai-buffer`）。产品传输模式改为 buffer：backend 对五个已验证
+runtime fd 直接 `pread` 全量字节（同一次前验的 SHA-256 覆盖这些字节），经
+`SherpaOnnxRecognizerConfiguration` 的 `*Bytes` 字段与 pinned 指针域传入
+`SherpaOnnxCreateOnlineRecognizer`——**ORT 在产品路径不再 open 任何模型/tokens
+pathname，“前验完成→ORT open”窗口不复存在**；后验（source fd re-hash +
+root revalidate）保留，替换 source 会被拒绝且不影响已传入的模型字节。
+`macos/Native/SherpaOnnxMacOS-fork.xcframework` 为 repo 内
+binaryTarget（primary identity），重建用 `script/build_sherpa_fork.sh`。
+snapshot pathname 模式作为回归对照保留（`ModelTransport.snapshotPathname`，
+既有 33 项 P1/P2 合同不变）；buffer 模式新增 4 项回归：hostile same-UID
+前验后替换（bytes 不受影响 + 后验拒绝）、重复构造（独立字节流）、坏模型
+fail-closed（无临时产物）与绑定断言（无 snapshot 目录残留）。已知边界：
+`bpe_vocab` 无上游 buffer API，产品 cohort 不使用该文件；若未来 cohort 引入，
+该单一文件的 pathname 例外须重新评估。只有“已验证制品 + buffer 绑定 + 后端
+成功加载探针”的受控 factory 才能生成产品运行 descriptor；公开 API 不能自行
+声明该资格。
 
 ## 下一步
 

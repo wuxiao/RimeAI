@@ -34,6 +34,13 @@ struct SherpaOnnxRecognizerConfiguration: Equatable, Sendable {
     let joinerPath: String
     let tokensPath: String
     let bpeVocabularyPath: String
+    // SECURITY-001：模型字节缓冲。任一模型 buffer 非空时 recognizer 从内存
+    // 构造（fork 的 *_buf C 字段），ORT 不再 open pathname；pathname 字段
+    // 仅作为清单对照与 snapshot 回退模式使用。
+    var encoderBytes: Data?
+    var decoderBytes: Data?
+    var joinerBytes: Data?
+    var tokensBytes: Data?
     let sampleRateHertz: Int
     let featureDimension: Int
     let numberOfThreads: Int
@@ -196,26 +203,46 @@ final class SherpaOnnxProductBackendLoader:
     static let adapterID = "sherpa-onnx"
     static let adapterVersion = "1.13.6"
     static let adapterABIVersion = 1
-    /// Revision embedded by the official v1.13.6 static XCFramework. This is
-    /// intentionally distinct from the source tag commit; the binary archive
-    /// checksum in Package.swift remains the primary artifact identity.
-    static let embeddedSherpaGitRevision = "0fdffb3e"
+    /// Revision embedded by the SECURITY-001 frozen fork
+    /// (macos/Native/SherpaOnnxMacOS-fork.xcframework, base tag v1.13.6 at
+    /// commit 1cb484af + model-buffer loader patch). The checked-in
+    /// xcframework tree is the primary artifact identity.
+    static let embeddedSherpaGitRevision = "1cb484af-rimeai-buffer"
     static let onnxRuntimeVersion = "1.27.1"
     static let supportedLocales: Set<String> = ["en-US", "zh-CN"]
 
-    private let runtime: any SherpaOnnxRuntimeLoading
-    private let snapshotOperations: SherpaOnnxRuntimeSnapshotOperations
-
-    convenience init() {
-        self.init(runtime: SystemSherpaOnnxRuntime())
+    /// SECURITY-001 模型传输模式：buffer = 从已验证 fd 读入内存经 fork
+    /// 的 *_buf C 字段构造 recognizer（ORT 不 open 任何 pathname——产品
+    /// 默认）；snapshotPathname = 既有 fclonefileat/pread 拷贝 + snapshot
+    /// 目录 pathname 路线（回归对照与回退）。
+    enum ModelTransport: Equatable, Sendable {
+        case buffer
+        case snapshotPathname
     }
 
+    private let runtime: any SherpaOnnxRuntimeLoading
+    private let snapshotOperations: SherpaOnnxRuntimeSnapshotOperations
+    private let transport: ModelTransport
+
+    /// 产品装配：SECURITY-001 buffer 模式（模型经已验证 fd 读入内存，
+    /// ORT 不 open pathname）。
+    convenience init() {
+        self.init(
+            runtime: SystemSherpaOnnxRuntime(),
+            transport: .buffer
+        )
+    }
+
+    /// 显式构造默认走 snapshot pathname 模式（既有回归合同）；产品
+    /// 装配使用无参 convenience init 的 buffer 模式。
     init(
         runtime: any SherpaOnnxRuntimeLoading,
-        snapshotOperations: SherpaOnnxRuntimeSnapshotOperations = .live
+        snapshotOperations: SherpaOnnxRuntimeSnapshotOperations = .live,
+        transport: ModelTransport = .snapshotPathname
     ) {
         self.runtime = runtime
         self.snapshotOperations = snapshotOperations
+        self.transport = transport
     }
 
     func load(
@@ -230,7 +257,8 @@ final class SherpaOnnxProductBackendLoader:
         let openFiles = try Self.openRuntimeFiles(
             for: artifact,
             configuration: configuration,
-            snapshotOperations: snapshotOperations
+            snapshotOperations: snapshotOperations,
+            transport: transport
         )
         let recognizer: any SherpaOnnxRecognizerRunning
         do {
@@ -246,7 +274,7 @@ final class SherpaOnnxProductBackendLoader:
                 artifactRootPath: artifact.artifactDirectory.path
             )
         } catch {
-            try? openFiles.runtimeSnapshot.remove()
+            try? openFiles.runtimeSnapshot?.remove()
             throw error
         }
         let driver = SherpaOnnxRecognizerDriver(
@@ -421,7 +449,8 @@ final class SherpaOnnxProductBackendLoader:
     private static func openRuntimeFiles(
         for artifact: VoiceASRVerifiedArtifact,
         configuration: SherpaOnnxRecognizerConfiguration,
-        snapshotOperations: SherpaOnnxRuntimeSnapshotOperations
+        snapshotOperations: SherpaOnnxRuntimeSnapshotOperations,
+        transport: ModelTransport
     ) throws -> SherpaOnnxOpenedRuntimeFiles {
         let runtime = artifact.manifest.runtime
         var paths = [
@@ -483,6 +512,24 @@ final class SherpaOnnxProductBackendLoader:
                     throw SherpaOnnxProductBackendError
                         .modelFileUnavailable(path)
                 }
+                // SECURITY-001 buffer 模式：SHA 验证后从同一已验证 fd
+                // pread 全量字节；recognizer 构造只用这些字节，ORT 不再
+                // open pathname（同 UID 攻击者对路径的替换不可达字节流）。
+                let bytes: Data?
+                if transport == .buffer {
+                    do {
+                        bytes = try descriptorReadAllBytes(
+                            descriptor,
+                            expectedBytes: expected.bytes,
+                            displayPath: path
+                        )
+                    } catch {
+                        close(descriptor)
+                        throw error
+                    }
+                } else {
+                    bytes = nil
+                }
                 boundFiles.append(SherpaOnnxBoundRuntimeFile(
                     descriptor: descriptor,
                     relativePath: relativePath,
@@ -490,7 +537,8 @@ final class SherpaOnnxProductBackendLoader:
                     expectedBytes: expected.bytes,
                     expectedSHA256: expected.sha256,
                     device: status.st_dev,
-                    inode: status.st_ino
+                    inode: status.st_ino,
+                    bytes: bytes
                 ))
             }
             guard Set(boundFiles.map(\.identity)).count
@@ -503,12 +551,17 @@ final class SherpaOnnxProductBackendLoader:
                 artifact.artifactDirectory.path,
                 heldDescriptor: rootDescriptor
             )
-            let snapshot = try makeRuntimeSnapshot(
-                artifactRootPath: artifact.artifactDirectory.path,
-                rootDescriptor: rootDescriptor,
-                boundFiles: boundFiles,
-                snapshotOperations: snapshotOperations
-            )
+            let snapshot: SherpaOnnxRuntimeSnapshot?
+            if transport == .snapshotPathname {
+                snapshot = try makeRuntimeSnapshot(
+                    artifactRootPath: artifact.artifactDirectory.path,
+                    rootDescriptor: rootDescriptor,
+                    boundFiles: boundFiles,
+                    snapshotOperations: snapshotOperations
+                )
+            } else {
+                snapshot = nil
+            }
             return SherpaOnnxOpenedRuntimeFiles(
                 artifactRootDescriptor: rootDescriptor,
                 boundFiles: boundFiles,
@@ -895,7 +948,10 @@ final class SherpaOnnxProductBackendLoader:
     private static func validateRuntimeSnapshot(
         _ files: SherpaOnnxOpenedRuntimeFiles
     ) throws {
-        let snapshot = files.runtimeSnapshot
+        guard let snapshot = files.runtimeSnapshot else {
+            // SECURITY-001 buffer 模式：无 snapshot 目录可验。
+            return
+        }
         let failure = SherpaOnnxProductBackendError
             .unsafeModelPath(snapshot.directoryPath)
         let rebound = try openArtifactRoot(snapshot.directoryPath)
@@ -952,7 +1008,7 @@ final class SherpaOnnxProductBackendLoader:
             artifactRootPath,
             heldDescriptor: files.artifactRootDescriptor
         )
-        try files.runtimeSnapshot.remove()
+        try files.runtimeSnapshot?.remove()
         for file in files.boundFiles {
             var status = stat()
             guard fstat(file.descriptor, &status) == 0,
@@ -1296,7 +1352,41 @@ final class SherpaOnnxProductBackendLoader:
         _ configuration: SherpaOnnxRecognizerConfiguration,
         boundTo files: SherpaOnnxOpenedRuntimeFiles
     ) -> SherpaOnnxRecognizerConfiguration {
-        let paths = files.runtimeSnapshot.runtimePaths
+        // SECURITY-001 buffer 模式：bytes 已在 boundFiles（fd 验证后
+        // pread），直接装配模型缓冲；pathname 字段保留清单绝对路径仅作
+        // 对照，recognizer 不再使用它们 open 文件。
+        if let snapshotPaths = files.runtimeSnapshot?.runtimePaths {
+            return Self.configuration(
+                configuration,
+                boundToSnapshotPaths: snapshotPaths
+            )
+        }
+        var bound = configuration
+        // 按 runtime 相对路径精确装配（relativePath 是 manifest 相对键）
+        func bytesFor(_ suffix: String) -> Data? {
+            files.boundFiles.first {
+                $0.relativePath.hasSuffix(suffix)
+            }?.bytes
+        }
+        if configuration.modelType
+            == VoiceASRArtifactManifest.Runtime.ModelType.paraformer.rawValue
+        {
+            bound.encoderBytes = bytesFor("encoder.onnx")
+            bound.decoderBytes = bytesFor("decoder.onnx")
+            bound.joinerBytes = nil
+        } else {
+            bound.encoderBytes = bytesFor("encoder.onnx")
+            bound.decoderBytes = bytesFor("decoder.onnx")
+            bound.joinerBytes = bytesFor("joiner.onnx")
+        }
+        bound.tokensBytes = bytesFor("tokens.txt")
+        return bound
+    }
+
+    private static func configuration(
+        _ configuration: SherpaOnnxRecognizerConfiguration,
+        boundToSnapshotPaths paths: [String]
+    ) -> SherpaOnnxRecognizerConfiguration {
         if configuration.modelType
             == VoiceASRArtifactManifest.Runtime.ModelType.paraformer.rawValue
         {
@@ -1353,6 +1443,37 @@ final class SherpaOnnxProductBackendLoader:
         )
     }
 
+    /// SECURITY-001 buffer 模式：从已验证 fd（SHA 校验后 offset 已归零）
+    /// pread 全量字节。读到的字节即 recognizer 构造将消费的字节。
+    private static func descriptorReadAllBytes(
+        _ descriptor: Int32,
+        expectedBytes: Int64,
+        displayPath: String
+    ) throws -> Data {
+        var data = Data(capacity: Int(expectedBytes))
+        var buffer = [UInt8](repeating: 0, count: 1024 * 1024)
+        var offset: Int64 = 0
+        while offset < expectedBytes {
+            let chunk = Int(min(Int64(buffer.count), expectedBytes - offset))
+            let count = buffer.withUnsafeMutableBytes { storage in
+                pread(descriptor, storage.baseAddress, chunk, offset)
+            }
+            guard count > 0 else {
+                if count == -1, errno == EINTR { continue }
+                throw SherpaOnnxProductBackendError
+                    .modelFileUnavailable(displayPath)
+            }
+            data.append(contentsOf: buffer.prefix(count))
+            offset += Int64(count)
+        }
+        guard offset == expectedBytes, data.count == Int(expectedBytes)
+        else {
+            throw SherpaOnnxProductBackendError
+                .modelFileUnavailable(displayPath)
+        }
+        return data
+    }
+
     private static func descriptorSHA256(_ descriptor: Int32) throws -> String {
         var hasher = SHA256()
         var buffer = [UInt8](repeating: 0, count: 64 * 1_024)
@@ -1393,6 +1514,9 @@ private struct SherpaOnnxBoundRuntimeFile {
     let expectedSHA256: String
     let device: dev_t
     let inode: ino_t
+    /// SECURITY-001 buffer 模式：从已验证 fd pread 的全量字节（模型与
+    /// tokens）；snapshot 模式为 nil。
+    let bytes: Data?
 
     var identity: SherpaOnnxBoundRuntimeFileIdentity {
         SherpaOnnxBoundRuntimeFileIdentity(device: device, inode: inode)
@@ -1532,12 +1656,13 @@ private final class SherpaOnnxRuntimeSnapshot {
 private final class SherpaOnnxOpenedRuntimeFiles: @unchecked Sendable {
     let artifactRootDescriptor: Int32
     let boundFiles: [SherpaOnnxBoundRuntimeFile]
-    let runtimeSnapshot: SherpaOnnxRuntimeSnapshot
+    /// SECURITY-001 buffer 模式下为 nil（无 snapshot 目录需要验证/清理）。
+    let runtimeSnapshot: SherpaOnnxRuntimeSnapshot?
 
     init(
         artifactRootDescriptor: Int32,
         boundFiles: [SherpaOnnxBoundRuntimeFile],
-        runtimeSnapshot: SherpaOnnxRuntimeSnapshot
+        runtimeSnapshot: SherpaOnnxRuntimeSnapshot?
     ) {
         self.artifactRootDescriptor = artifactRootDescriptor
         self.boundFiles = boundFiles
@@ -1628,6 +1753,70 @@ private struct SystemSherpaOnnxRuntime:
         configuration: SherpaOnnxRecognizerConfiguration
     ) throws -> any SherpaOnnxRecognizerRunning {
         let strings = SherpaOnnxCStringArena()
+        var config = try Self.makeBaseCConfiguration(
+            configuration,
+            strings: strings
+        )
+
+        // SECURITY-001：模型字节缓冲模式（详见 resolveModelBuffers 注释）。
+        let resolvedBuffers = try Self.resolveModelBuffers(configuration)
+
+        var recognizer: OpaquePointer?
+        if resolvedBuffers.bufferMode {
+            try withModelBytesPinned(resolvedBuffers.buffers) { pinned in
+                Self.applyModelBuffers(
+                    &config,
+                    pinned: pinned,
+                    isParaformer: resolvedBuffers.isParaformer
+                )
+                guard RimeAISherpaOnnxCreateOnlineRecognizer(
+                          &config,
+                          &recognizer
+                      ) == RimeAISherpaOnnxStatusSuccess,
+                      let created = recognizer
+                else {
+                    throw SherpaOnnxProductBackendError
+                        .recognizerInitializationFailed
+                }
+                recognizer = created
+            }
+        } else {
+            guard RimeAISherpaOnnxCreateOnlineRecognizer(
+                      &config,
+                      &recognizer
+                  ) == RimeAISherpaOnnxStatusSuccess,
+                  let recognizer
+            else {
+                throw SherpaOnnxProductBackendError
+                    .recognizerInitializationFailed
+            }
+        }
+        guard let recognizer
+        else {
+            throw SherpaOnnxProductBackendError
+                .recognizerInitializationFailed
+        }
+        var stream: OpaquePointer?
+        guard RimeAISherpaOnnxCreateOnlineStream(
+                  recognizer,
+                  &stream
+              ) == RimeAISherpaOnnxStatusSuccess,
+              let stream
+        else {
+            _ = RimeAISherpaOnnxDestroyOnlineRecognizer(recognizer)
+            throw SherpaOnnxProductBackendError.streamInitializationFailed
+        }
+        return SherpaOnnxCRecognizer(
+            recognizer: recognizer,
+            stream: stream
+        )
+    }
+
+    /// 构造 sherpa C 配置的 pathname/标量部分（不含模型缓冲字段）。
+    private static func makeBaseCConfiguration(
+        _ configuration: SherpaOnnxRecognizerConfiguration,
+        strings: SherpaOnnxCStringArena
+    ) throws -> SherpaOnnxOnlineRecognizerConfig {
         var config = SherpaOnnxOnlineRecognizerConfig()
         config.feat_config.sample_rate = Int32(
             configuration.sampleRateHertz
@@ -1635,9 +1824,9 @@ private struct SystemSherpaOnnxRuntime:
         config.feat_config.feature_dim = Int32(
             configuration.featureDimension
         )
-        if configuration.modelType
+        let isParaformer = configuration.modelType
             == VoiceASRArtifactManifest.Runtime.ModelType.paraformer.rawValue
-        {
+        if isParaformer {
             config.model_config.paraformer.encoder = try strings.copy(
                 configuration.encoderPath
             )
@@ -1691,31 +1880,91 @@ private struct SystemSherpaOnnxRuntime:
             configuration.rule3MinimumUtteranceSeconds
         config.hotwords_score = configuration.hotwordsScore
         config.blank_penalty = configuration.blankPenalty
+        return config
+    }
 
-        var recognizer: OpaquePointer?
-        guard RimeAISherpaOnnxCreateOnlineRecognizer(
-                  &config,
-                  &recognizer
-              ) == RimeAISherpaOnnxStatusSuccess,
-              let recognizer
+    /// SECURITY-001：解析模型字节缓冲。任一 *_bytes 非空时全组必须非空
+    /// （fail-closed：部分装载抛错，防静默回退 pathname 造成安全错觉）；
+    /// 全组非空时 recognizer 从内存构造，ORT 不再 open 任何模型/tokens
+    /// pathname。全组为 nil 时保持 snapshot pathname 回退路径。
+    private static func resolveModelBuffers(
+        _ configuration: SherpaOnnxRecognizerConfiguration
+    ) throws -> (
+        buffers: [Data], bufferMode: Bool, isParaformer: Bool
+    ) {
+        let isParaformer = configuration.modelType
+            == VoiceASRArtifactManifest.Runtime.ModelType.paraformer.rawValue
+        let anyPresent = configuration.encoderBytes != nil
+            || configuration.decoderBytes != nil
+            || configuration.joinerBytes != nil
+            || configuration.tokensBytes != nil
+        guard anyPresent else {
+            return ([], false, isParaformer)
+        }
+        guard let encoderBytes = configuration.encoderBytes,
+              let decoderBytes = configuration.decoderBytes,
+              let tokensBytes = configuration.tokensBytes
         else {
             throw SherpaOnnxProductBackendError
                 .recognizerInitializationFailed
         }
-        var stream: OpaquePointer?
-        guard RimeAISherpaOnnxCreateOnlineStream(
-                  recognizer,
-                  &stream
-              ) == RimeAISherpaOnnxStatusSuccess,
-              let stream
-        else {
-            _ = RimeAISherpaOnnxDestroyOnlineRecognizer(recognizer)
-            throw SherpaOnnxProductBackendError.streamInitializationFailed
+        if isParaformer {
+            return (
+                [encoderBytes, decoderBytes, tokensBytes], true, true
+            )
         }
-        return SherpaOnnxCRecognizer(
-            recognizer: recognizer,
-            stream: stream
+        guard let joinerBytes = configuration.joinerBytes else {
+            throw SherpaOnnxProductBackendError
+                .recognizerInitializationFailed
+        }
+        return (
+            [encoderBytes, decoderBytes, joinerBytes, tokensBytes],
+            true,
+            false
         )
+    }
+
+    /// 在 pinned 作用域内把模型字节指针写入 C 配置的 *_buf 字段。
+    /// 仅可从 withModelBytesPinned 的 body 闭包调用（指针不逃逸）。
+    private static func applyModelBuffers(
+        _ config: inout SherpaOnnxOnlineRecognizerConfig,
+        pinned: [UnsafeRawBufferPointer],
+        isParaformer: Bool
+    ) {
+        config.model_config.tokens_buf = pinned
+            .last?.baseAddress?
+            .assumingMemoryBound(to: CChar.self)
+        config.model_config.tokens_buf_size = Int32(
+            pinned.last?.count ?? 0
+        )
+        if isParaformer {
+            config.model_config.paraformer.encoder_buf = pinned[0]
+                .baseAddress?.assumingMemoryBound(to: CChar.self)
+            config.model_config.paraformer.encoder_buf_size = Int32(
+                pinned[0].count
+            )
+            config.model_config.paraformer.decoder_buf = pinned[1]
+                .baseAddress?.assumingMemoryBound(to: CChar.self)
+            config.model_config.paraformer.decoder_buf_size = Int32(
+                pinned[1].count
+            )
+        } else {
+            config.model_config.transducer.encoder_buf = pinned[0]
+                .baseAddress?.assumingMemoryBound(to: CChar.self)
+            config.model_config.transducer.encoder_buf_size = Int32(
+                pinned[0].count
+            )
+            config.model_config.transducer.decoder_buf = pinned[1]
+                .baseAddress?.assumingMemoryBound(to: CChar.self)
+            config.model_config.transducer.decoder_buf_size = Int32(
+                pinned[1].count
+            )
+            config.model_config.transducer.joiner_buf = pinned[2]
+                .baseAddress?.assumingMemoryBound(to: CChar.self)
+            config.model_config.transducer.joiner_buf_size = Int32(
+                pinned[2].count
+            )
+        }
     }
 }
 
@@ -1735,6 +1984,40 @@ private final class SherpaOnnxCStringArena {
         for pointer in pointers {
             free(pointer)
         }
+    }
+}
+
+/// SECURITY-001：把每个 Data 依次 pin（withUnsafeBytes）并在全部指针同期
+/// 存活的闭包作用域内执行 body——模型字节指针只在
+/// SherpaOnnxCreateOnlineRecognizer 调用期间被 deref（fork 合同：buffer
+/// 生命周期仅需覆盖构造调用），指针不逃逸闭包。
+private func withModelBytesPinned<R>(
+    _ buffers: [Data],
+    _ body: ([UnsafeRawBufferPointer]) throws -> R
+) rethrows -> R {
+    // 嵌套函数不能标注 rethrows，故按固定组数展开（paraformer 3 /
+    // transducer 4）。指针不逃逸 body 闭包。
+    switch buffers.count {
+    case 3:
+        return try buffers[0].withUnsafeBytes { a in
+            try buffers[1].withUnsafeBytes { b in
+                try buffers[2].withUnsafeBytes { c in
+                    try body([a, b, c])
+                }
+            }
+        }
+    case 4:
+        return try buffers[0].withUnsafeBytes { a in
+            try buffers[1].withUnsafeBytes { b in
+                try buffers[2].withUnsafeBytes { c in
+                    try buffers[3].withUnsafeBytes { d in
+                        try body([a, b, c, d])
+                    }
+                }
+            }
+        }
+    default:
+        preconditionFailure("unexpected model buffer count \(buffers.count)")
     }
 }
 

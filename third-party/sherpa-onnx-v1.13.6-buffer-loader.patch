@@ -1,0 +1,322 @@
+diff --git a/sherpa-onnx/c-api/c-api.cc b/sherpa-onnx/c-api/c-api.cc
+index 8e80db9..12b095c 100644
+--- a/sherpa-onnx/c-api/c-api.cc
++++ b/sherpa-onnx/c-api/c-api.cc
+@@ -109,6 +109,40 @@ static sherpa_onnx::OnlineRecognizerConfig GetOnlineRecognizerConfig(
+   recognizer_config.model_config.paraformer.decoder =
+       SHERPA_ONNX_OR(config->model_config.paraformer.decoder, "");
+ 
++  // SECURITY-001 (RimeAI frozen fork): copy caller-verified in-memory model
++  // bytes into the csrc config; the C buffers only need to stay valid for
++  // the duration of this call.
++  if (config->model_config.transducer.encoder_buf &&
++      config->model_config.transducer.encoder_buf_size > 0) {
++    recognizer_config.model_config.transducer.encoder_buf = std::string(
++        config->model_config.transducer.encoder_buf,
++        config->model_config.transducer.encoder_buf_size);
++  }
++  if (config->model_config.transducer.decoder_buf &&
++      config->model_config.transducer.decoder_buf_size > 0) {
++    recognizer_config.model_config.transducer.decoder_buf = std::string(
++        config->model_config.transducer.decoder_buf,
++        config->model_config.transducer.decoder_buf_size);
++  }
++  if (config->model_config.transducer.joiner_buf &&
++      config->model_config.transducer.joiner_buf_size > 0) {
++    recognizer_config.model_config.transducer.joiner_buf = std::string(
++        config->model_config.transducer.joiner_buf,
++        config->model_config.transducer.joiner_buf_size);
++  }
++  if (config->model_config.paraformer.encoder_buf &&
++      config->model_config.paraformer.encoder_buf_size > 0) {
++    recognizer_config.model_config.paraformer.encoder_buf = std::string(
++        config->model_config.paraformer.encoder_buf,
++        config->model_config.paraformer.encoder_buf_size);
++  }
++  if (config->model_config.paraformer.decoder_buf &&
++      config->model_config.paraformer.decoder_buf_size > 0) {
++    recognizer_config.model_config.paraformer.decoder_buf = std::string(
++        config->model_config.paraformer.decoder_buf,
++        config->model_config.paraformer.decoder_buf_size);
++  }
++
+   recognizer_config.model_config.zipformer2_ctc.model =
+       SHERPA_ONNX_OR(config->model_config.zipformer2_ctc.model, "");
+ 
+diff --git a/sherpa-onnx/c-api/c-api.h b/sherpa-onnx/c-api/c-api.h
+index 3d464a6..fcfd51a 100644
+--- a/sherpa-onnx/c-api/c-api.h
++++ b/sherpa-onnx/c-api/c-api.h
+@@ -188,6 +188,24 @@ typedef struct SherpaOnnxOnlineTransducerModelConfig {
+   const char *decoder;
+   /** Path to the joiner ONNX model. */
+   const char *joiner;
++  /**
++   * SECURITY-001 (RimeAI frozen fork): in-memory encoder bytes. When set
++   * (with @c encoder_buf_size > 0) @c encoder is ignored and the model is
++   * built from this buffer; ORT never opens a pathname. The buffer only
++   * needs to stay valid for the duration of the
++   * @c SherpaOnnxCreateOnlineRecognizer call.
++   */
++  const char *encoder_buf;
++  /** Size in bytes of @c encoder_buf. */
++  int32_t encoder_buf_size;
++  /** In-memory decoder bytes; see @c encoder_buf. */
++  const char *decoder_buf;
++  /** Size in bytes of @c decoder_buf. */
++  int32_t decoder_buf_size;
++  /** In-memory joiner bytes; see @c encoder_buf. */
++  const char *joiner_buf;
++  /** Size in bytes of @c joiner_buf. */
++  int32_t joiner_buf_size;
+ } SherpaOnnxOnlineTransducerModelConfig;
+ 
+ /**
+@@ -202,6 +220,17 @@ typedef struct SherpaOnnxOnlineParaformerModelConfig {
+   const char *encoder;
+   /** Path to the decoder ONNX model. */
+   const char *decoder;
++  /**
++   * SECURITY-001 (RimeAI frozen fork): in-memory encoder bytes; see
++   * SherpaOnnxOnlineTransducerModelConfig::encoder_buf.
++   */
++  const char *encoder_buf;
++  /** Size in bytes of @c encoder_buf. */
++  int32_t encoder_buf_size;
++  /** In-memory decoder bytes; see @c encoder_buf. */
++  const char *decoder_buf;
++  /** Size in bytes of @c decoder_buf. */
++  int32_t decoder_buf_size;
+ } SherpaOnnxOnlineParaformerModelConfig;
+ 
+ /**
+diff --git a/sherpa-onnx/csrc/online-paraformer-model-config.cc b/sherpa-onnx/csrc/online-paraformer-model-config.cc
+index a2ee802..947fc6a 100644
+--- a/sherpa-onnx/csrc/online-paraformer-model-config.cc
++++ b/sherpa-onnx/csrc/online-paraformer-model-config.cc
+@@ -19,6 +19,16 @@ void OnlineParaformerModelConfig::Register(ParseOptions *po) {
+ }
+ 
+ bool OnlineParaformerModelConfig::Validate() const {
++  if (!encoder_buf.empty() || !decoder_buf.empty()) {
++    if (encoder_buf.empty() || decoder_buf.empty()) {
++      SHERPA_ONNX_LOGE(
++          "Please provide both paraformer buffers (encoder/decoder) when "
++          "using in-memory buffers");
++      return false;
++    }
++    return true;
++  }
++
+   if (!FileExists(encoder)) {
+     SHERPA_ONNX_LOGE("Paraformer encoder '%s' does not exist", encoder.c_str());
+     return false;
+diff --git a/sherpa-onnx/csrc/online-paraformer-model-config.h b/sherpa-onnx/csrc/online-paraformer-model-config.h
+index 29f33e4..6e632b0 100644
+--- a/sherpa-onnx/csrc/online-paraformer-model-config.h
++++ b/sherpa-onnx/csrc/online-paraformer-model-config.h
+@@ -13,6 +13,10 @@ namespace sherpa_onnx {
+ struct OnlineParaformerModelConfig {
+   std::string encoder;
+   std::string decoder;
++  // SECURITY-001 (RimeAI frozen fork): in-memory model bytes; see
++  // OnlineTransducerModelConfig::encoder_buf.
++  std::string encoder_buf;
++  std::string decoder_buf;
+ 
+   OnlineParaformerModelConfig() = default;
+ 
+diff --git a/sherpa-onnx/csrc/online-paraformer-model.cc b/sherpa-onnx/csrc/online-paraformer-model.cc
+index 4ca2f0d..bad6375 100644
+--- a/sherpa-onnx/csrc/online-paraformer-model.cc
++++ b/sherpa-onnx/csrc/online-paraformer-model.cc
+@@ -35,13 +35,26 @@ class OnlineParaformerModel::Impl {
+         env_(ORT_LOGGING_LEVEL_ERROR),
+         sess_opts_(GetSessionOptions(config)),
+         allocator_{} {
+-    encoder_sess_ = std::make_unique<Ort::Session>(
+-        env_, SHERPA_ONNX_TO_ORT_PATH(config.paraformer.encoder), sess_opts_);
+-    InitEncoder(nullptr, 0);
++    if (!config.paraformer.encoder_buf.empty()) {
++      // SECURITY-001 (RimeAI frozen fork): verified in-memory bytes.
++      InitEncoder(
++          const_cast<char *>(config.paraformer.encoder_buf.data()),
++          config.paraformer.encoder_buf.size());
++    } else {
++      encoder_sess_ = std::make_unique<Ort::Session>(
++          env_, SHERPA_ONNX_TO_ORT_PATH(config.paraformer.encoder), sess_opts_);
++      InitEncoder(nullptr, 0);
++    }
+ 
+-    decoder_sess_ = std::make_unique<Ort::Session>(
+-        env_, SHERPA_ONNX_TO_ORT_PATH(config.paraformer.decoder), sess_opts_);
+-    InitDecoder(nullptr, 0);
++    if (!config.paraformer.decoder_buf.empty()) {
++      InitDecoder(
++          const_cast<char *>(config.paraformer.decoder_buf.data()),
++          config.paraformer.decoder_buf.size());
++    } else {
++      decoder_sess_ = std::make_unique<Ort::Session>(
++          env_, SHERPA_ONNX_TO_ORT_PATH(config.paraformer.decoder), sess_opts_);
++      InitDecoder(nullptr, 0);
++    }
+   }
+ 
+   template <typename Manager>
+diff --git a/sherpa-onnx/csrc/online-transducer-model-config.cc b/sherpa-onnx/csrc/online-transducer-model-config.cc
+index aaafc8a..44e16a3 100644
+--- a/sherpa-onnx/csrc/online-transducer-model-config.cc
++++ b/sherpa-onnx/csrc/online-transducer-model-config.cc
+@@ -106,6 +106,21 @@ bool OnlineTransducerModelConfig::Validate() const {
+     return qnn_config.Validate();
+   }
+ 
++  if (!encoder_buf.empty() || !decoder_buf.empty() || !joiner_buf.empty()) {
++    if (uses_qnn) {
++      SHERPA_ONNX_LOGE(
++          "In-memory transducer buffers are not supported with QNN");
++      return false;
++    }
++    if (encoder_buf.empty() || decoder_buf.empty() || joiner_buf.empty()) {
++      SHERPA_ONNX_LOGE(
++          "Please provide all three transducer buffers (encoder/decoder/"
++          "joiner) when using in-memory buffers");
++      return false;
++    }
++    return true;
++  }
++
+   if (!FileExists(encoder)) {
+     SHERPA_ONNX_LOGE("transducer encoder: '%s' does not exist",
+                      encoder.c_str());
+diff --git a/sherpa-onnx/csrc/online-transducer-model-config.h b/sherpa-onnx/csrc/online-transducer-model-config.h
+index 66e8e5a..2641221 100644
+--- a/sherpa-onnx/csrc/online-transducer-model-config.h
++++ b/sherpa-onnx/csrc/online-transducer-model-config.h
+@@ -16,6 +16,13 @@ struct OnlineTransducerModelConfig {
+   std::string encoder;
+   std::string decoder;
+   std::string joiner;
++  // SECURITY-001 (RimeAI frozen fork): in-memory model bytes. When a _buf
++  // field is non-empty the corresponding pathname is ignored and the model
++  // is constructed from the buffer, so ORT never opens a path the caller
++  // cannot keep stable across the verify->load window.
++  std::string encoder_buf;
++  std::string decoder_buf;
++  std::string joiner_buf;
+   QnnConfig qnn_config;
+ 
+   OnlineTransducerModelConfig() = default;
+diff --git a/sherpa-onnx/csrc/online-zipformer-transducer-model.cc b/sherpa-onnx/csrc/online-zipformer-transducer-model.cc
+index a5a9d46..b6f8fa9 100644
+--- a/sherpa-onnx/csrc/online-zipformer-transducer-model.cc
++++ b/sherpa-onnx/csrc/online-zipformer-transducer-model.cc
+@@ -39,17 +39,34 @@ OnlineZipformerTransducerModel::OnlineZipformerTransducerModel(
+       config_(config),
+       sess_opts_(GetSessionOptions(config)),
+       allocator_{} {
+-  encoder_sess_ = std::make_unique<Ort::Session>(
+-      env_, SHERPA_ONNX_TO_ORT_PATH(config.transducer.encoder), sess_opts_);
+-  InitEncoder(nullptr, 0);
++  if (!config.transducer.encoder_buf.empty()) {
++    // SECURITY-001 (RimeAI frozen fork): construct from verified in-memory
++    // bytes; ORT never opens a pathname here.
++    InitEncoder(const_cast<char *>(config.transducer.encoder_buf.data()),
++                config.transducer.encoder_buf.size());
++  } else {
++    encoder_sess_ = std::make_unique<Ort::Session>(
++        env_, SHERPA_ONNX_TO_ORT_PATH(config.transducer.encoder), sess_opts_);
++    InitEncoder(nullptr, 0);
++  }
+ 
+-  decoder_sess_ = std::make_unique<Ort::Session>(
+-      env_, SHERPA_ONNX_TO_ORT_PATH(config.transducer.decoder), sess_opts_);
+-  InitDecoder(nullptr, 0);
++  if (!config.transducer.decoder_buf.empty()) {
++    InitDecoder(const_cast<char *>(config.transducer.decoder_buf.data()),
++                config.transducer.decoder_buf.size());
++  } else {
++    decoder_sess_ = std::make_unique<Ort::Session>(
++        env_, SHERPA_ONNX_TO_ORT_PATH(config.transducer.decoder), sess_opts_);
++    InitDecoder(nullptr, 0);
++  }
+ 
+-  joiner_sess_ = std::make_unique<Ort::Session>(
+-      env_, SHERPA_ONNX_TO_ORT_PATH(config.transducer.joiner), sess_opts_);
+-  InitJoiner(nullptr, 0);
++  if (!config.transducer.joiner_buf.empty()) {
++    InitJoiner(const_cast<char *>(config.transducer.joiner_buf.data()),
++               config.transducer.joiner_buf.size());
++  } else {
++    joiner_sess_ = std::make_unique<Ort::Session>(
++        env_, SHERPA_ONNX_TO_ORT_PATH(config.transducer.joiner), sess_opts_);
++    InitJoiner(nullptr, 0);
++  }
+ }
+ 
+ template <typename Manager>
+diff --git a/sherpa-onnx/csrc/online-zipformer2-transducer-model.cc b/sherpa-onnx/csrc/online-zipformer2-transducer-model.cc
+index d1b1aa9..6c2dc0e 100644
+--- a/sherpa-onnx/csrc/online-zipformer2-transducer-model.cc
++++ b/sherpa-onnx/csrc/online-zipformer2-transducer-model.cc
+@@ -43,17 +43,36 @@ OnlineZipformer2TransducerModel::OnlineZipformer2TransducerModel(
+       joiner_sess_opts_(GetSessionOptions(config, "joiner")),
+       config_(config),
+       allocator_{} {
+-  encoder_sess_ = std::make_unique<Ort::Session>(
+-      env_, SHERPA_ONNX_TO_ORT_PATH(config.transducer.encoder), encoder_sess_opts_);
+-  InitEncoder(nullptr, 0);
++  if (!config.transducer.encoder_buf.empty()) {
++    // SECURITY-001 (RimeAI frozen fork): verified in-memory bytes.
++    InitEncoder(
++        const_cast<char *>(config.transducer.encoder_buf.data()),
++        config.transducer.encoder_buf.size());
++  } else {
++    encoder_sess_ = std::make_unique<Ort::Session>(
++        env_, SHERPA_ONNX_TO_ORT_PATH(config.transducer.encoder), encoder_sess_opts_);
++    InitEncoder(nullptr, 0);
++  }
+ 
+-  decoder_sess_ = std::make_unique<Ort::Session>(
+-      env_, SHERPA_ONNX_TO_ORT_PATH(config.transducer.decoder), decoder_sess_opts_);
+-  InitDecoder(nullptr, 0);
++  if (!config.transducer.decoder_buf.empty()) {
++    InitDecoder(
++        const_cast<char *>(config.transducer.decoder_buf.data()),
++        config.transducer.decoder_buf.size());
++  } else {
++    decoder_sess_ = std::make_unique<Ort::Session>(
++        env_, SHERPA_ONNX_TO_ORT_PATH(config.transducer.decoder), decoder_sess_opts_);
++    InitDecoder(nullptr, 0);
++  }
+ 
+-  joiner_sess_ = std::make_unique<Ort::Session>(
+-      env_, SHERPA_ONNX_TO_ORT_PATH(config.transducer.joiner), joiner_sess_opts_);
+-  InitJoiner(nullptr, 0);
++  if (!config.transducer.joiner_buf.empty()) {
++    InitJoiner(
++        const_cast<char *>(config.transducer.joiner_buf.data()),
++        config.transducer.joiner_buf.size());
++  } else {
++    joiner_sess_ = std::make_unique<Ort::Session>(
++        env_, SHERPA_ONNX_TO_ORT_PATH(config.transducer.joiner), joiner_sess_opts_);
++    InitJoiner(nullptr, 0);
++  }
+ }
+ 
+ template <typename Manager>
+diff --git a/sherpa-onnx/csrc/version.cc b/sherpa-onnx/csrc/version.cc
+index aeec5fc..c43a40b 100644
+--- a/sherpa-onnx/csrc/version.cc
++++ b/sherpa-onnx/csrc/version.cc
+@@ -14,7 +14,9 @@ const char *GetGitDate() {
+ }
+ 
+ const char *GetGitSha1() {
+-  static const char *sha1 = "db6866c7";
++  // RimeAI frozen fork of v1.13.6 (tag commit 1cb484af) + the
++  // SECURITY-001 model-buffer loader patch.
++  static const char *sha1 = "1cb484af-rimeai-buffer";
+   return sha1;
+ }
+ 

@@ -120,9 +120,12 @@ let package = Package(
             path: "macos/Native/RimeAIMacRuntime.xcframework"
         ),
         .binaryTarget(
+            // SECURITY-001：冻结 fork（v1.13.6 + 模型 buffer 补丁）——本地构建，
+            // 补丁见 third-party/sherpa-onnx-v1.13.6-buffer-loader.patch，
+            // 重建脚本 script/build_sherpa_fork.sh。上游 v1.13.8 及 master 均无
+            // 模型 buffer API（仅 tokens_buf），升级不消除 pathname TOCTOU 窗口。
             name: "SherpaOnnxMacOS",
-            url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/xcframework/sherpa-onnx-v1.13.6-macos-static.xcframework.zip",
-            checksum: "ef8fa1ae6a7764b8d80a79ab66a49d553b40af2df7dd18b08b8559cdca3a1b1e"
+            path: "macos/Native/SherpaOnnxMacOS-fork.xcframework"
         ),
         .binaryTarget(
             name: "OnnxruntimeMacOS",
