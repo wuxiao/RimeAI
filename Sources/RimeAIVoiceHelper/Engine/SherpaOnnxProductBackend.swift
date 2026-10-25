@@ -1838,13 +1838,14 @@ private struct SystemSherpaOnnxRuntime:
         )
     }
 
-    /// 构造 sherpa C 配置的 pathname/标量部分（不含模型缓冲字段）。
-    /// 构建除模型缓冲外的 C 配置基础字段。buffer 模式下模型/tokens
-    /// pathname 一律传空串：上游 OnlineModelConfig::Validate 拒绝
-    /// tokens_buf 与 tokens 文件同时存在，且模型级 Validate 在缓冲
-    /// 非空时早退不触碰路径——清空路径既通过校验，也在结构上保证
-    /// “buffer 模式无 pathname 跨越 C 边界”。bpe_vocab 无上游 buffer
-    /// API，保留路径（SECURITY-001 已注明的例外）。
+    /// 构建除模型缓冲外的 C 配置基础字段。buffer 模式下五个模型文件
+    /// （encoder/decoder/joiner/tokens/bpe_vocab）的 pathname 一律传
+    /// 空串：上游 OnlineModelConfig::Validate 拒绝 tokens_buf/bpe_vocab_buf
+    /// 与同名文件同时存在，且模型级 Validate 在缓冲非空时早退不触碰
+    /// 路径——清空路径既通过校验，也在结构上保证“buffer 模式无 pathname
+    /// 跨越 C 边界”，SECURITY-001 无任何文件例外（fork 提供
+    /// bpe_vocab_buf：C API 字段 + Validate buf 分支 + Ssentencepiece
+    /// 从已验证内存字节构造）。
     private static func makeBaseCConfiguration(
         _ configuration: SherpaOnnxRecognizerConfiguration,
         strings: SherpaOnnxCStringArena,
