@@ -252,22 +252,26 @@ def test_e2e_fails_on_nonunity_overall_metric():
 
 
 def test_e2e_fails_on_nonunity_repair_chain_metric():
-    """KBD-008 回修链指标：报告中存在时必须为 1.0。"""
+    """KBD-008 回修链指标（← 焦点回移腿）：报告中存在时必须为 1.0。"""
     report = json.loads(json.dumps(E2E_PASS))
     report["metrics"].update(
-        repair_prefix_preserved=1.0,
-        repair_remaining_pinyin=0.5,
+        repair_focus_moved_left=1.0,
+        repair_suffix_repushed=1.0,
+        repair_prefix_revised=1.0,
+        repair_single_commit=0.5,
         repair_committed=1.0,
     )
     assert gates.check_e2e(report)["verdict"] == "fail"
 
 
 def test_e2e_passes_with_full_unity_repair_chain_metrics():
-    """三项回修链指标全部 1.0 时门禁通过。"""
+    """五项回修链指标全部 1.0 时门禁通过。"""
     report = json.loads(json.dumps(E2E_PASS))
     report["metrics"].update(
-        repair_prefix_preserved=1.0,
-        repair_remaining_pinyin=1.0,
+        repair_focus_moved_left=1.0,
+        repair_suffix_repushed=1.0,
+        repair_prefix_revised=1.0,
+        repair_single_commit=1.0,
         repair_committed=1.0,
     )
     assert gates.check_e2e(report)["verdict"] == "pass"

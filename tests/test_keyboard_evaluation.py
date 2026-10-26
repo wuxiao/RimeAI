@@ -85,8 +85,10 @@ def test_keyboard_report_separates_pool_accuracy_and_interaction_metrics(tmp_pat
         "accepted": 0.833333,
         "reverted": 1.0,
         "backspace_cleared": 1.0,
-        "repair_prefix_preserved": 0.0,
-        "repair_remaining_pinyin": 0.0,
+        "repair_focus_moved_left": 0.0,
+        "repair_suffix_repushed": 0.0,
+        "repair_prefix_revised": 0.0,
+        "repair_single_commit": 0.0,
         "repair_committed": 0.0,
     }
     assert report["interactions"] == {
@@ -119,11 +121,16 @@ def test_keyboard_report_includes_repair_chain_metrics(tmp_path):
         if scenario["category"] == "partial-selection":
             record.update(
                 repair_probe=True,
-                repair_prefix_preserved=True,
-                repair_remaining_shrunk=True,
+                repair_focus_moved_left=True,
+                repair_suffix_repushed=True,
+                repair_prefix_revised=True,
+                repair_single_commit=True,
                 repair_committed=True,
-                repair_mid_text_before="明天tianqi",
-                repair_mid_text_after="明天tian",
+                repair_pre_arrow_text="明天tianqi",
+                repair_post_arrow_text="mingtian天气",
+                repair_revised_text="mingti天气",
+                repair_restored_text="mingtian天气",
+                repair_undo_steps=2,
             )
         records.append(record)
     repair_count = sum(
@@ -149,13 +156,23 @@ def test_keyboard_report_includes_repair_chain_metrics(tmp_path):
     assert result.returncode == 0, result.stderr
     report = json.loads(result.stdout)
     assert report["interactions"]["repair_samples"] == repair_count
-    assert report["metrics"]["repair_prefix_preserved"] == 1.0
-    assert report["metrics"]["repair_remaining_pinyin"] == 1.0
-    assert report["metrics"]["repair_committed"] == 1.0
+    for metric in (
+        "repair_focus_moved_left",
+        "repair_suffix_repushed",
+        "repair_prefix_revised",
+        "repair_single_commit",
+        "repair_committed",
+    ):
+        assert report["metrics"][metric] == 1.0
     partial_slice = report["slices"]["partial-selection"]
-    assert partial_slice["repair_prefix_preserved"] == 1.0
-    assert partial_slice["repair_remaining_pinyin"] == 1.0
-    assert partial_slice["repair_committed"] == 1.0
+    for metric in (
+        "repair_focus_moved_left",
+        "repair_suffix_repushed",
+        "repair_prefix_revised",
+        "repair_single_commit",
+        "repair_committed",
+    ):
+        assert partial_slice[metric] == 1.0
 
 
 def test_keyboard_report_requires_repair_outcomes(tmp_path):
@@ -177,7 +194,68 @@ def test_keyboard_report_requires_repair_outcomes(tmp_path):
     )
 
     assert result.returncode == 2
-    assert "repair_prefix_preserved must be a boolean" in result.stderr
+    assert "repair_focus_moved_left must be a boolean" in result.stderr
+
+
+REPAIR_SCENARIO = {
+    "id": "keyboard-partial-repair-mingtiantianqi",
+    "category": "partial-selection",
+    "pool_text": "明天",
+    "expected_text": "明天天气",
+    "backspace_count": 2,
+}
+
+
+def test_repair_outcome_discriminates_retained_preedit_from_legacy_commit():
+    """The <-arrow evidence must separate the retained-preedit path
+    from the legacy fallback that commits the prefix to the document
+    early — even when the final string is identical (audit fix 2)."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "collect_keyboard_evaluation",
+        PROJECT_ROOT / "tools" / "collect_keyboard_evaluation.py",
+    )
+    assert spec is not None and spec.loader is not None
+    collector = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(collector)
+
+    retained = collector.evaluate_repair_outcome(
+        REPAIR_SCENARIO,
+        pre_arrow="明天tianqi",
+        post_arrow="mingtian天气",
+        revised="mingti天气",
+        restored="mingtian天气",
+        final_text="明天天气",
+        undo_steps=2,
+    )
+    assert retained == {
+        "repair_focus_moved_left": True,
+        "repair_suffix_repushed": True,
+        "repair_prefix_revised": True,
+        "repair_single_commit": True,
+        "repair_committed": True,
+    }
+
+    # 旧回退路径：前缀已提前提交 → canMoveFocusLeft=false，← 透传仅
+    # 移动光标（文本不变）；文档多一次插入（undo ≥ 3）；退格作用于
+    # 文档而非焦点段拼音；但最终字符串仍可能是整句（最终提交补齐）。
+    bypassed = collector.evaluate_repair_outcome(
+        REPAIR_SCENARIO,
+        pre_arrow="明天tianqi",
+        post_arrow="明天tianqi",
+        revised="明天tianq",
+        restored="明天tianqi",
+        final_text="明天天气",
+        undo_steps=3,
+    )
+    assert bypassed == {
+        "repair_focus_moved_left": False,
+        "repair_suffix_repushed": False,
+        "repair_prefix_revised": False,
+        "repair_single_commit": False,
+        "repair_committed": True,
+    }
 
 
 def test_keyboard_report_requires_every_frozen_category(tmp_path):

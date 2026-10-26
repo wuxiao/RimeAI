@@ -300,10 +300,12 @@ def check_e2e(report: dict[str, Any]) -> dict[str, Any]:
         "accepted",
         "reverted",
         "backspace_cleared",
-        # KBD-008 回修链指标：报告含该指标时必须为 1.0；旧报告无此键
-        # 则跳过（向后兼容）。
-        "repair_prefix_preserved",
-        "repair_remaining_pinyin",
+        # KBD-008 回修链指标（← 焦点回移腿）：报告含该指标时必须为
+        # 1.0；旧报告无此键则跳过（向后兼容）。
+        "repair_focus_moved_left",
+        "repair_suffix_repushed",
+        "repair_prefix_revised",
+        "repair_single_commit",
         "repair_committed",
     ):
         value = overall.get(name)

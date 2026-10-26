@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Collect a frozen RimeAI keyboard interaction observation set on macOS."""
 
+from __future__ import annotations
+
 import argparse
 import contextlib
 import json
@@ -77,6 +79,7 @@ def send_key(key: str) -> None:
         "tab": "key code 48",
         "backspace": "key code 51",
         "return": "key code 36",
+        "left": "key code 123",
     }
     command = commands.get(normalized)
     if command is None:
@@ -111,6 +114,49 @@ def type_composition(scenario: dict[str, Any]) -> None:
 def select_keys(keys: Sequence[str]) -> None:
     for key in keys:
         send_key(key)
+
+
+def read_panel_button_titles() -> list[str]:
+    script = (
+        'tell application "System Events"\n'
+        'tell process "RimeAIInputMethod"\n'
+        "if (count of windows) > 0 then\n"
+        "set titles to {}\n"
+        "repeat with theButton in buttons of window 1\n"
+        "try\n"
+        "copy (title of theButton) to end of titles\n"
+        "end try\n"
+        "end repeat\n"
+        "end if\n"
+        "set output to \"\"\n"
+        "repeat with theTitle in titles\n"
+        "set output to output & theTitle & linefeed\n"
+        "end repeat\n"
+        "return output\n"
+        "end tell\n"
+        "end tell"
+    )
+    return [
+        line.strip()
+        for line in run_apple_script(script).splitlines()
+        if line.strip()
+    ]
+
+
+def pool_slot_button(pool_text: str) -> str | None:
+    """Return the numbered button whose candidate equals pool_text.
+
+    Panel slot numbers are the ground truth for numeric selection: the
+    semantic suggestion row occupies leading slots when the pipeline is
+    active, shifting numbered candidates (the 2026-10-25 mix1 drift).
+    Matching the exact numbered button avoids selecting the wrong
+    candidate with a hardcoded key.
+    """
+    for title in read_panel_button_titles():
+        match = NUMBERED_CANDIDATE.match(title)
+        if match and match.group(2) == pool_text:
+            return match.group(1)
+    return None
 
 
 def displayed_candidates() -> tuple[list[str], str]:
@@ -179,6 +225,78 @@ def undo_until_empty(max_attempts: int = 3) -> str:
         time.sleep(0.4)
         text = read_document()
     return text
+
+
+def count_undo_steps_to_empty(max_steps: int = 5) -> int:
+    """Count Cmd+Z presses needed to reach an empty document.
+
+    Single-commit receipt for the repair probe (KBD-008): a commit
+    that went through the retained-preedit path collapses in at most
+    two undo steps on macOS 26 TextEdit (marked insertion + commit
+    replacement), while the legacy fallback that commits the prefix
+    to the document early leaves an extra undoable insertion behind
+    (>= 3 steps).
+    """
+    steps = 0
+    for _ in range(max_steps):
+        if read_document() == "":
+            return steps
+        undo()
+        steps += 1
+        time.sleep(0.4)
+    return steps
+
+
+def evaluate_repair_outcome(
+    scenario: dict[str, Any],
+    *,
+    pre_arrow: str,
+    post_arrow: str,
+    revised: str,
+    restored: str,
+    final_text: str,
+    undo_steps: int,
+) -> dict[str, bool]:
+    """Classify the <-arrow repair-chain evidence (pure, testable).
+
+    Discriminating evidence for the retained-preedit path (KBD-008):
+
+    - focus_moved_left: the left arrow rewrote the marked text — the
+      focused prefix segment returns to its pinyin form while the
+      suffix is finalized as Chinese by the KBD-006 repush. On the
+      legacy fallback (prefix already committed to the document)
+      canMoveFocusLeft is false, the arrow passes through to TextEdit
+      as a cursor move, and the visible text is unchanged.
+    - suffix_repushed: the post-arrow text ends with the finalized
+      suffix (expected_text minus the pool prefix), proving the suffix
+      was re-derived as a committed segment rather than left as raw
+      pinyin.
+    - prefix_revised: the backspaces shrank the focused segment by
+      exactly backspace_count characters and retyping restored the
+      post-arrow text (revise-then-restore).
+    - single_commit: the whole sentence collapses within two undo
+      steps; an early prefix commit leaves an extra undoable
+      insertion (>= 3 steps).
+    - committed: the final text equals the expected full sentence.
+
+    The checks are deliberately independent of the final string
+    alone: a bypassed run whose final text happens to match still
+    fails the behavioral checks above.
+    """
+    pool_text = scenario["pool_text"]
+    suffix_text = scenario["expected_text"][len(pool_text):]
+    backspace_count = int(scenario["backspace_count"])
+    expected_revised_length = len(post_arrow) - backspace_count
+    return {
+        "repair_focus_moved_left": post_arrow != pre_arrow,
+        "repair_suffix_repushed": post_arrow.endswith(suffix_text),
+        "repair_prefix_revised": (
+            len(revised) == expected_revised_length
+            and restored == post_arrow
+        ),
+        "repair_single_commit": undo_steps <= 2,
+        "repair_committed": final_text == scenario["expected_text"],
+    }
 
 
 def load_scenarios(path: Path) -> list[dict[str, Any]]:
@@ -261,6 +379,13 @@ def load_scenarios(path: Path) -> list[dict[str, Any]]:
                     f"'{scenario['id']}' needs a non-empty repair_retype "
                     "for the repair probe"
                 )
+            if len(retype) != count:
+                raise KeyboardCollectionError(
+                    f"{path}:{line_number}: scenario "
+                    f"'{scenario['id']}' repair_retype must retype "
+                    "exactly backspace_count letters (revise-then-"
+                    "restore semantics)"
+                )
         identifiers.add(scenario["id"])
         scenarios.append(scenario)
     if {row["category"] for row in scenarios} != set(KEYBOARD_CATEGORIES):
@@ -328,12 +453,20 @@ def collect(
         if candidate_in_pool:
             candidate_rank = candidates.index(scenario["pool_text"]) + 1
             if scenario["category"] != "mixed-composition":
-                # 候选面板每页 5 项，数字键只映射页内槽位：目标在后续
-                # 页时先按 `=`（向后翻页）再按页内数字键。
-                page, slot = divmod(candidate_rank - 1, 5)
-                keys = ["="] * page + (
-                    ["space"] if slot == 0 and page == 0 else [str(slot + 1)]
-                )
+                # 面板按钮编号是数字选词的真实依据：语义行占据前导
+                # 槽位时（10-25 mix1 后的漂移形态）固定键会选错候选，
+                # 先按 pool 文本匹配真实编号槽位，匹配不到再退回
+                # 翻页+槽位的固定键序列。
+                slot_button = pool_slot_button(scenario["pool_text"])
+                if slot_button is not None:
+                    keys = [slot_button]
+                else:
+                    # 候选面板每页 5 项，数字键只映射页内槽位：目标在
+                    # 后续页时先按 `=`（向后翻页）再按页内数字键。
+                    page, slot = divmod(candidate_rank - 1, 5)
+                    keys = ["="] * page + (
+                        ["space"] if slot == 0 and page == 0 else [str(slot + 1)]
+                    )
                 if (
                     scenario["category"] == "partial-selection"
                     and not scenario.get("repair_probe", False)
@@ -346,35 +479,56 @@ def collect(
         time.sleep(0.5)
         final_text = read_document()
 
-        # KBD-008 回修链探针：部分选词后未上屏，此刻文档文本即预编辑
-        # 区中间态（前缀 + 剩余拼音）。← 回修后验证前缀保留与剩余
-        # 拼音收缩，重打尾段后 space 整句上屏。
+        # KBD-008 回修链探针（← 焦点回移腿）：部分选词不上屏 →
+        # ← 把焦点移回前缀段（后缀段由 KBD-006 定稿重推）→ 退格
+        # 修正前缀 → 重打恢复 → space 定稿焦点段 → space 整句上屏。
+        # 判别性证据：焦点回移改变 marked text（旧回退路径前缀已提
+        # 交，← 透传不改文本）；后缀以定稿汉字重推；undo 粒度单次
+        # 提交（≤2 步，旧路径 ≥3 步）。
         repair_probe = bool(scenario.get("repair_probe", False))
-        repair_prefix_preserved = False
-        repair_remaining_shrunk = False
+        repair_focus_moved_left = False
+        repair_suffix_repushed = False
+        repair_prefix_revised = False
+        repair_single_commit = False
         repair_committed = False
-        repair_mid_text_before: str | None = None
-        repair_mid_text_after: str | None = None
+        repair_pre_arrow_text: str | None = None
+        repair_post_arrow_text: str | None = None
+        repair_revised_text: str | None = None
+        repair_restored_text: str | None = None
+        repair_undo_steps: int | None = None
         if repair_probe:
-            repair_mid_text_before = final_text
+            repair_pre_arrow_text = final_text
+            send_key("left")
+            time.sleep(0.8)
+            repair_post_arrow_text = read_document()
             for _ in range(int(scenario["backspace_count"])):
                 send_key("backspace")
-            time.sleep(0.4)
-            repair_mid_text_after = read_document()
-            repair_prefix_preserved = repair_mid_text_after.startswith(
-                scenario["pool_text"]
-            )
-            repair_remaining_shrunk = (
-                len(repair_mid_text_after)
-                < len(repair_mid_text_before)
-            )
+                time.sleep(0.3)
+            repair_revised_text = read_document()
             for char in scenario["repair_retype"]:
                 send_key(char)
+            time.sleep(0.5)
+            repair_restored_text = read_document()
+            send_key("space")
             time.sleep(0.5)
             send_key("space")
             time.sleep(0.5)
             final_text = read_document()
-            repair_committed = final_text == scenario["expected_text"]
+            repair_undo_steps = count_undo_steps_to_empty()
+            outcome = evaluate_repair_outcome(
+                scenario,
+                pre_arrow=repair_pre_arrow_text,
+                post_arrow=repair_post_arrow_text,
+                revised=repair_revised_text,
+                restored=repair_restored_text,
+                final_text=final_text,
+                undo_steps=repair_undo_steps,
+            )
+            repair_focus_moved_left = outcome["repair_focus_moved_left"]
+            repair_suffix_repushed = outcome["repair_suffix_repushed"]
+            repair_prefix_revised = outcome["repair_prefix_revised"]
+            repair_single_commit = outcome["repair_single_commit"]
+            repair_committed = outcome["repair_committed"]
 
         accepted = (
             scenario["category"] != "delete-composition"
@@ -421,11 +575,16 @@ def collect(
         if text_after_revert is not None:
             record["text_after_revert"] = text_after_revert
         if repair_probe:
-            record["repair_prefix_preserved"] = repair_prefix_preserved
-            record["repair_remaining_shrunk"] = repair_remaining_shrunk
+            record["repair_focus_moved_left"] = repair_focus_moved_left
+            record["repair_suffix_repushed"] = repair_suffix_repushed
+            record["repair_prefix_revised"] = repair_prefix_revised
+            record["repair_single_commit"] = repair_single_commit
             record["repair_committed"] = repair_committed
-            record["repair_mid_text_before"] = repair_mid_text_before
-            record["repair_mid_text_after"] = repair_mid_text_after
+            record["repair_pre_arrow_text"] = repair_pre_arrow_text
+            record["repair_post_arrow_text"] = repair_post_arrow_text
+            record["repair_revised_text"] = repair_revised_text
+            record["repair_restored_text"] = repair_restored_text
+            record["repair_undo_steps"] = repair_undo_steps
         observations.append(record)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
