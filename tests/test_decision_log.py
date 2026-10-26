@@ -355,3 +355,156 @@ def test_close_is_idempotent_and_flushes(tmp_path: Path):
     log.close()
     with sqlite3.connect(tmp_path / "decision_log.db") as db:
         assert db.execute("SELECT COUNT(*) FROM decisions").fetchone()[0] == 1
+
+
+def test_expire_pending_older_than_resolves_only_overdue(tmp_path: Path):
+    log = DecisionLog(tmp_path / "decision_log.db")
+    try:
+        for index in range(3):
+            log.record(
+                source="neural_late",
+                request_id=f"req-orphan-{index}",
+                composition_id="comp",
+                revision=1,
+                pinyin="a",
+                suggestion="x",
+                confidence=None,
+                model_artifact_id=None,
+                created_at_ms=1_000,
+            )
+        log.record(
+            source="neural_late",
+            request_id="req-fresh",
+            composition_id="comp",
+            revision=1,
+            pinyin="a",
+            suggestion="x",
+            confidence=None,
+            model_artifact_id=None,
+            created_at_ms=10_000_000_000_000,
+        )
+        log.record(
+            source="neural_late",
+            request_id="req-adopted-old",
+            composition_id="comp",
+            revision=1,
+            pinyin="a",
+            suggestion="x",
+            confidence=None,
+            model_artifact_id=None,
+            created_at_ms=1_000,
+        )
+        log.resolve(
+            request_id="req-adopted-old",
+            outcome="adopted",
+        )
+        assert log.flush()
+        resolved = log._expire_pending_older_than(
+            5_000, now_ms=20_000_000_000_000
+        )
+        assert resolved == 3
+        with sqlite3.connect(tmp_path / "decision_log.db") as db:
+            rows = dict(
+                db.execute(
+                    "SELECT request_id, outcome FROM decisions"
+                ).fetchall()
+            )
+        assert rows["req-orphan-0"] == "expired"
+        assert rows["req-orphan-1"] == "expired"
+        assert rows["req-orphan-2"] == "expired"
+        # 活跃（新）pending 与非 pending 旧行都不动。
+        assert rows["req-fresh"] == "pending"
+        assert rows["req-adopted-old"] == "adopted"
+        # 幂等：第二次无匹配。
+        assert (
+            log._expire_pending_older_than(
+                5_000, now_ms=20_000_000_000_001
+            )
+            == 0
+        )
+    finally:
+        log.close()
+
+
+def test_expire_pending_cli_dry_run_and_apply(tmp_path: Path):
+    import subprocess
+    import sys as _sys
+
+    db_path = tmp_path / "decision_log.db"
+    log = DecisionLog(db_path)
+    log.record(
+        source="neural_late",
+        request_id="req-orphan",
+        composition_id="comp",
+        revision=1,
+        pinyin="a",
+        suggestion="x",
+        confidence=None,
+        model_artifact_id=None,
+        created_at_ms=1,
+    )
+    log.close()
+    project_root = Path(__file__).resolve().parents[1]
+    dry = subprocess.run(
+        [
+            _sys.executable,
+            "-m",
+            "rimeai_daemon.decision_log",
+            "--db",
+            str(db_path),
+            "--expire-pending-older-than-minutes",
+            "1",
+            "--dry-run",
+        ],
+        cwd=project_root,
+        capture_output=True,
+        text=True,
+    )
+    assert dry.returncode == 0, dry.stderr
+    assert '"would_resolve": 1' in dry.stdout
+    with sqlite3.connect(db_path) as db:
+        assert (
+            db.execute(
+                "SELECT outcome FROM decisions WHERE request_id = 'req-orphan'"
+            ).fetchone()[0]
+            == "pending"
+        )
+    applied = subprocess.run(
+        [
+            _sys.executable,
+            "-m",
+            "rimeai_daemon.decision_log",
+            "--db",
+            str(db_path),
+            "--expire-pending-older-than-minutes",
+            "1",
+        ],
+        cwd=project_root,
+        capture_output=True,
+        text=True,
+    )
+    assert applied.returncode == 0, applied.stderr
+    assert '"resolved": 1' in applied.stdout
+    with sqlite3.connect(db_path) as db:
+        assert (
+            db.execute(
+                "SELECT outcome FROM decisions WHERE request_id = 'req-orphan'"
+            ).fetchone()[0]
+            == "expired"
+        )
+    # 幂等：重跑 resolved=0。
+    rerun = subprocess.run(
+        [
+            _sys.executable,
+            "-m",
+            "rimeai_daemon.decision_log",
+            "--db",
+            str(db_path),
+            "--expire-pending-older-than-minutes",
+            "1",
+        ],
+        cwd=project_root,
+        capture_output=True,
+        text=True,
+    )
+    assert '"resolved": 0' in rerun.stdout

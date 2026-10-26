@@ -58,6 +58,10 @@ ARTIFACT_ID_MAX_CHARS = 128
 DEFAULT_RETENTION_DAYS = 60
 DEFAULT_CAPACITY = 50_000
 DEFAULT_QUEUE_LIMIT = 512
+# 周期性超龄 pending 兜底（LM-003 后续）：真实反馈在秒级到达，
+# 超过 24h 仍 pending 的行必是孤儿（客户端崩溃/会话尾部在途帧/
+# 历史版本无反馈路径），随环形裁剪周期批量收口为 expired。
+PENDING_STALE_AFTER_MS = 24 * 3_600_000
 
 _DDL = """
 PRAGMA journal_mode=WAL;
@@ -259,6 +263,9 @@ class DecisionLog:
                 # freshly created logs, would prune their only row).
                 if handled % 1_024 == 0:
                     self._prune()
+                    self._expire_pending_older_than(
+                        _now_ms() - PENDING_STALE_AFTER_MS
+                    )
             except sqlite3.Error:
                 # Sensing must never crash the daemon: log, drop, move on.
                 logging.getLogger(__name__).exception(
@@ -352,3 +359,99 @@ class DecisionLog:
         removed += max(0, cursor.rowcount)
         self._connection.commit()
         return removed
+
+    def _expire_pending_older_than(
+        self, cutoff_ms: int, *, now_ms: int | None = None
+    ) -> int:
+        """Batch-resolve overdue pending rows to ``expired`` (idempotent).
+
+        Rows older than ``cutoff_ms`` that are still pending are orphan
+        decisions with no successor event (crashed clients, tail-of-
+        session in-flight frames, pre-fix clients without a feedback
+        path). Returns the number of rows resolved; a second run
+        matches nothing.
+        """
+        now = now_ms if now_ms is not None else _now_ms()
+        cursor = self._connection.execute(
+            """
+            UPDATE decisions
+            SET outcome = 'expired', outcome_at_ms = ?
+            WHERE outcome = 'pending' AND created_at_ms < ?
+            """,
+            (now, cutoff_ms),
+        )
+        resolved = max(0, cursor.rowcount)
+        self._connection.commit()
+        return resolved
+
+
+def _main() -> int:
+    """One-shot orphan-pending cleanup CLI (snapshot-friendly, idempotent).
+
+    Resolves pending rows older than N minutes to ``expired`` against a
+    decision-log database (safe alongside a running daemon: short
+    transaction, busy-timeout). Examples:
+
+        python3 -m rimeai_daemon.decision_log \
+            --db ~/Library/Application\\ Support/RimeAI/language_profile/decision_log.db \
+            --expire-pending-older-than-minutes 1 --dry-run
+    """
+    import argparse
+    import json
+
+    parser = argparse.ArgumentParser(
+        description="decision_log maintenance: orphan-pending cleanup"
+    )
+    parser.add_argument("--db", required=True, type=Path)
+    parser.add_argument(
+        "--expire-pending-older-than-minutes",
+        type=int,
+        default=None,
+        metavar="N",
+        help="resolve pending rows older than N minutes to 'expired'",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="report the would-be resolved count without writing",
+    )
+    args = parser.parse_args()
+    if args.expire_pending_older_than_minutes is None:
+        parser.error("--expire-pending-older-than-minutes is required")
+    if args.expire_pending_older_than_minutes < 1:
+        parser.error("minutes must be >= 1")
+    cutoff = _now_ms() - args.expire_pending_older_than_minutes * 60_000
+    connection = sqlite3.connect(args.db, timeout=5)
+    try:
+        connection.execute("PRAGMA busy_timeout=4000")
+        if args.dry_run:
+            row = connection.execute(
+                """
+                SELECT COUNT(*) FROM decisions
+                WHERE outcome = 'pending' AND created_at_ms < ?
+                """,
+                (cutoff,),
+            ).fetchone()
+            print(json.dumps({"would_resolve": row[0], "dry_run": True}))
+            return 0
+        cursor = connection.execute(
+            """
+            UPDATE decisions
+            SET outcome = 'expired', outcome_at_ms = ?
+            WHERE outcome = 'pending' AND created_at_ms < ?
+            """,
+            (_now_ms(), cutoff),
+        )
+        connection.commit()
+        print(
+            json.dumps(
+                {"resolved": max(0, cursor.rowcount), "dry_run": False}
+            )
+        )
+        return 0
+    finally:
+        connection.close()
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())
