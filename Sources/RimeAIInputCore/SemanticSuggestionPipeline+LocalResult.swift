@@ -341,11 +341,14 @@ extension SemanticSuggestionPipeline {
             return
         }
         guard composition.token == expectedToken else {
-            // 击键/选词已推进组合令牌：帧内容仍属旧组合，同样收口。
-            dependencies.sendSentenceFeedback(
-                frame.requestID ?? "",
-                "superseded"
-            )
+            // 击键/选词已推进组合令牌：帧内容仍属旧组合，同样收口
+            // （nil-ID 帧保持静默——daemon 拒绝空 request_id）。
+            if let droppedRequestID = frame.requestID {
+                dependencies.sendSentenceFeedback(
+                    droppedRequestID,
+                    "superseded"
+                )
+            }
             emit(.diagnostic(.staleResult))
             return
         }

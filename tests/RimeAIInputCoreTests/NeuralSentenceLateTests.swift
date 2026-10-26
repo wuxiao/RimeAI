@@ -136,6 +136,8 @@ private final class NeuralLateHarness: @unchecked Sendable {
         [(text: String, decision: SemanticInferenceDecision)] = []
     private(set) var diagnostics: [RimeAIDiagnosticEvent] = []
     private(set) var secureInputEvents = 0
+    private(set) var sentenceFeedback:
+        [(requestID: String, outcome: String)] = []
 
     @MainActor
     lazy var pipeline = SemanticSuggestionPipeline(
@@ -162,6 +164,10 @@ private final class NeuralLateHarness: @unchecked Sendable {
             sendCloudInference: { _, _, _ in },
             cancelCloudInference: { _ in },
             disconnectCloud: {},
+            sendSentenceFeedback: { [self] requestID, outcome in
+                sentenceFeedback.append((requestID, outcome))
+            },
+            sendCloudFeedback: { _, _ in },
             compositionSnapshot: { [self] in composition },
             applySemanticCandidate: { [self] text, _, decision, _ in
                 guard allowApply else {
@@ -290,15 +296,21 @@ func neuralLateFrameRejectsAdvancedRevisionAndUnknownRequest() {
     }
     let staleToken = harness.composition.token
 
-    // 击键推进 revision：旧帧变 stale，建议位保持原状。
+    // 击键推进 revision：旧帧变 stale，建议位保持原状；被丢弃帧的
+    // daemon 决策行以 superseded 收口（LM-003 孤儿化修复）。
     harness.typePinyin("qingzhixingm", candidates: ["请执行命"])
     harness.pipeline.applyNeuralSentenceLate(
         makeFrame(requestID: request.requestID, token: staleToken)
     )
     #expect(harness.diagnostics.suffix(1) == [.staleResult])
     #expect(harness.appliedCandidates.isEmpty)
+    #expect(
+        harness.sentenceFeedback.count == 1
+            && harness.sentenceFeedback.first?.requestID == request.requestID
+            && harness.sentenceFeedback.first?.outcome == "superseded"
+    )
 
-    // 从未登记过的 requestID 直接丢弃。
+    // 从未登记过的 requestID 直接丢弃（同样收口）。
     harness.pipeline.applyNeuralSentenceLate(
         makeFrame(
             requestID: "never-registered",
@@ -307,6 +319,10 @@ func neuralLateFrameRejectsAdvancedRevisionAndUnknownRequest() {
     )
     #expect(harness.diagnostics.suffix(1) == [.staleResult])
     #expect(harness.appliedCandidates.isEmpty)
+    #expect(
+        harness.sentenceFeedback.last?.requestID == "never-registered"
+            && harness.sentenceFeedback.last?.outcome == "superseded"
+    )
 }
 
 @Test @MainActor
