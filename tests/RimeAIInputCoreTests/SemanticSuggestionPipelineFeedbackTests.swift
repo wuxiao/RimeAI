@@ -271,3 +271,111 @@ func feedbackWithoutDisplayedSuggestionIsSilent() {
     #expect(harness.sentenceFeedback.isEmpty)
     #expect(harness.cloudFeedback.isEmpty)
 }
+
+@Test @MainActor
+func localFrameReplacementSupersedesDisplayedLocalSuggestion() {
+    // 孤儿化修复（LM-003 验证发现）：本地帧被更新的本地帧替换
+    // （如 neural_late 帧链 / ranked→sentence 帧间替换）时，旧帧
+    // 同样发 superseded——否则 daemon 侧旧行永远 pending。
+    let harness = FeedbackHarness()
+    guard let request = harness.displayRankedResult() else {
+        Issue.record("ranked result must be displayed")
+        return
+    }
+    harness.pipeline.setDisplayedFeedback(
+        requestID: "local-frame-2", cloud: false, text: "你好世界"
+    )
+    #expect(
+        harness.sentenceFeedback == [
+            FeedbackHarness.Record(requestID: request.requestID, outcome: "superseded")
+        ]
+    )
+    // 替换后的新帧仍走正常收尾：采纳只 resolve 最新帧。
+    harness.pipeline.markDisplayedSuggestionAdopted()
+    #expect(
+        harness.sentenceFeedback.count == 2
+            && harness.sentenceFeedback.last?.requestID == "local-frame-2"
+            && harness.sentenceFeedback.last?.outcome == "adopted"
+    )
+    #expect(harness.cloudFeedback.isEmpty)
+}
+
+@Test @MainActor
+func sameFrameReRegistrationDoesNotResendSuperseded() {
+    // 同帧重复登记（同 requestID）不重复发 superseded；跨帧链
+    // 重复替换只对各自旧帧发一次。
+    let harness = FeedbackHarness()
+    harness.pipeline.setDisplayedFeedback(
+        requestID: "local-a", cloud: false, text: "甲"
+    )
+    harness.pipeline.setDisplayedFeedback(
+        requestID: "local-a", cloud: false, text: "甲"
+    )
+    #expect(harness.sentenceFeedback.isEmpty)
+    harness.pipeline.setDisplayedFeedback(
+        requestID: "local-b", cloud: false, text: "乙"
+    )
+    harness.pipeline.setDisplayedFeedback(
+        requestID: "local-b", cloud: false, text: "乙"
+    )
+    #expect(
+        harness.sentenceFeedback == [
+            FeedbackHarness.Record(requestID: "local-a", outcome: "superseded")
+        ]
+    )
+}
+
+@Test @MainActor
+func cloudFrameReplacementKeepsCloudLifecycleUntouched() {
+    // 云帧被替换不发 superseded：云反馈生命周期独立
+    // （emitDisplayedFeedback 走 sendCloudFeedback 收尾）。
+    let harness = FeedbackHarness()
+    harness.pipeline.setDisplayedFeedback(
+        requestID: "cloud-a", cloud: true, text: "云甲"
+    )
+    harness.pipeline.setDisplayedFeedback(
+        requestID: "cloud-b", cloud: true, text: "云乙"
+    )
+    #expect(harness.sentenceFeedback.isEmpty)
+    #expect(harness.cloudFeedback.isEmpty)
+}
+
+@Test @MainActor
+func staleDroppedFrameEmitsSuperseded() {
+    // 孤儿化第二层（LM-003 驱动实测）：迟到响应到达时已不在在途槽
+    // （latest-request-wins 或周期重置）——该帧的 daemon 决策行以
+    // superseded 收口，不再永远 pending。
+    let harness = FeedbackHarness()
+    harness.pipeline.applyInferenceResult(
+        nil,
+        requestID: "stale-frame-1",
+        token: harness.composition.token
+    )
+    #expect(
+        harness.sentenceFeedback == [
+            FeedbackHarness.Record(
+                requestID: "stale-frame-1",
+                outcome: "superseded"
+            )
+        ]
+    )
+    // stale 帧不触碰展示槽：既有展示建议的收尾不受影响。
+    guard let request = harness.displayRankedResult() else {
+        Issue.record("ranked result must be displayed")
+        return
+    }
+    harness.pipeline.applyInferenceResult(
+        nil,
+        requestID: "stale-frame-2",
+        token: harness.composition.token
+    )
+    #expect(
+        harness.sentenceFeedback.count == 2
+            && harness.sentenceFeedback.last?.requestID == "stale-frame-2"
+    )
+    harness.pipeline.markDisplayedSuggestionAdopted()
+    #expect(
+        harness.sentenceFeedback.last?.requestID == request.requestID
+            && harness.sentenceFeedback.last?.outcome == "adopted"
+    )
+}
