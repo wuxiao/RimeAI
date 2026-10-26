@@ -11,7 +11,11 @@ from __future__ import annotations
 import math
 from typing import Protocol
 
-from .ngram_ranker import NGramRankerModel, ORDERS
+from .ngram_ranker import (
+    NGramRankerModel,
+    ORDERS,
+    _terminal_probability,
+)
 
 
 class CharLMScorer(Protocol):
@@ -70,9 +74,13 @@ class StaticCharLM:
         gram = text[position - 1 : position + 1]
         count = model.ngram_counts[2].get(gram, 0)
         prefix_count = model.prefix_counts[2].get(gram[:-1], 0)
-        probability = (
-            (count + 0.1) / (prefix_count + 1000.0)
-        ) * model.backoff_alpha**3
+        probability = _terminal_probability(
+            model.unigram_terminal,
+            character,
+            count,
+            prefix_count,
+            model.backoff_alpha,
+        )
         return math.log(probability)
 
     def character_frequency(self, character: str) -> int:

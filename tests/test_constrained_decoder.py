@@ -1,8 +1,8 @@
 """Constrained decoding: pinyin token index, greedy decode, fuzzy gate."""
 
 import math
-from pathlib import Path
 import random
+from pathlib import Path
 
 import pytest
 
@@ -16,13 +16,30 @@ from rimeai_runtime.constrained_decoder import (
 )
 from rimeai_runtime.pinyin_guard import PinyinGuard
 
+
 class _StubTokenizer:
     """Duck-typed stand-in for a transformers tokenizer."""
 
     vocab_size = 18
     _tokens = [
-        "你", "好", "世界", "的", "是", "<pad>", "\n", "长", "时", "四季",
-        "界", "试", "我", "们", "门", "明天", "我们", "今天",
+        "你",
+        "好",
+        "世界",
+        "的",
+        "是",
+        "<pad>",
+        "\n",
+        "长",
+        "时",
+        "四季",
+        "界",
+        "试",
+        "我",
+        "们",
+        "门",
+        "明天",
+        "我们",
+        "今天",
     ]
 
     def decode(self, ids):
@@ -124,9 +141,7 @@ def test_long_word_priority_promotes_longer_token_below_threshold():
 
 def test_no_priority_when_argmax_at_or_above_threshold():
     # argmax 时 0.95 >= 0.9 → plain argmax wins even though 世界 is eligible
-    scorer = _FixedScorer(
-        {(): {8: 0.95, 2: 0.49}, (8,): {10: 0.9}}
-    )
+    scorer = _FixedScorer({(): {8: 0.95, 2: 0.49}, (8,): {10: 0.9}})
     result = ConstrainedGreedyDecoder.decode(scorer, ("shi", "jie"), _index())
     assert result.text == "时界"
     assert result.consumed_syllables == 2
@@ -163,9 +178,7 @@ def test_mid_decode_dead_end_abstains_with_empty_text():
 
 
 def test_exceeding_max_characters_abstains_with_empty_text():
-    scorer = _FixedScorer(
-        {(): {0: 0.9}, (0,): {1: 0.9}, (0, 1): {3: 0.9}}
-    )
+    scorer = _FixedScorer({(): {0: 0.9}, (0,): {1: 0.9}, (0, 1): {3: 0.9}})
     result = ConstrainedGreedyDecoder.decode(
         scorer, ("ni", "hao", "de"), _index(), max_characters=2
     )
@@ -186,7 +199,9 @@ def test_beam_prefers_jointly_better_path_over_greedy():
             (12, 13): {15: 0.9},
         }
     )
-    greedy = ConstrainedGreedyDecoder.decode(scorer, ("wo", "men", "ming", "tian"), _index())
+    greedy = ConstrainedGreedyDecoder.decode(
+        scorer, ("wo", "men", "ming", "tian"), _index()
+    )
     assert greedy.text == "我门明天"
     beam = ConstrainedGreedyDecoder.decode(
         scorer, ("wo", "men", "ming", "tian"), _index(), beam_width=4
@@ -427,9 +442,7 @@ def test_beam_early_stop_actually_skips_scoring_rounds():
         expected.consumed_syllables,
     )
     # 掩码内归一化：世界 0.7/Z（Z=0.85），好 0.9/Z（Z=0.9）。
-    assert result.confidence == pytest.approx(
-        math.sqrt((0.7 / 0.85) * (0.9 / 0.9))
-    )
+    assert result.confidence == pytest.approx(math.sqrt((0.7 / 0.85) * (0.9 / 0.9)))
     # 轮 1（1 个状态）+ 轮 2（3 个状态）= 4 次；参照还要跑轮 3（2 次）。
     assert fast.calls == 4
     assert fast.calls < slow.calls
@@ -542,9 +555,7 @@ def test_fuzzy_candidates_match_mistyped_initials():
 
 def test_fuzzy_decode_recovers_intended_word():
     scorer = _FixedScorer({(): {9: 0.8}})
-    result = ConstrainedGreedyDecoder.decode(
-        scorer, ("si", "ji"), _index(), fuzzy=True
-    )
+    result = ConstrainedGreedyDecoder.decode(scorer, ("si", "ji"), _index(), fuzzy=True)
     assert result.text == "四季"
     assert result.consumed_syllables == 2
 
@@ -824,11 +835,13 @@ def test_length_penalty_keeps_early_stop_lossless():
                         completed.append(child)
                     else:
                         nxt.append(child)
+
             def rank(state):
                 raw = state[3]
                 if state[4] <= 0 or penalty == 0.0:
                     return raw
                 return raw / (state[4] ** penalty)
+
             nxt.sort(key=lambda state: (-rank(state), state[0]))
             frontier = nxt[:4]
         if not completed:
@@ -872,3 +885,390 @@ def test_length_penalty_is_ignored_by_greedy():
     )
     assert baseline == penalized
     assert baseline.text == "你好"
+
+
+# --------------------------------------------------------------------------
+# L2 用户 LM 浅融合：λ=0 逐位不变；λ>0 只改打分（排序分），不改掩码、
+# 合法性与置信度口径；beam early-stop 在融合下保持无损。
+
+
+class _CountingUserScorer:
+    """Records calls and delegates; proves λ=0 never consults the user LM."""
+
+    def __init__(self, base):
+        self.base = base
+        self.calls = 0
+
+    def __call__(self, prefix_text, token_text):
+        self.calls += 1
+        return self.base(prefix_text, token_text)
+
+
+class _HashUserScorer:
+    """Deterministic pseudo-random summed log-probabilities in (-1, 0)."""
+
+    def __init__(self, seed=0):
+        self._seed = seed
+
+    def __call__(self, prefix_text, token_text):
+        digest = self._seed
+        for ch in prefix_text[-8:] + "|" + token_text:
+            digest = ((digest ^ (ord(ch) + 0x9E3779B9)) * 16777619) & 0xFFFFFFFF
+        return -(((digest % 997) + 1) / 998.0)
+
+
+class _FixedUserScorer:
+    """Table-backed scorer: text -> score; default for everything else."""
+
+    def __init__(self, table, default=-1.0):
+        self.table = table
+        self.default = default
+        self.calls = []
+
+    def __call__(self, prefix_text, token_text):
+        self.calls.append((prefix_text, token_text))
+        return self.table.get(token_text, self.default)
+
+
+@pytest.mark.parametrize("fuzzy", [False, True])
+@pytest.mark.parametrize("beam_width", [1, 4])
+def test_user_fusion_weight_zero_is_bit_identical(fuzzy, beam_width):
+    # λ=0：文本、置信度、RAW 置信度、消耗音节全部逐位不变，且用户
+    # 打分器一次都不被调用（快路径不触碰冻结算术）。
+    index = _index()
+    for seed in range(5):
+        for syllables in _random_syllable_sequences(2000 + seed, 8):
+            scorer = _HashScorer(seed=seed)
+            user = _CountingUserScorer(_HashUserScorer(seed=seed + 7))
+            baseline = ConstrainedGreedyDecoder.decode(
+                scorer,
+                syllables,
+                index,
+                fuzzy=fuzzy,
+                beam_width=beam_width,
+                length_penalty=1.5 if beam_width > 1 else 0.0,
+            )
+            fused = ConstrainedGreedyDecoder.decode(
+                scorer,
+                syllables,
+                index,
+                fuzzy=fuzzy,
+                beam_width=beam_width,
+                length_penalty=1.5 if beam_width > 1 else 0.0,
+                user_scorer=user,
+                user_weight=0.0,
+            )
+            assert fused == baseline, (syllables, seed)
+            assert user.calls == 0
+
+
+def test_user_fusion_none_scorer_keeps_baseline():
+    # 不传 user_scorer：与 λ=0 完全一致（默认关闭契约）。
+    scorer = _HashScorer(seed=3)
+    syllables = ("wo", "men", "ming", "tian")
+    baseline = ConstrainedGreedyDecoder.decode(
+        scorer, syllables, _index(), beam_width=4
+    )
+    assert (
+        ConstrainedGreedyDecoder.decode(
+            scorer, syllables, _index(), beam_width=4, user_weight=0.35
+        )
+        == baseline
+    )
+
+
+def test_user_fusion_greedy_prefers_user_word():
+    # 我 p=0.5 vs 我们 p=0.2：无融合时长词规则 floor=0.25 排除 我们，
+    # greedy 走 我门；融合后 我们 的用户证据把 fused 分抬过 我，
+    # 路径改写成 我们（一次性消费两个音节）。
+    table = {
+        (): {12: 0.5, 16: 0.2},
+        (12,): {13: 0.3, 14: 0.6},
+        (16,): {15: 0.9},
+    }
+    scorer = _FixedScorer(table)
+    user = _FixedUserScorer({"我们": -0.001, "我": -4.0, "门": -4.0, "们": -4.0})
+    baseline = ConstrainedGreedyDecoder.decode(scorer, ("wo", "men"), _index())
+    fused = ConstrainedGreedyDecoder.decode(
+        scorer,
+        ("wo", "men"),
+        _index(),
+        user_scorer=user,
+        user_weight=0.5,
+    )
+    assert baseline.text == "我门"
+    assert fused.text == "我们"
+    # 多字 token 一次调用、整段文本传入；prefix 是已生成文本。
+    assert ("", "我们") in user.calls
+    assert all(prefix in ("", "我", "我们") for prefix, _ in user.calls)
+
+
+def test_user_fusion_greedy_keeps_long_word_priority_in_fused_domain():
+    # 融合域内长词优先规则仍生效：baseline 的 argmax（试 p=0.95）自信，
+    # 直接取 argmax 走 试界；融合后 fused argmax 变为 世界 且不自信，
+    # floor(log0.5) 之上还有更长 reading 的 世界 被提升 → 融合选 世界。
+    scorer = _FixedScorer({(): {11: 0.95, 2: 0.4}, (11,): {10: 0.9}})
+    user = _FixedUserScorer({"试": -1.2, "世界": -0.05})
+    result = ConstrainedGreedyDecoder.decode(
+        scorer,
+        ("shi", "jie"),
+        _index(),
+        user_scorer=user,
+        user_weight=1.0,
+    )
+    baseline = ConstrainedGreedyDecoder.decode(scorer, ("shi", "jie"), _index())
+    assert baseline.text == "试界"
+    assert result.text == "世界"
+
+
+def test_user_fusion_beam_flips_winner_and_confidence_stays_pure_lm():
+    # beam：无融合赢家是 我门明天（首步 我 0.5）；融合把 我们+明天
+    # 抬成赢家。置信度仍是纯 LM 口径：赢路径的两个几何均值与
+    # 逐 token 概率手工计算一致，不含任何 λ 项。
+    scorer = _FixedScorer(
+        {
+            (): {12: 0.5, 16: 0.2},
+            (12,): {14: 0.6, 13: 0.3},
+            (16,): {15: 0.9},
+            (12, 14): {15: 0.1},
+            (12, 13): {15: 0.9},
+        }
+    )
+    user = _FixedUserScorer({"我们": -0.001, "我": -2.0, "门": -2.0})
+    baseline = ConstrainedGreedyDecoder.decode(
+        scorer, ("wo", "men", "ming", "tian"), _index(), beam_width=4
+    )
+    fused = ConstrainedGreedyDecoder.decode(
+        scorer,
+        ("wo", "men", "ming", "tian"),
+        _index(),
+        beam_width=4,
+        user_scorer=user,
+        user_weight=0.5,
+    )
+    assert baseline.text == "我们明天"  # 长 joint 路径本就赢
+    # 反向偏好：用户对 我们 整词与 们 字都强烈反感 → 我门明天 胜出
+    # （注意 我+们 拆字路径也必须被压住，否则同文本路径仍会赢）。
+    user_reverse = _FixedUserScorer(
+        {"我们": -6.0, "们": -6.0, "我": -0.001, "门": -0.1}
+    )
+    flipped = ConstrainedGreedyDecoder.decode(
+        scorer,
+        ("wo", "men", "ming", "tian"),
+        _index(),
+        beam_width=4,
+        user_scorer=user_reverse,
+        user_weight=0.5,
+    )
+    assert flipped.text == "我门明天"
+    # 纯 LM 置信度：我门明天 = (0.5/Z0.7)·(0.6/Z0.9)·(0.1/Z0.1) 的
+    # 几何均值（Z 逐步只含掩码内候选，不含任何 λ 项）。
+    assert flipped.confidence == pytest.approx(
+        ((0.5 / 0.7) * (0.6 / 0.9) * 1.0) ** (1 / 3)
+    )
+    assert flipped.raw_confidence == pytest.approx((0.5 * 0.6 * 0.1) ** (1 / 3))
+    assert fused.confidence == pytest.approx(math.sqrt((0.2 / 0.7) * 1.0))
+
+
+def _reference_fused_beam_decode(
+    scorer,
+    user_scorer,
+    user_weight,
+    syllables,
+    index,
+    *,
+    max_characters=30,
+    fuzzy=False,
+    beam_width=4,
+    length_penalty=0.0,
+):
+    """Pre-fusion _decode_beam + user term, WITHOUT early stop (oracle)."""
+    total = len(syllables)
+
+    def rank(score, steps):
+        if steps <= 0 or length_penalty == 0.0:
+            return score
+        return score / (steps**length_penalty)
+
+    def expand(state):
+        tokens, text, consumed, log_sum, steps, renorm, fused_sum = state
+        probabilities = scorer(tokens)
+        mask_total = sum(
+            probabilities.get(t, 0.0)
+            for t in index.candidates(syllables[consumed:], fuzzy=fuzzy)
+        )
+        children = []
+        for token_id, reading in index.candidates(
+            syllables[consumed:], fuzzy=fuzzy
+        ).items():
+            probability = probabilities.get(token_id, 0.0)
+            if probability <= 0.0:
+                continue
+            token_text = index.token_texts.get(token_id, "")
+            if len(text) + len(token_text) > max_characters:
+                continue
+            user_score = user_scorer(text, token_text)
+            adjustment = user_weight * (user_score or 0.0)
+            children.append(
+                (
+                    tokens + [token_id],
+                    text + token_text,
+                    consumed + len(reading),
+                    log_sum + math.log(max(probability, 1e-12)),
+                    steps + 1,
+                    renorm
+                    + (math.log(probability / mask_total) if mask_total > 0.0 else 0.0),
+                    fused_sum + math.log(max(probability, 1e-12)) + adjustment,
+                )
+            )
+        return children
+
+    frontier = [([], "", 0, 0.0, 0, 0.0, 0.0)]
+    completed = []
+    while frontier:
+        next_frontier = []
+        for state in frontier:
+            for child in expand(state):
+                if child[2] == total:
+                    completed.append(child)
+                else:
+                    next_frontier.append(child)
+        next_frontier.sort(key=lambda state: (-rank(state[6], state[4]), state[0]))
+        frontier = next_frontier[:beam_width]
+    if not completed:
+        return DecodeResult("", 0.0, total)
+    best = min(completed, key=lambda state: (-rank(state[6], state[4]), state[0]))
+    return DecodeResult(
+        best[1],
+        min(1.0, math.exp(best[5] / best[4])),
+        total,
+        math.exp(best[3] / best[4]),
+    )
+
+
+@pytest.mark.parametrize("length_penalty", [0.0, 1.0])
+@pytest.mark.parametrize("beam_width", [2, 4])
+def test_user_fusion_beam_early_stop_matches_exhaustive_search(
+    beam_width, length_penalty
+):
+    # 融合开启时 early-stop 仍无损：随机 LM + 随机用户分数下，剪枝
+    # beam 与完整搜索逐位一致（文本/置信度/RAW/消耗音节），且剪枝
+    # 只减不增 scorer 调用。融合项 <= 0 保证 fused joint 沿路径
+    # 不增，原有上界论证原样成立。
+    index = _index()
+    for seed in range(6):
+        for syllables in _random_syllable_sequences(3000 + seed, 6):
+            user = _HashUserScorer(seed=seed + 11)
+            fast = _CountingScorer(_HashScorer(seed=seed))
+            slow = _CountingScorer(_HashScorer(seed=seed))
+            result = ConstrainedGreedyDecoder.decode(
+                fast,
+                syllables,
+                index,
+                beam_width=beam_width,
+                length_penalty=length_penalty,
+                user_scorer=user,
+                user_weight=0.35,
+            )
+            expected = _reference_fused_beam_decode(
+                slow,
+                user,
+                0.35,
+                syllables,
+                index,
+                beam_width=beam_width,
+                length_penalty=length_penalty,
+            )
+            assert (
+                result.text,
+                result.consumed_syllables,
+                result.confidence,
+                result.raw_confidence,
+            ) == (
+                expected.text,
+                expected.consumed_syllables,
+                expected.confidence,
+                expected.raw_confidence,
+            ), (syllables, seed)
+            assert fast.calls <= slow.calls
+
+
+def test_user_fusion_all_none_scores_keep_baseline_ranking():
+    # 用户 LM 无证据（全 None）：调整量恒 0，融合退化为纯 LM 排序，
+    # 输出与基线一致（冷启动安全）。
+    index = _index()
+    for seed in range(4):
+        for syllables in _random_syllable_sequences(4000 + seed, 5):
+            scorer = _HashScorer(seed=seed)
+            baseline = ConstrainedGreedyDecoder.decode(
+                scorer, syllables, index, beam_width=4
+            )
+            cold = ConstrainedGreedyDecoder.decode(
+                scorer,
+                syllables,
+                index,
+                beam_width=4,
+                user_scorer=lambda prefix, text: None,
+                user_weight=0.2,
+            )
+            assert cold == baseline, (syllables, seed)
+
+
+@pytest.mark.parametrize("fuzzy", [False, True])
+def test_user_fusion_preserves_mask_legality_and_fuzzy_gate(fuzzy):
+    # 融合只改打分：输出仍逐字通过 fuzzy gate（掩码合法性与 λ 无关）。
+    index = _index()
+    guard = _guard()
+    for syllables in _FUZZY_TYPED_SEQUENCES:
+        result = ConstrainedGreedyDecoder.decode(
+            _HashScorer(seed=9),
+            syllables,
+            index,
+            fuzzy=fuzzy,
+            beam_width=4,
+            user_scorer=_HashUserScorer(seed=5),
+            user_weight=0.35,
+        )
+        if result.text:
+            assert fuzzy_segment_ok(guard, result.text, syllables), (
+                syllables,
+                result.text,
+            )
+
+
+def test_user_fusion_rejects_invalid_user_scores():
+    # 契约：用户分数必须是有限且 <= 0 的 log 概率——违反即 fail loud
+    # （正数/NaN/inf 都会破坏 early-stop 的无损上界前提）。
+    scorer = _FixedScorer({(): {0: 0.6, 1: 0.3}})
+    with pytest.raises(ValueError):
+        ConstrainedGreedyDecoder.decode(
+            scorer,
+            ("ni", "hao"),
+            _index(),
+            user_scorer=lambda prefix, text: 0.5,
+            user_weight=0.1,
+        )
+    with pytest.raises(ValueError):
+        ConstrainedGreedyDecoder.decode(
+            scorer,
+            ("ni", "hao"),
+            _index(),
+            user_scorer=lambda prefix, text: float("nan"),
+            user_weight=0.1,
+        )
+    with pytest.raises(ValueError):
+        ConstrainedGreedyDecoder.decode(
+            scorer,
+            ("ni", "hao"),
+            _index(),
+            user_scorer=lambda prefix, text: float("inf"),
+            user_weight=0.1,
+        )
+    with pytest.raises(ValueError):
+        ConstrainedGreedyDecoder.decode(
+            scorer,
+            ("ni", "hao"),
+            _index(),
+            user_scorer=lambda prefix, text: -0.5,
+            user_weight=-0.1,
+        )

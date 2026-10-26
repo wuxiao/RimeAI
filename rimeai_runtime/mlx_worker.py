@@ -40,11 +40,12 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
+import math
 import os
 import sys
 import traceback
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from time import monotonic
 from typing import Any
@@ -61,6 +62,7 @@ from .constrained_worker_protocol import (
     validate_generate_request,
 )
 from .pinyin_guard import PinyinGuard, segment_generic_pinyin
+from .user_lm_view import UserLanguageModelView, UserLmViewError
 
 MODEL_NAME = "qwen2.5-0.5b"
 MODEL_REVISION = "060db6499f32faf8b98477b0a26969ef7d8b9987"
@@ -102,6 +104,57 @@ def _beam_length_penalty() -> float:
             f"RIMEAI_MLX_LENGTH_PENALTY must be within [0, 4], got {value}"
         )
     return value
+
+
+# L2 用户 LM 浅融合旋钮上限：与 daemon 侧 MAX_USER_WEIGHT 同量级，
+# λ>1 意味着用户证据压过神经 LM 本身，不属于本融合的设计域。
+MAX_USER_LM_WEIGHT = 1.0
+
+
+def _user_lm_fusion_config() -> tuple[UserLanguageModelView | None, float]:
+    """Optional user-LM shallow fusion from the environment (default off).
+
+    RIMEAI_MLX_USER_LM_PATH + RIMEAI_MLX_USER_LM_WEIGHT enable L2
+    shallow fusion into the constrained beam's ranking score
+    (log p_fused = log p_LM + λ·logP_user). Both must be set together;
+    an unset pair keeps the frozen no-fusion behavior bit-identical.
+    Every failure mode fails CLOSED (MlxEngineError): half-set pair,
+    non-float weight, weight outside [0, 1], missing/unreadable/invalid
+    artifact — never a silent degrade to "no user evidence", which
+    would hide a deployment misconfiguration behind λ-degenerate
+    output. The weight bound mirrors the daemon-side MAX_USER_WEIGHT
+    caliber (0.1-0.35 in production IMEs); λ beyond 1 lets user
+    evidence dominate the neural LM and is out of scope. A set pair
+    with weight 0.0 still validates the artifact but leaves decoding
+    bit-identical (fusion inactive at λ=0).
+    """
+    raw_path = os.environ.get("RIMEAI_MLX_USER_LM_PATH")
+    raw_weight = os.environ.get("RIMEAI_MLX_USER_LM_WEIGHT")
+    path_set = bool(raw_path)
+    weight_set = bool(raw_weight)
+    if not path_set and not weight_set:
+        return None, 0.0
+    if not path_set or not weight_set:
+        raise MlxEngineError(
+            "RIMEAI_MLX_USER_LM_PATH and RIMEAI_MLX_USER_LM_WEIGHT "
+            "must be set together for user-LM shallow fusion"
+        )
+    try:
+        weight = float(raw_weight)
+    except ValueError as error:
+        raise MlxEngineError(
+            f"RIMEAI_MLX_USER_LM_WEIGHT must be a float, got {raw_weight!r}"
+        ) from error
+    if not math.isfinite(weight) or not 0.0 <= weight <= MAX_USER_LM_WEIGHT:
+        raise MlxEngineError(
+            "RIMEAI_MLX_USER_LM_WEIGHT must be within "
+            f"[0, {MAX_USER_LM_WEIGHT}], got {weight}"
+        )
+    try:
+        view = UserLanguageModelView.load(Path(raw_path))
+    except UserLmViewError as error:
+        raise MlxEngineError(f"cannot load user LM: {error}") from error
+    return view, weight
 
 
 def sha256_file(path: Path) -> str:
@@ -329,6 +382,11 @@ class _ProbabilityView:
 class MlxConstrainedEngine:
     """Loads the pinned 8-bit model and decodes constrained sentences."""
 
+    # L2 用户 LM 浅融合（默认关闭）：view + λ。类属性默认值保证未经
+    # main() 接线的实例（测试手工装配路径）与旧行为完全一致。
+    _user_lm: UserLanguageModelView | None = None
+    _user_weight: float = 0.0
+
     def __init__(
         self,
         model_dir: Path,
@@ -422,6 +480,26 @@ class MlxConstrainedEngine:
         if context:
             seed_ids = seed_ids + self._encode(context)
         scorer = _SeedPathScorer(self.cache, seed_ids)
+        user_lm = self._user_lm
+        user_weight = self._user_weight
+        user_scorer: Callable[[str, str], float | None] | None = None
+        if user_lm is not None and user_weight > 0.0:
+            # Shallow fusion context: seed context + request context as
+            # the committed-history prefix, then the already generated
+            # text as decoding proceeds (multi-char tokens scored per
+            # character inside the view; 5-gram history means only the
+            # last 4 characters of the prefix ever matter). Fusion only
+            # re-ranks — the KV cache path (scorer) is untouched.
+            fusion_prefix = SEED_CONTEXT + context
+
+            def _fusion_scorer(
+                prefix_text: str, token_text: str
+            ) -> float | None:
+                return user_lm.log_prob_sum(
+                    fusion_prefix + prefix_text, token_text
+                )
+
+            user_scorer = _fusion_scorer
         result = ConstrainedGreedyDecoder.decode(
             scorer,
             syllables,
@@ -430,6 +508,8 @@ class MlxConstrainedEngine:
             fuzzy=True,
             beam_width=BEAM_WIDTH,
             length_penalty=_beam_length_penalty(),
+            user_scorer=user_scorer,
+            user_weight=user_weight if user_scorer is not None else 0.0,
         )
         if result.text and not fuzzy_segment_ok(
             self.guard, result.text, syllables
@@ -442,9 +522,10 @@ class MlxConstrainedEngine:
             # response envelope is the pinyin-mask-renormalized value;
             # the legacy RAW softmax geometric mean rides here for
             # evaluation-side calibration comparison, along with the
-            # beam ranking knob in effect for this request.
+            # beam ranking knobs in effect for this request.
             stats["confidence_raw"] = result.raw_confidence
             stats["length_penalty"] = _beam_length_penalty()
+            stats["user_lm_weight"] = self._user_weight
         # Reveal C-F7: roll the shared cache back to the seed+context
         # endpoint after each request. The beam-tail rows (and their KV
         # entries, roughly 300KB per position of full-vocab logits) are
@@ -532,6 +613,25 @@ def main() -> int:
     except MlxEngineError as error:
         print(f"constrained-mlx: {error}", file=sys.stderr, flush=True)
         return 2
+    try:
+        # 显式配置才启用 L2 浅融合；一切配置错误 fail-closed（退出 2），
+        # 绝不静默降级；默认（两个环境变量都未设）行为与无融合时逐位一致。
+        engine._user_lm, engine._user_weight = _user_lm_fusion_config()
+    except MlxEngineError as error:
+        print(f"constrained-mlx: {error}", file=sys.stderr, flush=True)
+        return 2
+    if engine._user_lm is not None:
+        print(
+            "constrained-mlx: user-LM shallow fusion "
+            + (
+                f"enabled (weight={engine._user_weight}, "
+                f"domains={engine._user_lm.domains()})"
+                if engine._user_weight > 0.0
+                else "validated but inactive (weight=0)"
+            ),
+            file=sys.stderr,
+            flush=True,
+        )
     for line in sys.stdin:
         try:
             response = handle_request_line(engine, line)

@@ -9,7 +9,8 @@ import math
 import os
 from pathlib import Path
 import tempfile
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from collections.abc import Iterable, Mapping, Sequence
+from typing import Any
 
 from .candidate_policy import partition_full_length_candidates
 
@@ -20,6 +21,16 @@ _RANK_WEIGHTS = (0.1, 0.25, 0.5, 1.0, 2.0)
 _FREQUENCY_WEIGHTS = (0.0, 0.25, 0.5, 1.0, 2.0)
 _LANGUAGE_WEIGHTS = (0.0, 0.25, 0.5, 1.0, 2.0)
 _BACKOFF_ALPHAS = (0.2, 0.4, 0.6, 0.8)
+TERMINAL_LEGACY = "legacy"
+TERMINAL_UNIGRAM = "unigram"
+_UNIGRAM_ADD_KS = (0.01, 0.1, 1.0)
+
+
+def _normalized_text(sample: Mapping[str, Any]) -> str:
+    """Whitespace-insensitive comparison key for leakage checks."""
+    return "\x00".join(
+        part for part in (sample.get("context", ""), sample.get("gold_text", ""))
+    ).replace(" ", "").replace("\t", "").replace("\n", "")
 
 
 class NGramModelError(ValueError):
@@ -27,18 +38,72 @@ class NGramModelError(ValueError):
 
 
 @dataclass(frozen=True)
+class UnigramTerminal:
+    """Optional unigram-backoff terminal for unseen bigrams.
+
+    When present, the stupid-backoff terminal probability for a character
+    with no seen bigram becomes
+    ``((unigram_count(c) + add_k) / (total_count + add_k * vocabulary_size))
+    * discount`` instead of the legacy constant-numerator add-k estimate.
+    Artifacts without this field keep the legacy terminal bit-for-bit.
+    """
+
+    unigram_counts: dict[str, int]
+    total_count: int
+    vocabulary_size: int
+    add_k: float
+    discount: float
+
+
+def _terminal_probability(
+    unigram_terminal: UnigramTerminal | None,
+    character: str,
+    bigram_count: int,
+    bigram_prefix_count: int,
+    backoff_alpha: float,
+) -> float:
+    """Terminal probability once every n-gram order has missed.
+
+    Single source of truth shared by ``NGramRankerModel._language_score``
+    and ``StaticCharLM.next_char_log_prob`` so both stay on the same base
+    distribution: with ``unigram_terminal`` the score backs off to the
+    character unigram estimate, otherwise the legacy add-k constant
+    applies bit-for-bit.
+    """
+    if unigram_terminal is not None:
+        return (
+            (
+                unigram_terminal.unigram_counts.get(character, 0)
+                + unigram_terminal.add_k
+            )
+            / (
+                unigram_terminal.total_count
+                + unigram_terminal.add_k * unigram_terminal.vocabulary_size
+            )
+        ) * unigram_terminal.discount
+    return (
+        (bigram_count + 0.1) / (bigram_prefix_count + 1000.0)
+    ) * backoff_alpha**3
+
+
+@dataclass(frozen=True)
 class NGramRankerModel:
     dataset_sha256: str
-    split_counts: Dict[str, int]
+    split_counts: dict[str, int]
     rank_weight: float
     frequency_weight: float
     language_weight: float
-    candidate_frequencies: Dict[str, int]
-    ngram_counts: Dict[int, Dict[str, int]]
-    prefix_counts: Dict[int, Dict[str, int]]
+    candidate_frequencies: dict[str, int]
+    ngram_counts: dict[int, dict[str, int]]
+    prefix_counts: dict[int, dict[str, int]]
     max_context_characters: int = 40
     top_k: int = TOP_K
     backoff_alpha: float = 0.4
+    # None keeps the legacy add-k terminal (bit-for-bit v2 behavior);
+    # an UnigramTerminal switches unseen-bigram scoring to unigram
+    # backoff. Only artifacts that explicitly carry the new smoothing
+    # hyperparameters enable it.
+    unigram_terminal: UnigramTerminal | None = None
 
     def language_score(self, context: str, candidate: str) -> float:
         """Mean log-probability per character of `candidate` after
@@ -66,12 +131,15 @@ class NGramRankerModel:
                     )
                     break
             if probability is None:
-                gram = text[position - 1 : position + 1]
-                count = self.ngram_counts[2].get(gram, 0)
-                prefix_count = self.prefix_counts[2].get(gram[:-1], 0)
-                probability = (
-                    (count + 0.1) / (prefix_count + 1000.0)
-                ) * self.backoff_alpha ** 3
+                probability = _terminal_probability(
+                    self.unigram_terminal,
+                    text[position],
+                    self.ngram_counts[2].get(
+                        text[position - 1 : position + 1], 0
+                    ),
+                    self.prefix_counts[2].get(text[position - 1 : position], 0),
+                    self.backoff_alpha,
+                )
             total += math.log(probability)
             terms += 1
         return total / max(1, terms)
@@ -94,7 +162,7 @@ class NGramRankerModel:
         *,
         context: str,
         candidates: Sequence[str],
-    ) -> Tuple[List[str], float]:
+    ) -> tuple[list[str], float]:
         semantic_window = [
             {"id": f"c{index}", "text": candidate}
             for index, candidate in enumerate(candidates[: self.top_k])
@@ -123,7 +191,7 @@ class NGramRankerModel:
             confidence = 1.0 / (1.0 + math.exp(-max(-30.0, min(30.0, margin))))
         return ranked_window, confidence
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "schema_version": 2,
             "model_type": "char-ngram-ranker",
@@ -141,9 +209,26 @@ class NGramRankerModel:
                     "alpha": self.backoff_alpha,
                     "terminal_numerator": 0.1,
                     "terminal_denominator": 1000.0,
+                    **(
+                        {
+                            "unigram_terminal": {
+                                "add_k": self.unigram_terminal.add_k,
+                                "discount": self.unigram_terminal.discount,
+                            }
+                        }
+                        if self.unigram_terminal is not None
+                        else {}
+                    ),
                 },
             },
             "candidate_frequencies": self.candidate_frequencies,
+            **(
+                {
+                    "unigram_counts": dict(self.unigram_terminal.unigram_counts)
+                }
+                if self.unigram_terminal is not None
+                else {}
+            ),
             "ngram_counts": {
                 str(order): self.ngram_counts[order] for order in ORDERS
             },
@@ -154,19 +239,23 @@ class NGramRankerModel:
 
 
 def _build_counts(
-    samples: Iterable[Dict[str, Any]],
-) -> Tuple[
-    Dict[str, int],
-    Dict[int, Dict[str, int]],
-    Dict[int, Dict[str, int]],
+    samples: Iterable[dict[str, Any]],
+) -> tuple[
+    dict[str, int],
+    dict[int, dict[str, int]],
+    dict[int, dict[str, int]],
+    dict[str, int],
 ]:
     frequencies: Counter[str] = Counter()
     ngram_counters = {order: Counter() for order in ORDERS}
     prefix_counters = {order: Counter() for order in ORDERS}
+    unigram_counter: Counter[str] = Counter()
     for sample in samples:
         gold = sample["gold_text"]
         frequencies[gold] += 1
         text = "^" + sample["context"][-40:] + gold + "$"
+        for character in text:
+            unigram_counter[character] += 1
         for order in ORDERS:
             for start in range(len(text) - order + 1):
                 gram = text[start : start + order]
@@ -176,13 +265,14 @@ def _build_counts(
         dict(frequencies),
         {order: dict(counter) for order, counter in ngram_counters.items()},
         {order: dict(counter) for order, counter in prefix_counters.items()},
+        dict(unigram_counter),
     )
 
 
 def _validation_metrics(
     model: NGramRankerModel,
-    samples: Sequence[Dict[str, Any]],
-) -> Tuple[float, float, int]:
+    samples: Sequence[dict[str, Any]],
+) -> tuple[float, float, int]:
     covered = 0
     hits = 0
     reciprocal_rank = 0.0
@@ -206,57 +296,233 @@ def _validation_metrics(
     return hits / covered, reciprocal_rank / covered, covered
 
 
+def check_extra_train_leakage(
+    extra_train_samples: Sequence[dict[str, Any]],
+    heldout_samples: Sequence[dict[str, Any]],
+    heldout_name: str,
+) -> dict[str, Any]:
+    """Per-sample id/text overlap between extra corpus and a held-out split.
+
+    Returns a structured result for the training report. The caller (and
+    `train_ngram_model` itself, which runs this defensively for every
+    dataset split it did not train on) treats any overlap as fatal: extra
+    corpus material must never reach counting once it leaks a held-out
+    sample by id or by whitespace-normalized context+gold text.
+    """
+    heldout_ids = {sample["id"] for sample in heldout_samples}
+    heldout_texts = {
+        _normalized_text(sample) for sample in heldout_samples
+    }
+    id_overlaps: list[str] = []
+    text_overlaps: list[str] = []
+    for sample in extra_train_samples:
+        if sample["id"] in heldout_ids:
+            id_overlaps.append(sample["id"])
+        if _normalized_text(sample) in heldout_texts:
+            text_overlaps.append(sample["id"])
+    return {
+        "heldout_split": heldout_name,
+        "extra_train_samples": len(extra_train_samples),
+        "heldout_samples": len(heldout_samples),
+        "id_overlap_samples": len(id_overlaps),
+        "id_overlap_examples": sorted(id_overlaps)[:10],
+        "text_overlap_samples": len(text_overlaps),
+        "text_overlap_examples": sorted(text_overlaps)[:10],
+    }
+
+
+def _dedupe_extra_train(
+    train_samples: Sequence[dict[str, Any]],
+    extra_train_samples: Sequence[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Drop extra-corpus samples already present in the primary train split.
+
+    Deduplication key is the id first, then the whitespace-normalized
+    context+gold text, so a re-captured sentence cannot double-count.
+    """
+    primary_ids = {sample["id"] for sample in train_samples}
+    primary_texts = {
+        _normalized_text(sample) for sample in train_samples
+    }
+    kept: list[dict[str, Any]] = []
+    duplicate_ids = 0
+    duplicate_texts = 0
+    seen_ids: set[str] = set()
+    seen_texts: set[str] = set()
+    for sample in extra_train_samples:
+        if sample["id"] in primary_ids or sample["id"] in seen_ids:
+            duplicate_ids += 1
+            continue
+        normalized = _normalized_text(sample)
+        if normalized in primary_texts or normalized in seen_texts:
+            duplicate_texts += 1
+            continue
+        seen_ids.add(sample["id"])
+        seen_texts.add(normalized)
+        kept.append(sample)
+    return kept, {
+        "extra_train_input_samples": len(extra_train_samples),
+        "duplicate_id_samples_dropped": duplicate_ids,
+        "duplicate_text_samples_dropped": duplicate_texts,
+        "extra_train_kept_samples": len(kept),
+    }
+
+
 def train_ngram_model(
-    samples: Sequence[Dict[str, Any]],
+    samples: Sequence[dict[str, Any]],
     *,
     dataset_sha256: str,
-) -> Tuple[NGramRankerModel, Dict[str, Any]]:
+    extra_train_samples: Sequence[dict[str, Any]] = (),
+    rank_weight_grid: Sequence[float] = _RANK_WEIGHTS,
+    frequency_weight_grid: Sequence[float] = _FREQUENCY_WEIGHTS,
+    language_weight_grid: Sequence[float] = _LANGUAGE_WEIGHTS,
+    backoff_alpha_grid: Sequence[float] = _BACKOFF_ALPHAS,
+    terminal_method_grid: Sequence[str] = (TERMINAL_LEGACY,),
+    unigram_add_k_grid: Sequence[float] = _UNIGRAM_ADD_KS,
+) -> tuple[NGramRankerModel, dict[str, Any]]:
+    """Train the char n-gram ranker on train splits, select on validation.
+
+    Default arguments reproduce the historical v2 trainer exactly: the
+    legacy add-k terminal, the original weight/alpha grids, and no extra
+    corpus. Pass `terminal_method_grid=("legacy", "unigram")` to also
+    scan the unigram-backoff terminal (add_k and the derived alpha**3
+    discount join the validation scan), and `extra_train_samples` to
+    inject additional train-split-only corpora after a per-sample
+    id/text leakage check against every non-train split of `samples`.
+    """
     train_samples = [sample for sample in samples if sample["split"] == "train"]
     validation_samples = [
         sample for sample in samples if sample["split"] == "validation"
     ]
+    test_samples = [sample for sample in samples if sample["split"] == "test"]
     if not train_samples:
         raise NGramModelError("dataset has no training samples")
     if not validation_samples:
         raise NGramModelError("dataset has no validation samples")
-    frequencies, ngram_counts, prefix_counts = _build_counts(train_samples)
-    split_counts = {
+    extra_train: list[dict[str, Any]] = []
+    extra_report: dict[str, Any] | None = None
+    if extra_train_samples:
+        for sample in extra_train_samples:
+            if sample.get("split") != "train":
+                raise NGramModelError(
+                    "extra training corpus may only contain train split "
+                    f"samples, got split '{sample.get('split')}' for id "
+                    f"'{sample.get('id')}'"
+                )
+        deduped, dedupe_report = _dedupe_extra_train(
+            train_samples, extra_train_samples
+        )
+        leak_checks = [
+            check_extra_train_leakage(
+                deduped, heldout, heldout_name
+            )
+            for heldout, heldout_name in (
+                (validation_samples, "validation"),
+                (test_samples, "test"),
+            )
+        ]
+        for check in leak_checks:
+            if check["id_overlap_samples"] or check["text_overlap_samples"]:
+                raise NGramModelError(
+                    "extra training corpus leaks held-out "
+                    f"{check['heldout_split']} samples (ids: "
+                    f"{check['id_overlap_examples']}, texts: "
+                    f"{check['text_overlap_examples']}); clean the corpus "
+                    "before training"
+                )
+        extra_train = deduped
+        extra_report = {
+            **dedupe_report,
+            "leakage_checks": leak_checks,
+        }
+    counted_samples: list[dict[str, Any]] = [*train_samples, *extra_train]
+    frequencies, ngram_counts, prefix_counts, unigram_counts = _build_counts(
+        counted_samples
+    )
+    split_counts: dict[str, int] = {
         "train": len(train_samples),
         "validation": len(validation_samples),
     }
+    if extra_train:
+        split_counts["extra_train"] = len(extra_train)
+    total_unigrams = sum(unigram_counts.values())
+    vocabulary_size = len(unigram_counts)
 
-    best: Optional[
-        Tuple[float, float, float, float, float, float, NGramRankerModel]
-    ] = None
-    for backoff_alpha in _BACKOFF_ALPHAS:
-        for rank_weight in _RANK_WEIGHTS:
-            for frequency_weight in _FREQUENCY_WEIGHTS:
-                for language_weight in _LANGUAGE_WEIGHTS:
-                    model = NGramRankerModel(
-                        dataset_sha256=dataset_sha256,
-                        split_counts=split_counts,
-                        rank_weight=rank_weight,
-                        frequency_weight=frequency_weight,
-                        language_weight=language_weight,
-                        backoff_alpha=backoff_alpha,
-                        candidate_frequencies=frequencies,
-                        ngram_counts=ngram_counts,
-                        prefix_counts=prefix_counts,
+    terminal_methods = tuple(terminal_method_grid)
+    for method in terminal_methods:
+        if method not in (TERMINAL_LEGACY, TERMINAL_UNIGRAM):
+            raise NGramModelError(
+                f"unknown terminal method '{method}'; expected "
+                f"'{TERMINAL_LEGACY}' or '{TERMINAL_UNIGRAM}'"
+            )
+
+    best: (
+        tuple[
+            float,
+            float,
+            float,
+            float,
+            float,
+            float,
+            float,
+            float,
+            NGramRankerModel,
+        ]
+        | None
+    ) = None
+    for terminal_method in terminal_methods:
+        add_k_values: Sequence[float] = (
+            (0.0,)
+            if terminal_method == TERMINAL_LEGACY
+            else tuple(unigram_add_k_grid)
+        )
+        for backoff_alpha in backoff_alpha_grid:
+            # The terminal discount follows the backoff chain (order 2
+            # already pays alpha**3), so the unigram terminal keeps that
+            # exponent: the discount under scan is alpha itself.
+            for add_k in add_k_values:
+                terminal = (
+                    UnigramTerminal(
+                        unigram_counts=unigram_counts,
+                        total_count=total_unigrams,
+                        vocabulary_size=vocabulary_size,
+                        add_k=add_k,
+                        discount=backoff_alpha**3,
                     )
-                    accuracy, mrr, covered = _validation_metrics(
-                        model, validation_samples
-                    )
-                    selection = (
-                        accuracy,
-                        mrr,
-                        -frequency_weight - language_weight,
-                        rank_weight,
-                        -language_weight,
-                        -backoff_alpha,
-                        model,
-                    )
-                    if best is None or selection[:-1] > best[:-1]:
-                        best = selection
+                    if terminal_method == TERMINAL_UNIGRAM
+                    else None
+                )
+                for rank_weight in rank_weight_grid:
+                    for frequency_weight in frequency_weight_grid:
+                        for language_weight in language_weight_grid:
+                            model = NGramRankerModel(
+                                dataset_sha256=dataset_sha256,
+                                split_counts=split_counts,
+                                rank_weight=rank_weight,
+                                frequency_weight=frequency_weight,
+                                language_weight=language_weight,
+                                backoff_alpha=backoff_alpha,
+                                unigram_terminal=terminal,
+                                candidate_frequencies=frequencies,
+                                ngram_counts=ngram_counts,
+                                prefix_counts=prefix_counts,
+                            )
+                            accuracy, mrr, covered = _validation_metrics(
+                                model, validation_samples
+                            )
+                            selection = (
+                                accuracy,
+                                mrr,
+                                -float(terminal_method == TERMINAL_UNIGRAM),
+                                -frequency_weight - language_weight,
+                                rank_weight,
+                                -language_weight,
+                                -backoff_alpha,
+                                -add_k if terminal_method == TERMINAL_UNIGRAM else 0.0,
+                                model,
+                            )
+                            if best is None or selection[:-1] > best[:-1]:
+                                best = selection
     assert best is not None
     selected_model = best[-1]
     validation_accuracy, validation_mrr, covered = _validation_metrics(
@@ -279,8 +545,29 @@ def train_ngram_model(
             "frequency_weight": selected_model.frequency_weight,
             "language_weight": selected_model.language_weight,
             "backoff_alpha": selected_model.backoff_alpha,
+            "terminal_method": (
+                TERMINAL_UNIGRAM
+                if selected_model.unigram_terminal is not None
+                else TERMINAL_LEGACY
+            ),
+            **(
+                {
+                    "unigram_add_k": selected_model.unigram_terminal.add_k,
+                    "unigram_discount": selected_model.unigram_terminal.discount,
+                }
+                if selected_model.unigram_terminal is not None
+                else {}
+            ),
+        },
+        "smoothing_scan": {
+            "terminal_method_grid": list(terminal_methods),
+            "backoff_alpha_grid": list(backoff_alpha_grid),
+            "unigram_add_k_grid": list(unigram_add_k_grid),
+            "unigram_discount_rule": "alpha ** 3 (follows the backoff chain)",
         },
     }
+    if extra_report is not None:
+        report["extra_train"] = extra_report
     return selected_model, report
 
 
@@ -318,6 +605,66 @@ def write_ngram_model_atomic(path: Path, model: NGramRankerModel) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _parse_unigram_terminal(
+    smoothing: Mapping[str, Any],
+    payload: Mapping[str, Any],
+) -> UnigramTerminal | None:
+    """Parse the optional unigram-backoff terminal from an artifact.
+
+    Artifacts without the `unigram_terminal` smoothing hyperparameters
+    keep the legacy add-k terminal, so pre-v3 artifacts load and score
+    bit-for-bit. Present-but-malformed configurations fail closed.
+    """
+    config = smoothing.get("unigram_terminal")
+    counts_payload = payload.get("unigram_counts")
+    if config is None:
+        if counts_payload is not None:
+            raise NGramModelError(
+                "model artifact carries unigram_counts without the "
+                "unigram_terminal smoothing hyperparameters"
+            )
+        return None
+    if (
+        not isinstance(config, dict)
+        or not isinstance(counts_payload, dict)
+        or not counts_payload
+    ):
+        raise NGramModelError(
+            "unigram_terminal smoothing requires a config object and a "
+            "non-empty unigram_counts table in the artifact"
+        )
+    add_k = config.get("add_k")
+    discount = config.get("discount")
+    if (
+        isinstance(add_k, bool)
+        or not isinstance(add_k, (int, float))
+        or not add_k > 0
+        or not math.isfinite(add_k)
+        or isinstance(discount, bool)
+        or not isinstance(discount, (int, float))
+        or not discount > 0
+        or not math.isfinite(discount)
+    ):
+        raise NGramModelError("unigram_terminal parameters are invalid")
+    unigram_counts: dict[str, int] = {}
+    for key, value in counts_payload.items():
+        if (
+            not isinstance(key, str)
+            or isinstance(value, bool)
+            or not isinstance(value, int)
+            or value < 1
+        ):
+            raise NGramModelError("unigram_counts entries are invalid")
+        unigram_counts[key] = value
+    return UnigramTerminal(
+        unigram_counts=unigram_counts,
+        total_count=sum(unigram_counts.values()),
+        vocabulary_size=len(unigram_counts),
+        add_k=float(add_k),
+        discount=float(discount),
+    )
+
+
 def load_ngram_model(path: Path) -> NGramRankerModel:
     try:
         with gzip.open(path, "rt", encoding="utf-8") as model_file:
@@ -353,6 +700,12 @@ def load_ngram_model(path: Path) -> NGramRankerModel:
             "to produce a schema v2 stupid-backoff artifact"
         )
     try:
+        unigram_terminal = _parse_unigram_terminal(smoothing, payload)
+    except NGramModelError:
+        raise
+    except (KeyError, TypeError, ValueError, AttributeError) as error:
+        raise NGramModelError("model artifact fields are invalid") from error
+    try:
         return NGramRankerModel(
             dataset_sha256=payload["dataset_sha256"],
             split_counts={
@@ -363,6 +716,7 @@ def load_ngram_model(path: Path) -> NGramRankerModel:
             frequency_weight=float(hyperparameters["frequency_weight"]),
             language_weight=float(hyperparameters["language_weight"]),
             backoff_alpha=float(smoothing["alpha"]),
+            unigram_terminal=unigram_terminal,
             candidate_frequencies={
                 str(key): int(value)
                 for key, value in payload["candidate_frequencies"].items()

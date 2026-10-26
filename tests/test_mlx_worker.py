@@ -21,6 +21,7 @@ from rimeai_runtime.mlx_worker import (
     RollbackBackend,
     _beam_length_penalty,
     _SeedPathScorer,
+    _user_lm_fusion_config,
     common_prefix_length,
     handle_request_line,
     model_artifact_id,
@@ -493,3 +494,176 @@ def test_handle_request_generic_syllables_pass_fuzzy_gate_and_report_stats() -> 
     assert engine.cache.tokens == engine._tokenizer.encode(SEED_CONTEXT) + engine._tokenizer.encode(
         "前文"
     )
+
+
+# --------------------------------------------------------------------------
+# L2 用户 LM 浅融合接线：环境旋钮 fail-closed，λ=0 逐位不变，
+# 融合只改打分不动 KV cache 正确性。
+
+
+def _save_user_lm(tmp_path, texts_by_domain):
+    from rimeai_daemon.user_lm import UserLanguageModel
+    from rimeai_runtime.user_lm_view import UserLanguageModelView
+
+    model = UserLanguageModel()
+    for domain, texts in texts_by_domain.items():
+        model.update(domain, texts)
+    artifact = tmp_path / "user-lm.json.gz"
+    model.save(artifact)
+    return UserLanguageModelView.load(artifact)
+
+
+def test_user_lm_fusion_config_defaults_off(monkeypatch):
+    monkeypatch.delenv("RIMEAI_MLX_USER_LM_PATH", raising=False)
+    monkeypatch.delenv("RIMEAI_MLX_USER_LM_WEIGHT", raising=False)
+    assert _user_lm_fusion_config() == (None, 0.0)
+    # 空串视为未设置。
+    monkeypatch.setenv("RIMEAI_MLX_USER_LM_PATH", "")
+    monkeypatch.setenv("RIMEAI_MLX_USER_LM_WEIGHT", "")
+    assert _user_lm_fusion_config() == (None, 0.0)
+
+
+def test_user_lm_fusion_config_valid_pair(tmp_path, monkeypatch):
+    view = _save_user_lm(tmp_path, {None: ["世界"] * 10})
+    monkeypatch.setenv("RIMEAI_MLX_USER_LM_PATH", str(tmp_path / "user-lm.json.gz"))
+    monkeypatch.setenv("RIMEAI_MLX_USER_LM_WEIGHT", "0.35")
+    loaded, weight = _user_lm_fusion_config()
+    assert weight == 0.35
+    assert loaded is not None
+    assert loaded.mean_log_prob("", "世界") == view.mean_log_prob("", "世界")
+    # λ=0 也校验 artifact 本身（合法配置，仅融合不激活）。
+    monkeypatch.setenv("RIMEAI_MLX_USER_LM_WEIGHT", "0.0")
+    loaded_zero, weight_zero = _user_lm_fusion_config()
+    assert loaded_zero is not None
+    assert weight_zero == 0.0
+
+
+@pytest.mark.parametrize(
+    "path_value,weight_value",
+    [
+        ("/nonexistent/user-lm.json.gz", "0.2"),  # 路径不存在
+        ("", "0.2"),  # 只有权重
+        ("/some/path", ""),  # 只有路径
+        ("/some/path", None),  # 路径设了权重未设
+        (None, "0.2"),  # 权重设了路径未设
+    ],
+)
+def test_user_lm_fusion_config_half_set_or_missing_fails_closed(
+    tmp_path, monkeypatch, path_value, weight_value
+):
+    monkeypatch.delenv("RIMEAI_MLX_USER_LM_PATH", raising=False)
+    monkeypatch.delenv("RIMEAI_MLX_USER_LM_WEIGHT", raising=False)
+    if path_value is not None:
+        monkeypatch.setenv("RIMEAI_MLX_USER_LM_PATH", path_value)
+    if weight_value is not None:
+        monkeypatch.setenv("RIMEAI_MLX_USER_LM_WEIGHT", weight_value)
+    with pytest.raises(MlxEngineError):
+        _user_lm_fusion_config()
+
+
+@pytest.mark.parametrize(
+    "weight_value",
+    ["abc", "-0.1", "1.5", "nan", "inf"],
+)
+def test_user_lm_fusion_config_invalid_weight_fails_closed(
+    tmp_path, monkeypatch, weight_value
+):
+    _save_user_lm(tmp_path, {None: ["世界"] * 5})
+    monkeypatch.setenv("RIMEAI_MLX_USER_LM_PATH", str(tmp_path / "user-lm.json.gz"))
+    monkeypatch.setenv("RIMEAI_MLX_USER_LM_WEIGHT", weight_value)
+    with pytest.raises(MlxEngineError):
+        _user_lm_fusion_config()
+
+
+def test_user_lm_fusion_config_corrupt_artifact_fails_closed(tmp_path, monkeypatch):
+    artifact = tmp_path / "broken.json.gz"
+    artifact.write_bytes(b"not gzip at all")
+    monkeypatch.setenv("RIMEAI_MLX_USER_LM_PATH", str(artifact))
+    monkeypatch.setenv("RIMEAI_MLX_USER_LM_WEIGHT", "0.2")
+    with pytest.raises(MlxEngineError):
+        _user_lm_fusion_config()
+
+
+class _ShijieBackend(_KvSimulatingBackend):
+    """固定分布：试(shi) 0.95 自信胜出，世/界低分。"""
+
+    def softmax(self, row: tuple[int, ...]) -> dict[int, float]:
+        return {4: 0.4, 5: 0.5, 8: 0.95}
+
+
+def _fusion_engine(tmp_path, view, weight) -> MlxConstrainedEngine:
+    tokenizer = _VocabTokenizer(
+        ["<pad>", "你", "好", "的", "世", "界", "。", "<eos>", "试"]
+    )
+    guard = PinyinGuard(
+        {
+            "你": frozenset({"ni"}),
+            "好": frozenset({"hao"}),
+            "的": frozenset({"de"}),
+            "世": frozenset({"shi"}),
+            "界": frozenset({"jie"}),
+            "试": frozenset({"shi"}),
+        }
+    )
+    engine = object.__new__(MlxConstrainedEngine)
+    engine._tokenizer = tokenizer
+    engine.guard = guard
+    engine.index = PinyinTokenIndex.build(tokenizer, guard)
+    engine.cache = PrefixRollbackCache(_ShijieBackend())
+    engine._user_lm = view
+    engine._user_weight = weight
+    return engine
+
+
+def _fusion_request(request_id="r-fusion"):
+    return {
+        "schema_version": 1,
+        "task": "generate_sentence",
+        "request_id": request_id,
+        "context": "",
+        "pinyin": "shijie",
+        "candidates": ["世界"],
+        "max_characters": 30,
+        "stats": True,
+    }
+
+
+def test_handle_request_without_fusion_keeps_baseline(tmp_path):
+    # 无融合：试(shi p=0.95) 自信胜出 → 试界。
+    engine = _fusion_engine(tmp_path, None, 0.0)
+    response = engine.handle_request(_fusion_request())
+    assert response["suggestion"] == "试界"
+    assert response["stats"]["user_lm_weight"] == 0.0
+
+
+def test_handle_request_fusion_reranks_toward_user_evidence(tmp_path):
+    # 融合（λ=0.35）：用户 LM 只见过 世界，试 的逐字 log 概率极低，
+    # fused 排序翻转为 世界——掩码合法性（fuzzy gate）原样通过。
+    view = _save_user_lm(tmp_path, {None: ["世界"] * 500})
+    engine = _fusion_engine(tmp_path, view, 0.35)
+    response = engine.handle_request(_fusion_request("r-fused"))
+    assert response["suggestion"] == "世界"
+    assert 0.0 < response["confidence"] <= 1.0
+    assert response["stats"]["user_lm_weight"] == 0.35
+    # KV cache：浅融合不改 scorer 调用路径，请求后仍回滚到 seed 端点。
+    assert engine.cache.tokens == engine._tokenizer.encode(SEED_CONTEXT)
+
+
+def test_handle_request_fusion_weight_zero_is_bit_identical(tmp_path):
+    # λ=0（同一 view 已加载）：响应与无融合基线逐位一致（含 stats 数字）。
+    view = _save_user_lm(tmp_path, {None: ["世界"] * 500})
+    baseline = _fusion_engine(tmp_path, None, 0.0)
+    zero = _fusion_engine(tmp_path, view, 0.0)
+    request = _fusion_request("r-zero")
+    assert zero.handle_request(request) == baseline.handle_request(request)
+
+
+def test_handle_request_fusion_context_feeds_user_lm(tmp_path):
+    # 融合上下文 = seed("。") + request context + 已生成文本：把训练语料
+    # 换成 只在 前文=前文 时出现 的 世界，验证 context 进入打分。
+    view = _save_user_lm(tmp_path, {None: ["前文世界"] * 500})
+    engine = _fusion_engine(tmp_path, view, 0.35)
+    request = _fusion_request("r-ctx")
+    request["context"] = "前文"
+    response = engine.handle_request(request)
+    assert response["suggestion"] == "世界"

@@ -5,7 +5,7 @@ import json
 from math import isfinite
 from pathlib import Path
 import sys
-from typing import Mapping, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
 from .capture import CaptureError, capture_dataset
 from .cloud_evaluation import (
@@ -237,6 +237,30 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     train_ngram_parser.add_argument("dataset", type=Path)
     train_ngram_parser.add_argument("--output", required=True, type=Path)
+    train_ngram_parser.add_argument(
+        "--extra-train-dataset",
+        action="append",
+        default=None,
+        type=Path,
+        help=(
+            "additional JSONL corpus whose train split only joins the "
+            "n-gram counts after a per-sample id/text leakage check "
+            "against the primary dataset's validation and test splits "
+            "(repeatable)"
+        ),
+    )
+    train_ngram_parser.add_argument(
+        "--terminal-method",
+        choices=("legacy", "unigram"),
+        action="store",
+        default=None,
+        help=(
+            "scan only this terminal smoothing method instead of the "
+            "default legacy-only grid (pass 'unigram' to train a v3-style "
+            "unigram-backoff artifact; 'legacy,unigram' comma form scans "
+            "both)"
+        ),
+    )
 
     train_neural_parser = subparsers.add_parser(
         "train-neural-ranker",
@@ -873,18 +897,70 @@ def _capture(
     return 0
 
 
-def _train_ngram(dataset_path: Path, output_path: Path) -> int:
+def _train_ngram(
+    dataset_path: Path,
+    output_path: Path,
+    extra_dataset_paths: list[Path] | None,
+    terminal_method: str | None,
+) -> int:
     if output_path.resolve() == dataset_path.resolve():
         print(
             "error: --output must not overwrite the dataset",
             file=sys.stderr,
         )
         return 2
+    extra_train_samples: list[dict[str, Any]] = []
+    extra_sources: list[str] = []
+    for extra_path in extra_dataset_paths or []:
+        if extra_path.resolve() == dataset_path.resolve():
+            print(
+                "error: --extra-train-dataset must differ from the primary "
+                "dataset",
+                file=sys.stderr,
+            )
+            return 2
+        if extra_path.resolve() == output_path.resolve():
+            print(
+                "error: --extra-train-dataset must not collide with "
+                "--output",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            extra = load_dataset(extra_path)
+        except DatasetValidationError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 2
+        extra_train_samples.extend(
+            sample for sample in extra.samples if sample["split"] == "train"
+        )
+        extra_sources.append(
+            f"{extra_path}(sha256-{extra.sha256[:16]}, train samples kept)"
+        )
+    train_kwargs: dict[str, Any] = {}
+    if terminal_method:
+        methods = tuple(
+            method.strip()
+            for method in terminal_method.split(",")
+            if method.strip()
+        )
+        if not methods or any(
+            method not in ("legacy", "unigram") for method in methods
+        ):
+            print(
+                "error: --terminal-method entries must be 'legacy' and/or "
+                "'unigram'",
+                file=sys.stderr,
+            )
+            return 2
+        train_kwargs["terminal_method_grid"] = methods
     try:
         dataset = load_dataset(dataset_path)
         model, report = train_ngram_model(
             dataset.samples,
             dataset_sha256=dataset.sha256,
+            extra_train_samples=extra_train_samples,
+            **train_kwargs,
         )
         artifact_sha256 = write_ngram_model_atomic(output_path, model)
     except (DatasetValidationError, NGramModelError, OSError) as error:
@@ -895,6 +971,8 @@ def _train_ngram(dataset_path: Path, output_path: Path) -> int:
         "bytes": output_path.stat().st_size,
         "sha256": artifact_sha256,
     }
+    if extra_sources:
+        report["extra_train"]["sources"] = extra_sources
     print(json.dumps(report, ensure_ascii=False, sort_keys=True))
     return 0
 
@@ -1338,7 +1416,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             args.provenance_output,
         )
     if args.command == "train-ngram":
-        return _train_ngram(args.dataset, args.output)
+        return _train_ngram(
+            args.dataset,
+            args.output,
+            args.extra_train_dataset,
+            args.terminal_method,
+        )
     if args.command == "train-neural-ranker":
         return _train_neural_ranker(
             args.dataset,

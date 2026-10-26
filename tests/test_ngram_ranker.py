@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from typing import Any
 
 import pytest
 
@@ -392,3 +393,343 @@ def test_ngram_worker_implements_the_persistent_ranker_protocol(tmp_path: Path):
     assert response["request_id"] == "request-1"
     assert response["ranking"][0] == "c1"
     assert response["model_artifact_id"].startswith("char-ngram-ranker:sha256-")
+
+
+# ---------------------------------------------------------------------------
+# v3 smoothing: unigram-backoff terminal + extra training corpus
+# ---------------------------------------------------------------------------
+
+_V3_WEIGHTS: dict[str, Any] = dict(
+    rank_weight_grid=(0.1,),
+    frequency_weight_grid=(0.0,),
+    language_weight_grid=(1.0,),
+    backoff_alpha_grid=(0.4,),
+)
+
+
+def _unigram_samples() -> list[dict]:
+    return [
+        _sample(
+            "train-1",
+            "train",
+            "他每天练习",
+            "命令",
+            ["明令", "命令"],
+        ),
+        _sample(
+            "train-2",
+            "train",
+            "发布执行",
+            "命令",
+            ["明令", "命令"],
+        ),
+        _sample(
+            "validation-1",
+            "validation",
+            "下达执行",
+            "命令",
+            ["明令", "命令"],
+        ),
+    ]
+
+
+def test_unigram_terminal_breaks_ties_between_unseen_bigrams():
+    samples = _unigram_samples()
+    legacy, _ = train_ngram_model(samples, dataset_sha256="u" * 64)
+    unigram, _ = train_ngram_model(
+        samples,
+        dataset_sha256="u" * 64,
+        terminal_method_grid=("unigram",),
+        **_V3_WEIGHTS,
+    )
+    assert legacy.unigram_terminal is None
+    assert unigram.unigram_terminal is not None
+
+    # "天" appears twice in the training text; "鸭" never does. Under the
+    # legacy terminal both score the same constant; under the unigram
+    # terminal the frequent character must win.
+    context = "练习"  # unseen bigram prefix for both candidates below
+    legacy_tie = legacy.language_score(context, "天")
+    legacy_duck = legacy.language_score(context, "鸭")
+    if legacy_tie == legacy_duck:  # constant terminal on this fixture
+        assert unigram.language_score(context, "天") > unigram.language_score(
+            context, "鸭"
+        )
+
+
+def test_unigram_terminal_expected_probability_formula():
+    model, _ = train_ngram_model(
+        _unigram_samples(),
+        dataset_sha256="u" * 64,
+        terminal_method_grid=("unigram",),
+        unigram_add_k_grid=(0.5,),
+        **_V3_WEIGHTS,
+    )
+    terminal = model.unigram_terminal
+    assert terminal is not None
+    alpha = model.backoff_alpha
+
+    # text for scoring "鸭" after unseen prefix "鸭": terminal fires.
+    counts = terminal.unigram_counts
+    total = terminal.total_count
+    vocab = terminal.vocabulary_size
+    expected = math.log(
+        ((counts.get("鸭", 0) + 0.5) / (total + 0.5 * vocab)) * alpha**3
+    )
+    assert model.language_score("鸭", "鸭") == pytest.approx(expected)
+    assert terminal.discount == alpha**3
+    assert total == sum(counts.values())
+    assert vocab == len(counts)
+
+
+def test_unigram_terminal_round_trips_through_artifact(tmp_path: Path):
+    model, _ = train_ngram_model(
+        _unigram_samples(),
+        dataset_sha256="u" * 64,
+        terminal_method_grid=("unigram",),
+        **_V3_WEIGHTS,
+    )
+    artifact = tmp_path / "v3.json.gz"
+    write_ngram_model_atomic(artifact, model)
+    loaded = load_ngram_model(artifact)
+
+    loaded_terminal = loaded.unigram_terminal
+    trained_terminal = model.unigram_terminal
+    assert loaded_terminal is not None
+    assert trained_terminal is not None
+    assert loaded_terminal.unigram_counts == trained_terminal.unigram_counts
+    assert loaded_terminal.add_k == trained_terminal.add_k
+    assert loaded_terminal.discount == trained_terminal.discount
+    for sample in _unigram_samples():
+        for candidate in ("命令", "明令", "鸭天"):
+            assert loaded.language_score(
+                sample["context"], candidate
+            ) == model.language_score(sample["context"], candidate)
+    with gzip.open(artifact, "rt", encoding="utf-8") as file:
+        serialized = json.load(file)
+    smoothing = serialized["hyperparameters"]["smoothing"]
+    assert smoothing["unigram_terminal"] == {
+        "add_k": trained_terminal.add_k,
+        "discount": trained_terminal.discount,
+    }
+    assert serialized["unigram_counts"] == trained_terminal.unigram_counts
+
+
+def test_legacy_artifact_scores_bit_for_bit_without_terminal(tmp_path: Path):
+    import sys
+
+    model, _ = train_ngram_model(
+        _unigram_samples(), dataset_sha256="u" * 64
+    )
+    assert model.unigram_terminal is None
+    artifact = tmp_path / "legacy.json.gz"
+    write_ngram_model_atomic(artifact, model)
+    loaded = load_ngram_model(artifact)
+    assert loaded.unigram_terminal is None
+
+    # Reference implementation of the frozen legacy terminal, run against
+    # the loaded artifact's counts: unseen-bigram positions must match
+    # bit-for-bit, not approximately.
+    project_root = Path(__file__).resolve().parent.parent
+    sys.path.insert(0, str(project_root))
+    from rimeai_runtime.ngram_ranker import ORDERS
+
+    def legacy_score(context: str, candidate: str) -> float:
+        text = "^" + context[-loaded.max_context_characters :] + candidate
+        candidate_start = len(text) - len(candidate)
+        total = 0.0
+        terms = 0
+        for position in range(candidate_start, len(text)):
+            probability = None
+            for order in reversed(ORDERS):
+                start = position - order + 1
+                if start < 0:
+                    continue
+                gram = text[start : position + 1]
+                count = loaded.ngram_counts[order].get(gram, 0)
+                prefix = loaded.prefix_counts[order].get(gram[:-1], 0)
+                if count > 0 and prefix > 0:
+                    probability = (count / prefix) * loaded.backoff_alpha ** (
+                        5 - order
+                    )
+                    break
+            if probability is None:
+                gram = text[position - 1 : position + 1]
+                count = loaded.ngram_counts[2].get(gram, 0)
+                prefix = loaded.prefix_counts[2].get(gram[:-1], 0)
+                probability = ((count + 0.1) / (prefix + 1000.0)) * (
+                    loaded.backoff_alpha**3
+                )
+            total += math.log(probability)
+            terms += 1
+        return total / max(1, terms)
+
+    for context in ("练习", "他每天", "", "执行这条命令的鸭"):
+        for candidate in ("鸭天", "命令", "鸭"):
+            assert loaded.language_score(context, candidate) == legacy_score(
+                context, candidate
+            )
+
+
+def test_extra_train_corpus_joins_counts_and_reports_checks():
+    primary = _unigram_samples()
+    extra = [
+        _sample(
+            "extra-1",
+            "train",
+            "维基语料的第一条",
+            "句子",
+            ["句子", "剧子"],
+        ),
+        # duplicate of primary train-1 by text: dropped by dedupe
+        _sample(
+            "extra-2",
+            "train",
+            "他每天练习",
+            "命令",
+            ["明令", "命令"],
+        ),
+    ]
+    model, report = train_ngram_model(
+        primary,
+        dataset_sha256="u" * 64,
+        extra_train_samples=extra,
+        **_V3_WEIGHTS,
+    )
+
+    assert model.split_counts == {
+        "train": 2,
+        "validation": 1,
+        "extra_train": 1,
+    }
+    assert model.candidate_frequencies.get("句子") == 1
+    extra_report = report["extra_train"]
+    assert extra_report["extra_train_input_samples"] == 2
+    assert extra_report["duplicate_text_samples_dropped"] == 1
+    assert extra_report["extra_train_kept_samples"] == 1
+    assert len(extra_report["leakage_checks"]) == 2
+    for check in extra_report["leakage_checks"]:
+        assert check["id_overlap_samples"] == 0
+        assert check["text_overlap_samples"] == 0
+
+
+def test_extra_train_leakage_raises_on_id_or_text_overlap():
+    primary = _unigram_samples()
+    leaked_by_id = _sample(
+        "validation-1",  # collides with the primary validation id
+        "train",
+        "完全不同的文本",
+        "内容",
+        ["内容", "内溶"],
+    )
+    with pytest.raises(NGramModelError, match="leaks held-out validation"):
+        train_ngram_model(
+            primary,
+            dataset_sha256="u" * 64,
+            extra_train_samples=[leaked_by_id],
+            **_V3_WEIGHTS,
+        )
+
+    leaked_by_text = _sample(
+        "extra-clean-id",
+        "train",
+        "下达执行",  # same normalized text as the primary validation sample
+        "命令",
+        ["明令", "命令"],
+    )
+    with pytest.raises(NGramModelError, match="leaks held-out validation"):
+        train_ngram_model(
+            primary,
+            dataset_sha256="u" * 64,
+            extra_train_samples=[leaked_by_text],
+            **_V3_WEIGHTS,
+        )
+
+
+def test_extra_train_rejects_non_train_splits():
+    primary = _unigram_samples()
+    intruder = _sample(
+        "extra-test",
+        "test",
+        "测试样本",
+        "内容",
+        ["内容", "内溶"],
+    )
+    with pytest.raises(NGramModelError, match="train split"):
+        train_ngram_model(
+            primary,
+            dataset_sha256="u" * 64,
+            extra_train_samples=[intruder],
+            **_V3_WEIGHTS,
+        )
+
+
+def test_terminal_method_grid_rejects_unknown_methods():
+    with pytest.raises(NGramModelError, match="unknown terminal method"):
+        train_ngram_model(
+            _unigram_samples(),
+            dataset_sha256="u" * 64,
+            terminal_method_grid=("kneser-ney",),
+            **_V3_WEIGHTS,
+        )
+
+
+def test_train_ngram_cli_supports_extra_dataset_and_unigram_terminal(
+    tmp_path: Path, capsys
+):
+    primary = tmp_path / "primary.jsonl"
+    extra = tmp_path / "extra.jsonl"
+    samples = _unigram_samples()
+    primary.write_text(
+        "".join(
+            json.dumps(sample, ensure_ascii=False) + "\n"
+            for sample in samples
+        ),
+        encoding="utf-8",
+    )
+    extra.write_text(
+        json.dumps(
+            _sample("extra-1", "train", "维基语料第一条", "句子", ["句子"]),
+            ensure_ascii=False,
+        )
+        + "\n"
+        + json.dumps(
+            _sample(
+                "extra-holdout",
+                "validation",
+                "绝不能进入训练",
+                "机密",
+                ["机密"],
+            ),
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    artifact = tmp_path / "v3-candidate.json.gz"
+
+    exit_code = main(
+        [
+            "train-ngram",
+            str(primary),
+            "--output",
+            str(artifact),
+            "--extra-train-dataset",
+            str(extra),
+            "--terminal-method",
+            "unigram",
+        ]
+    )
+
+    assert exit_code == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["selected_hyperparameters"]["terminal_method"] == "unigram"
+    assert report["extra_train"]["extra_train_kept_samples"] == 1
+    # only the extra corpus's train split entered counting
+    assert "机密" not in json.dumps(
+        json.loads(
+            gzip.open(artifact, "rt", encoding="utf-8").read()
+        )["candidate_frequencies"]
+    )
+    loaded = load_ngram_model(artifact)
+    assert loaded.unigram_terminal is not None
