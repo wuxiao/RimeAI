@@ -1,8 +1,8 @@
 """Constrained decoding: pinyin token index, greedy decode, fuzzy gate."""
 
 import math
-
 from pathlib import Path
+import random
 
 import pytest
 
@@ -108,7 +108,10 @@ def test_decode_chains_greedy_tokens_with_geometric_mean_confidence():
     result = ConstrainedGreedyDecoder.decode(scorer, ("ni", "hao"), _index())
     assert result.text == "你好"
     assert result.consumed_syllables == 2
-    assert result.confidence == pytest.approx(math.sqrt(0.6 * 0.9))
+    # 每步 allowed 只有一个候选 → 掩码内归一化后恒为 1.0；
+    # RAW 几何均值保留在 raw_confidence 供双口径对比。
+    assert result.confidence == pytest.approx(1.0)
+    assert result.raw_confidence == pytest.approx(math.sqrt(0.6 * 0.9))
 
 
 def test_long_word_priority_promotes_longer_token_below_threshold():
@@ -190,7 +193,314 @@ def test_beam_prefers_jointly_better_path_over_greedy():
     )
     assert beam.text == "我们明天"
     assert beam.consumed_syllables == 4
-    assert beam.confidence == pytest.approx(math.sqrt(0.2 * 0.9))
+    # 掩码内归一化：第 1 步 Z=0.5+0.2（我/我们），第 2 步 Z=0.9（明天）；
+    # RAW 几何均值保留在 raw_confidence。
+    assert beam.confidence == pytest.approx(math.sqrt((0.2 / 0.7) * 1.0))
+    assert beam.raw_confidence == pytest.approx(math.sqrt(0.2 * 0.9))
+
+
+# --------------------------------------------------------------------------
+# 无损 early-stop：剪枝只砍掉严格劣于最优 completed 路径的 frontier，
+# 任何输入的返回值必须与不剪枝的完整搜索完全一致。
+
+
+class _CountingScorer:
+    """Wraps a scorer and counts calls (proof that early-stop fires)."""
+
+    def __init__(self, base):
+        self.base = base
+        self.calls = 0
+
+    def __call__(self, step_token_ids):
+        self.calls += 1
+        return self.base(step_token_ids)
+
+
+class _HashScorer:
+    """Deterministic pseudo-random next-token distribution keyed on the
+    consumed prefix (KV semantics: position k depends only on tokens[:k])."""
+
+    def __init__(self, vocab_size=18, seed=0):
+        self._vocab_size = vocab_size
+        self._seed = seed
+
+    def __call__(self, step_token_ids):
+        digest = self._seed
+        for token in step_token_ids:
+            digest = ((digest ^ (token + 0x9E3779B9)) * 16777619) & 0xFFFFFFFF
+        return {
+            token: (((digest >> (token % 31)) % 997) + 1) / 997.0
+            for token in range(self._vocab_size)
+        }
+
+
+def _reference_beam_decode(
+    scorer,
+    syllables,
+    index,
+    *,
+    max_characters=30,
+    fuzzy=False,
+    beam_width=4,
+):
+    """Pre-change _decode_beam, copied verbatim as the oracle.
+
+    路径选择与 RAW 分数完全沿用改前实现（无 early-stop 的完整
+    搜索）：oracle 的 confidence 字段携带的正是改前的 RAW 几何
+    均值口径，与新版 DecodeResult.raw_confidence 对位比较，
+    证明文本输出/路径选择/RRAW 管线逐位不变。
+    """
+    total = len(syllables)
+
+    def expand(state):
+        tokens, text, consumed, log_probability_sum, steps = state
+        probabilities = scorer(tokens)
+        expanded = []
+        for token_id, reading in index.candidates(
+            syllables[consumed:], fuzzy=fuzzy
+        ).items():
+            probability = probabilities.get(token_id, 0.0)
+            if probability <= 0.0:
+                continue
+            token_text = index.token_texts.get(token_id, "")
+            if len(text) + len(token_text) > max_characters:
+                continue
+            expanded.append(
+                (
+                    tokens + [token_id],
+                    text + token_text,
+                    consumed + len(reading),
+                    log_probability_sum + math.log(max(probability, 1e-12)),
+                    steps + 1,
+                )
+            )
+        return expanded
+
+    frontier = [([], "", 0, 0.0, 0)]
+    completed = []
+    deepest = 0
+    while frontier:
+        next_frontier = []
+        for state in frontier:
+            deepest = max(deepest, state[2])
+            for child in expand(state):
+                if child[2] == total:
+                    completed.append(child)
+                else:
+                    next_frontier.append(child)
+        next_frontier.sort(key=lambda state: (-state[3], state[0]))
+        frontier = next_frontier[:beam_width]
+    if not completed:
+        return DecodeResult("", 0.0, deepest)
+    best = min(completed, key=lambda state: (-state[3], state[0]))
+    confidence = math.exp(best[3] / best[4]) if best[4] else 0.0
+    return DecodeResult(best[1], confidence, total)
+
+
+# 单音节自由拼 + 必须成对出现的双音节 token 块（无单字 token），
+# 混合出有/无 completed 路径、不同深度完成的随机输入。
+_SINGLE_SYLLABLES = ("ni", "hao", "de", "shi", "jie", "wo", "men", "men")
+_MULTI_SYLLABLE_BLOCKS = (("ming", "tian"), ("jin", "tian"), ("si", "ji"))
+
+
+def _random_syllable_sequences(seed, count):
+    rng = random.Random(seed)
+    sequences = []
+    for _ in range(count):
+        parts = []
+        for _ in range(rng.randint(2, 5)):
+            if rng.random() < 0.5:
+                parts.append(rng.choice(_SINGLE_SYLLABLES))
+            else:
+                parts.extend(rng.choice(_MULTI_SYLLABLE_BLOCKS))
+        sequences.append(tuple(parts))
+    return sequences
+
+
+@pytest.mark.parametrize("max_characters", [30, 5])
+@pytest.mark.parametrize("beam_width", [2, 4])
+def test_beam_early_stop_matches_exhaustive_search(beam_width, max_characters):
+    index = _index()
+    for seed in range(6):
+        for syllables in _random_syllable_sequences(1000 + seed, 6):
+            fast = _CountingScorer(_HashScorer(seed=seed))
+            slow = _CountingScorer(_HashScorer(seed=seed))
+            result = ConstrainedGreedyDecoder.decode(
+                fast,
+                syllables,
+                index,
+                max_characters=max_characters,
+                beam_width=beam_width,
+            )
+            expected = _reference_beam_decode(
+                slow,
+                syllables,
+                index,
+                max_characters=max_characters,
+                beam_width=beam_width,
+            )
+            assert (
+                result.text,
+                result.consumed_syllables,
+                result.raw_confidence,
+            ) == (
+                expected.text,
+                expected.consumed_syllables,
+                expected.confidence,
+            ), (syllables, seed)
+            # 早停只减不增 scorer 调用。
+            assert fast.calls <= slow.calls, (syllables, seed)
+
+
+_FUZZY_TYPED_SEQUENCES = (
+    ("ni", "hao"),
+    ("jing", "tian"),  # jin ~ jing
+    ("si", "ji"),
+    ("si", "jie"),  # shi ~ si
+    ("cang",),  # chang ~ cang
+    ("ni", "jing", "tian"),
+    ("si", "jie", "ni", "hao"),
+    ("jin", "tian", "si", "ji"),
+)
+
+
+@pytest.mark.parametrize("beam_width", [2, 4])
+def test_beam_early_stop_matches_exhaustive_search_fuzzy(beam_width):
+    index = _index()
+    for seed in range(4):
+        for syllables in _FUZZY_TYPED_SEQUENCES:
+            fast = _CountingScorer(_HashScorer(seed=seed))
+            slow = _CountingScorer(_HashScorer(seed=seed))
+            result = ConstrainedGreedyDecoder.decode(
+                fast,
+                syllables,
+                index,
+                fuzzy=True,
+                beam_width=beam_width,
+            )
+            expected = _reference_beam_decode(
+                slow,
+                syllables,
+                index,
+                fuzzy=True,
+                beam_width=beam_width,
+            )
+            assert (
+                result.text,
+                result.consumed_syllables,
+                result.raw_confidence,
+            ) == (
+                expected.text,
+                expected.consumed_syllables,
+                expected.confidence,
+            ), (syllables, seed)
+            assert fast.calls <= slow.calls, (syllables, seed)
+
+
+def test_beam_early_stop_actually_skips_scoring_rounds():
+    # 世界好 在第 2 轮以 log(0.63) 完成；frontier 里的 时界 log(0.02)、
+    # 试界 log(0.01) 都严格更差，第 3 轮注定无用，不得再调用 scorer。
+    table = {
+        (): {2: 0.7, 8: 0.1, 11: 0.05},
+        (2,): {1: 0.9},
+        (8,): {10: 0.2},
+        (11,): {10: 0.2},
+        (8, 10): {1: 0.5},
+        (11, 10): {1: 0.5},
+    }
+    fast = _CountingScorer(_FixedScorer(table))
+    slow = _CountingScorer(_FixedScorer(table))
+    result = ConstrainedGreedyDecoder.decode(
+        fast, ("shi", "jie", "hao"), _index(), beam_width=4
+    )
+    expected = _reference_beam_decode(
+        slow, ("shi", "jie", "hao"), _index(), beam_width=4
+    )
+    assert result.text == "世界好"
+    assert (
+        result.text,
+        result.raw_confidence,
+        result.consumed_syllables,
+    ) == (
+        expected.text,
+        expected.confidence,
+        expected.consumed_syllables,
+    )
+    # 掩码内归一化：世界 0.7/Z（Z=0.85），好 0.9/Z（Z=0.9）。
+    assert result.confidence == pytest.approx(
+        math.sqrt((0.7 / 0.85) * (0.9 / 0.9))
+    )
+    # 轮 1（1 个状态）+ 轮 2（3 个状态）= 4 次；参照还要跑轮 3（2 次）。
+    assert fast.calls == 4
+    assert fast.calls < slow.calls
+    assert slow.calls == 6
+
+
+def test_beam_never_prunes_without_completed_path():
+    # 没有任何 completed 路径时绝不剪枝：你好 在第 2 轮只剩 log(0.005)
+    # 的超低分 frontier，仍必须继续搜索并找到 你好的。
+    scorer = _FixedScorer({(): {0: 0.5}, (0,): {1: 0.01}, (0, 1): {3: 0.9}})
+    result = ConstrainedGreedyDecoder.decode(
+        scorer, ("ni", "hao", "de"), _index(), beam_width=4
+    )
+    expected = _reference_beam_decode(
+        _FixedScorer({(): {0: 0.5}, (0,): {1: 0.01}, (0, 1): {3: 0.9}}),
+        ("ni", "hao", "de"),
+        _index(),
+        beam_width=4,
+    )
+    assert result.text == "你好的"
+    assert result.consumed_syllables == 3
+    # 每步 allowed 均只有单候选 → 归一化恒 1.0；RAW 均值走 raw 口径。
+    assert result.confidence == pytest.approx(1.0)
+    assert result.raw_confidence == pytest.approx((0.5 * 0.01 * 0.9) ** (1 / 3))
+    assert (
+        result.text,
+        result.raw_confidence,
+        result.consumed_syllables,
+    ) == (
+        expected.text,
+        expected.confidence,
+        expected.consumed_syllables,
+    )
+
+
+def test_beam_keeps_searching_on_equal_scores_for_tie_break():
+    # 我们+明天 在第 2 轮以 log(0.2) 完成（tokens [16, 15]）；frontier 的
+    # 我门路径 同样是 log(0.2)。同分不得剪枝：tie-break 比较 token id，
+    # 更长的 [12, 14, 15] 首位 id 更小而胜出，且几何均值置信度更高
+    # （0.2^(1/3) > 0.2^(1/2)）。用 <= 剪枝会错拿 我们明天。
+    table = {
+        (): {12: 0.4, 16: 0.4},
+        (16,): {15: 0.5},
+        (12,): {14: 0.5},
+        (12, 14): {15: 1.0},
+    }
+    result = ConstrainedGreedyDecoder.decode(
+        _FixedScorer(table), ("wo", "men", "ming", "tian"), _index(), beam_width=4
+    )
+    expected = _reference_beam_decode(
+        _FixedScorer(table),
+        ("wo", "men", "ming", "tian"),
+        _index(),
+        beam_width=4,
+    )
+    assert result.text == "我门明天"
+    assert result.raw_confidence == pytest.approx(0.2 ** (1 / 3))
+    # 归一化：我 0.4/Z（Z=0.8），门 0.5/Z（Z=0.5，们不在 scorer 表），
+    # 明天 1.0/Z（Z=1.0）。
+    assert result.confidence == pytest.approx(
+        ((0.4 / 0.8) * (0.5 / 0.5) * (1.0 / 1.0)) ** (1 / 3)
+    )
+    assert (
+        result.text,
+        result.raw_confidence,
+        result.consumed_syllables,
+    ) == (
+        expected.text,
+        expected.confidence,
+        expected.consumed_syllables,
+    )
 
 
 def test_fuzzy_equal_covers_frozen_pairs_both_directions():
@@ -330,3 +640,235 @@ def test_gold_path_reachable_rejects_unknown_character():
 def test_gold_path_reachable_rejects_empty_inputs():
     assert not gold_path_reachable(_index(), "", ())
     assert not gold_path_reachable(_index(), "你好", ())
+
+
+# --------------------------------------------------------------------------
+# 掩码内归一化置信度：口径、单调性与边界。
+
+
+def test_renormalized_confidence_monotone_in_chosen_share():
+    # 选中 token 的 RAW 概率提高（掩码内另一竞争者 时/试 固定 0.2）
+    # → 该步 p/Z 提高 → 几何均值提高。0.6/0.8 < 0.7/0.9 < 0.8/1.0。
+    low = ConstrainedGreedyDecoder.decode(
+        _FixedScorer({(): {8: 0.6, 11: 0.2}}), ("shi",), _index()
+    )
+    mid = ConstrainedGreedyDecoder.decode(
+        _FixedScorer({(): {8: 0.7, 11: 0.2}}), ("shi",), _index()
+    )
+    high = ConstrainedGreedyDecoder.decode(
+        _FixedScorer({(): {8: 0.8, 11: 0.2}}), ("shi",), _index()
+    )
+    assert low.text == mid.text == high.text == "时"
+    assert low.confidence == pytest.approx(0.6 / 0.8)
+    assert mid.confidence == pytest.approx(0.7 / 0.9)
+    assert high.confidence == pytest.approx(0.8 / 1.0)
+    assert low.confidence < mid.confidence < high.confidence
+
+
+def test_renormalized_confidence_drops_when_mask_gains_mass():
+    # 选中 token 的 RAW 概率不变，掩码内另一竞争者获得更多概率质量
+    # → Z 增大 → p/Z 下降；RAW 口径纹丝不动。
+    calm = ConstrainedGreedyDecoder.decode(
+        _FixedScorer({(): {8: 0.6, 11: 0.2}}), ("shi",), _index()
+    )
+    contested = ConstrainedGreedyDecoder.decode(
+        _FixedScorer({(): {8: 0.6, 11: 0.35}}), ("shi",), _index()
+    )
+    assert calm.text == contested.text == "时"
+    assert calm.confidence == pytest.approx(0.6 / 0.8)
+    assert contested.confidence == pytest.approx(0.6 / 0.95)
+    assert contested.confidence < calm.confidence
+    assert calm.raw_confidence == contested.raw_confidence == pytest.approx(0.6)
+
+
+def test_renormalized_confidence_bounds_and_range():
+    # 多步路径：每步 p/Z ∈ (0,1]，几何均值 ∈ (0,1]；RAW 口径与
+    # 归一化口径在单候选步退化相同（1.0 vs RAW 概率本身）。
+    result = ConstrainedGreedyDecoder.decode(
+        _FixedScorer(
+            {
+                (): {12: 0.5, 16: 0.2, 4: 0.3},
+                (12,): {14: 0.6, 13: 0.3},
+                (12, 14): {15: 0.1, 4: 0.9},
+                (16,): {15: 0.9, 4: 0.1},
+            }
+        ),
+        ("wo", "men", "ming", "tian"),
+        _index(),
+        beam_width=4,
+    )
+    assert 0.0 < result.confidence <= 1.0
+    assert 0.0 < result.raw_confidence <= 1.0
+
+
+def test_zero_probability_mask_abstains_safely():
+    # Z=0：掩码内全部候选 RAW 概率为 0（scorer 返回空表或全 0）→
+    # 不得除零，弃权（空文本、双口径 0.0）。
+    for probabilities in ({}, {0: 0.0, 4: 0.0}):
+        result = ConstrainedGreedyDecoder.decode(
+            _FixedScorer({(): probabilities}), ("ni",), _index()
+        )
+        assert result.text == ""
+        assert result.confidence == 0.0
+        assert result.raw_confidence == 0.0
+        assert result.consumed_syllables == 0
+
+
+def test_empty_allowed_set_abstains_safely():
+    # allowed 为空（无 token 匹配音节前缀）→ 弃权，双口径 0.0。
+    result = ConstrainedGreedyDecoder.decode(
+        _FixedScorer({(): {0: 0.9}}), ("xx",), _index()
+    )
+    assert result.text == ""
+    assert result.confidence == 0.0
+    assert result.raw_confidence == 0.0
+
+
+def test_empty_result_default_raw_confidence_matches_legacy_positions():
+    # frozen dataclass 兼容性：位置构造（改前所有构造点的形态）依旧
+    # 合法，raw_confidence 默认 0.0 与空结果语义一致。
+    assert DecodeResult("", 0.0, 3) == DecodeResult("", 0.0, 3, 0.0)
+    assert DecodeResult("", 0.0, 3).raw_confidence == 0.0
+
+
+# --------------------------------------------------------------------------
+# 长度惩罚：默认 0 逐位不变；显式启用改变 beam 排序。
+
+
+def test_length_penalty_zero_keeps_decoding_bit_identical():
+    # 默认值与显式 0.0 完全等价，且与改前 oracle（纯 RAW 联合对数
+    # 概率排序 + 无早停完整搜索）在随机输入上逐位一致。
+    index = _index()
+    for seed in range(4):
+        for syllables in _random_syllable_sequences(2300 + seed, 5):
+            table_scorer = _HashScorer(seed=seed)
+            default = ConstrainedGreedyDecoder.decode(
+                table_scorer, syllables, index, beam_width=4
+            )
+            explicit = ConstrainedGreedyDecoder.decode(
+                _HashScorer(seed=seed),
+                syllables,
+                index,
+                beam_width=4,
+                length_penalty=0.0,
+            )
+            oracle = _reference_beam_decode(
+                _HashScorer(seed=seed), syllables, index, beam_width=4
+            )
+            assert default == explicit, (syllables, seed)
+            assert (
+                default.text,
+                default.consumed_syllables,
+                default.raw_confidence,
+            ) == (
+                oracle.text,
+                oracle.consumed_syllables,
+                oracle.confidence,
+            ), (syllables, seed)
+
+
+def test_length_penalty_promotes_more_step_path_when_enabled():
+    # RAW 联合概率 我们(0.5) > 我门(0.5*0.9)，默认 0 选「我们」；
+    # penalty=1.0 按步数归一化后 我门 log(0.45)/2 > 我们 log(0.5)/1，
+    # 排序翻转，证明参数真实接入排序。
+    table = {(): {16: 0.5, 12: 0.5}, (12,): {14: 0.9}}
+    scorer = _FixedScorer(table)
+    assert (
+        ConstrainedGreedyDecoder.decode(
+            scorer, ("wo", "men"), _index(), beam_width=4
+        ).text
+        == "我们"
+    )
+    assert (
+        ConstrainedGreedyDecoder.decode(
+            scorer,
+            ("wo", "men"),
+            _index(),
+            beam_width=4,
+            length_penalty=1.0,
+        ).text
+        == "我门"
+    )
+
+
+def test_length_penalty_keeps_early_stop_lossless():
+    # penalty>0 时早停上界改用 L/total**penalty：随机输入下带惩罚
+    # 的有早停实现必须与同一惩罚下的无早停完整搜索完全一致。
+    index = _index()
+
+    def exhaustive(scorer, syllables, *, fuzzy=False, penalty):
+        total = len(syllables)
+        frontier = [([], "", 0, 0.0, 0)]
+        completed = []
+        while frontier:
+            nxt = []
+            for tokens, text, consumed, log_p, steps in frontier:
+                probabilities = scorer(tokens)
+                for token_id, reading in index.candidates(
+                    syllables[consumed:], fuzzy=fuzzy
+                ).items():
+                    probability = probabilities.get(token_id, 0.0)
+                    if probability <= 0.0:
+                        continue
+                    token_text = index.token_texts.get(token_id, "")
+                    if len(text) + len(token_text) > 30:
+                        continue
+                    child = (
+                        tokens + [token_id],
+                        text + token_text,
+                        consumed + len(reading),
+                        log_p + math.log(max(probability, 1e-12)),
+                        steps + 1,
+                    )
+                    if child[2] == total:
+                        completed.append(child)
+                    else:
+                        nxt.append(child)
+            def rank(state):
+                raw = state[3]
+                if state[4] <= 0 or penalty == 0.0:
+                    return raw
+                return raw / (state[4] ** penalty)
+            nxt.sort(key=lambda state: (-rank(state), state[0]))
+            frontier = nxt[:4]
+        if not completed:
+            return None
+        return min(completed, key=lambda state: (-rank(state), state[0]))
+
+    for seed in range(5):
+        for syllables in _random_syllable_sequences(3100 + seed, 5):
+            for penalty in (0.5, 1.0):
+                result = ConstrainedGreedyDecoder.decode(
+                    _HashScorer(seed=seed),
+                    syllables,
+                    index,
+                    beam_width=4,
+                    length_penalty=penalty,
+                )
+                expected = exhaustive(
+                    _HashScorer(seed=seed), syllables, penalty=penalty
+                )
+                if expected is None:
+                    assert result.text == "" and result.consumed_syllables == 0
+                else:
+                    assert (
+                        result.text,
+                        result.consumed_syllables,
+                        result.raw_confidence,
+                    ) == (
+                        expected[1],
+                        total_len := len(syllables),
+                        math.exp(expected[3] / expected[4]),
+                    ), (syllables, seed, penalty)
+                    assert result.consumed_syllables == total_len
+
+
+def test_length_penalty_is_ignored_by_greedy():
+    # greedy 单路径无长度竞争：penalty 传不传都不改变任何输出。
+    scorer = _FixedScorer({(): {0: 0.6}, (0,): {1: 0.9}})
+    baseline = ConstrainedGreedyDecoder.decode(scorer, ("ni", "hao"), _index())
+    penalized = ConstrainedGreedyDecoder.decode(
+        scorer, ("ni", "hao"), _index(), length_penalty=1.0
+    )
+    assert baseline == penalized
+    assert baseline.text == "你好"

@@ -23,6 +23,12 @@ class SentenceDecoderProtocolError(RuntimeError):
 class SentenceSuggestion:
     text: str
     confidence: float
+    # Legacy RAW-softmax geometric-mean confidence when the worker
+    # reports it via the optional stats payload (None when absent,
+    # e.g. the frozen torch worker never sends stats). Kept for
+    # evaluation-side dual-caliber comparison against the
+    # mask-renormalized `confidence`.
+    raw_confidence: "float | None" = None
 
 
 class CommandSentenceDecoder:
@@ -143,6 +149,10 @@ class CommandSentenceDecoder:
             "domain": sample["domain"],
             "candidates": sample["candidates"],
             "max_characters": 30,
+            # Optional telemetry: evaluation asks for it so the legacy
+            # RAW confidence can ride along (stats.confidence_raw);
+            # workers that ignore the field are unaffected.
+            "stats": True,
         }
         try:
             self._process.stdin.write(
@@ -219,7 +229,17 @@ class CommandSentenceDecoder:
                 "decoder model_artifact_id changed during evaluation"
             )
         self.model_artifact_id = artifact_id
-        return SentenceSuggestion(text, float(confidence))
+        stats = response.get("stats")
+        raw_confidence: float | None = None
+        if isinstance(stats, dict):
+            stats_raw = stats.get("confidence_raw")
+            if (
+                isinstance(stats_raw, (int, float))
+                and not isinstance(stats_raw, bool)
+                and isfinite(stats_raw)
+            ):
+                raw_confidence = float(stats_raw)
+        return SentenceSuggestion(text, float(confidence), raw_confidence)
 
     def _sample_peak_rss(self) -> None:
         process = self._process

@@ -6,6 +6,7 @@ import json
 
 import pytest
 
+from rimeai_runtime.constrained_decoder import PinyinTokenIndex
 from rimeai_runtime.constrained_worker_protocol import (
     GenerateRequestError,
     generate_response,
@@ -14,13 +15,17 @@ from rimeai_runtime.constrained_worker_protocol import (
 from rimeai_runtime.mlx_worker import (
     BEAM_WIDTH,
     SEED_CONTEXT,
+    MlxConstrainedEngine,
+    MlxEngineError,
     PrefixRollbackCache,
     RollbackBackend,
+    _beam_length_penalty,
     _SeedPathScorer,
     common_prefix_length,
     handle_request_line,
     model_artifact_id,
 )
+from rimeai_runtime.pinyin_guard import PinyinGuard
 
 
 def _stable_probs(prefix: tuple[int, ...]) -> dict[int, float]:
@@ -188,6 +193,24 @@ def test_constants_pin_the_frozen_contract() -> None:
     assert artifact.endswith(":mlx-8bit:constrained-v3-mlx")
 
 
+def test_length_penalty_env_knob_defaults_and_bounds(monkeypatch) -> None:
+    # 缺省/空串 → 0.0（冻结的联合对数概率排序，逐位不变）；合法
+    # float 透传；非法值 fail-closed（评测环境里的 typo 不能静默
+    # 重排 beam）。
+    monkeypatch.delenv("RIMEAI_MLX_LENGTH_PENALTY", raising=False)
+    assert _beam_length_penalty() == 0.0
+    monkeypatch.setenv("RIMEAI_MLX_LENGTH_PENALTY", "")
+    assert _beam_length_penalty() == 0.0
+    monkeypatch.setenv("RIMEAI_MLX_LENGTH_PENALTY", "0.5")
+    assert _beam_length_penalty() == 0.5
+    monkeypatch.setenv("RIMEAI_MLX_LENGTH_PENALTY", "1.0")
+    assert _beam_length_penalty() == 1.0
+    for bad in ("abc", "-0.5", "5"):
+        monkeypatch.setenv("RIMEAI_MLX_LENGTH_PENALTY", bad)
+        with pytest.raises(MlxEngineError):
+            _beam_length_penalty()
+
+
 def _request(**overrides: object) -> dict[str, object]:
     request: dict[str, object] = {
         "schema_version": 1,
@@ -334,3 +357,139 @@ def test_post_request_rollback_releases_beam_tail_rows() -> None:
     # 下一请求从 seed 端点继续：只需喂自己的增量。
     scorer([11, 4])
     assert backend.feed_deltas[-1] == [11, 4]
+
+
+# --------------------------------------------------------------------------
+# 音节切分兜底：guard.segment 失败时改用通用词典切分（可完整铺满才用），
+# 不再退成 PinyinTokenIndex 无法匹配的 [整串]。
+
+
+class _VocabTokenizer:
+    """decode/encode 双向都覆盖的最小 tokenizer（含 seed "。"）。"""
+
+    def __init__(self, texts: list[str]) -> None:
+        self.vocab_size = len(texts)
+        self._texts = list(texts)
+
+    def decode(self, ids: list[int]) -> str:
+        return self._texts[ids[0]]
+
+    def encode(self, text: str) -> list[int]:
+        # 逐字符查表；未登录字符（如 context 里的 前文）落到 <pad>。
+        return [self._texts.index(ch) if ch in self._texts else 0 for ch in text]
+
+
+class _FlatDistributionBackend(_KvSimulatingBackend):
+    """固定分布后端：id 越小概率越高，decode 路径确定可断言。"""
+
+    def softmax(self, row: tuple[int, ...]) -> dict[int, float]:
+        return {1: 0.9, 2: 0.85, 3: 0.8, 4: 0.75, 5: 0.7, 6: 0.65, 7: 0.6}
+
+
+def _engine() -> MlxConstrainedEngine:
+    # 不触发 mlx 导入：手工装配 handle_request 用到的全部成员。
+    tokenizer = _VocabTokenizer(
+        ["<pad>", "你", "好", "的", "世", "界", "。", "<eos>"]
+    )
+    guard = PinyinGuard(
+        {
+            "你": frozenset({"ni"}),
+            "好": frozenset({"hao"}),
+            "的": frozenset({"de"}),
+            "世": frozenset({"shi"}),
+            "界": frozenset({"jie"}),
+        }
+    )
+    engine = object.__new__(MlxConstrainedEngine)
+    engine._tokenizer = tokenizer
+    engine.guard = guard
+    engine.index = PinyinTokenIndex.build(tokenizer, guard)
+    engine.cache = PrefixRollbackCache(_FlatDistributionBackend())
+    return engine
+
+
+def test_handle_request_segment_success_keeps_guard_segmentation() -> None:
+    # candidates[0] 自身读音即可铺满拼音 → 走 guard.segment，行为不变。
+    engine = _engine()
+    response = engine.handle_request(
+        {
+            "schema_version": 1,
+            "task": "generate_sentence",
+            "request_id": "r-1",
+            "context": "",
+            "pinyin": "nihaode",
+            "candidates": ["你好的"],
+            "max_characters": 30,
+        }
+    )
+    assert response["suggestion"] == "你好的"
+    assert response["request_id"] == "r-1"
+
+
+def test_handle_request_segment_failure_uses_generic_syllables() -> None:
+    # candidates[0]（你好）铺不满 nihaode → guard.segment None；旧逻辑退
+    # ["nihaode"] 整串后 decode 必空建议；新逻辑拿到合法音节序列
+    # ["ni", "hao", "de"] 并解出 你好的。
+    engine = _engine()
+    response = engine.handle_request(
+        {
+            "schema_version": 1,
+            "task": "generate_sentence",
+            "request_id": "r-2",
+            "context": "",
+            "pinyin": "nihaode",
+            "candidates": ["你好"],
+            "max_characters": 30,
+        }
+    )
+    assert response["suggestion"] == "你好的"
+    assert 0.0 < response["confidence"] <= 1.0
+    # 请求后缓存回滚到 seed 端点（收尾流程未被 fallback 改动）。
+    assert engine.cache.tokens == engine._tokenizer.encode(SEED_CONTEXT)
+
+
+def test_handle_request_generic_failure_keeps_whole_string_fallback() -> None:
+    # 通用切分也铺不满 zzzz → 维持原 [整串] 行为：空建议。
+    engine = _engine()
+    response = engine.handle_request(
+        {
+            "schema_version": 1,
+            "task": "generate_sentence",
+            "request_id": "r-3",
+            "context": "",
+            "pinyin": "zzzz",
+            "candidates": ["你好"],
+            "max_characters": 30,
+        }
+    )
+    assert response["suggestion"] == ""
+    assert response["confidence"] == 0.0
+
+
+def test_handle_request_generic_syllables_pass_fuzzy_gate_and_report_stats() -> None:
+    # 带 context 与 stats 的完整流程：fallback 得到的音节序列要通过
+    # fuzzy gate（世界 = shi+jie），且 stats 快照先于收尾回滚。
+    engine = _engine()
+    response = engine.handle_request(
+        {
+            "schema_version": 1,
+            "task": "generate_sentence",
+            "request_id": "r-4",
+            "context": "前文",
+            "pinyin": "shijie",
+            "candidates": ["你好"],
+            "max_characters": 30,
+            "stats": True,
+        }
+    )
+    assert response["suggestion"] == "世界"
+    assert "cache_fed_tokens" in response["stats"]
+    # 双口径遥测：stats.confidence_raw 携带旧 RAW 口径，主字段
+    # confidence 是掩码内归一化口径；length_penalty 记录当次旋钮。
+    assert "confidence_raw" in response["stats"]
+    assert response["stats"]["length_penalty"] == 0.0
+    assert 0.0 < response["confidence"] <= 1.0
+    assert 0.0 <= response["stats"]["confidence_raw"] <= 1.0
+    assert engine.cache.tokens == engine._tokenizer.encode(SEED_CONTEXT) + engine._tokenizer.encode(
+        "前文"
+    )

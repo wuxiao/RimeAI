@@ -344,6 +344,32 @@ def _build_parser() -> argparse.ArgumentParser:
         "--rime-dictionary", required=True, type=Path
     )
     train_beam_parser.add_argument("--output", required=True, type=Path)
+    train_beam_parser.add_argument(
+        "--beam-width",
+        default="16",
+        help=(
+            "beam widths to scan, comma-separated; the first entry is "
+            "the anchor and wins selection ties (default: 16)"
+        ),
+    )
+    train_beam_parser.add_argument(
+        "--characters-per-syllable",
+        default="20",
+        help=(
+            "characters-per-syllable values to scan, comma-separated; "
+            "the first entry is the anchor and wins selection ties "
+            "(default: 20)"
+        ),
+    )
+    train_beam_parser.add_argument(
+        "--character-frequency-weight",
+        default="0.5",
+        help=(
+            "character frequency prior weights to scan, comma-separated; "
+            "the first entry is the anchor and wins selection ties "
+            "(default: 0.5)"
+        ),
+    )
 
     sentence_benchmark_parser = subparsers.add_parser(
         "sentence-benchmark",
@@ -1145,11 +1171,40 @@ def _sha256_path(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _parse_int_grid(raw: str, option: str) -> list[int]:
+    try:
+        values = [int(part.strip()) for part in raw.split(",")]
+    except ValueError as error:
+        raise ValueError(
+            f"{option} must be comma-separated integers"
+        ) from error
+    if not values or any(value < 1 for value in values):
+        raise ValueError(f"{option} entries must be >= 1")
+    return values
+
+
+def _parse_float_grid(raw: str, option: str) -> list[float]:
+    try:
+        values = [float(part.strip()) for part in raw.split(",")]
+    except ValueError as error:
+        raise ValueError(
+            f"{option} must be comma-separated numbers"
+        ) from error
+    if not values or any(
+        not isfinite(value) or value < 0.0 for value in values
+    ):
+        raise ValueError(f"{option} entries must be finite and >= 0")
+    return values
+
+
 def _train_beam_decoder(
     dataset_paths: Sequence[Path],
     language_model_path: Path,
     dictionary_path: Path,
     output_path: Path,
+    beam_width_grid: Sequence[int],
+    characters_per_syllable_grid: Sequence[int],
+    character_frequency_weight_grid: Sequence[float],
 ) -> int:
     protected_paths = {
         *(dataset_path.resolve() for dataset_path in dataset_paths),
@@ -1183,6 +1238,9 @@ def _train_beam_decoder(
             dataset_sha256=dataset_sha256,
             language_model_sha256=language_model_sha256,
             dictionary_sha256=dictionary_sha256,
+            beam_width=beam_width_grid,
+            characters_per_syllable=characters_per_syllable_grid,
+            character_frequency_weight=character_frequency_weight_grid,
         )
         write_beam_config_atomic(output_path, config)
         artifact_sha256 = _sha256_path(output_path)
@@ -1320,11 +1378,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.command == "evaluate-keyboard":
         return _evaluate_keyboard(args.observations)
     if args.command == "train-beam-decoder":
+        try:
+            beam_width_grid = _parse_int_grid(args.beam_width, "--beam-width")
+            characters_per_syllable_grid = _parse_int_grid(
+                args.characters_per_syllable, "--characters-per-syllable"
+            )
+            character_frequency_weight_grid = _parse_float_grid(
+                args.character_frequency_weight,
+                "--character-frequency-weight",
+            )
+        except ValueError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 2
         return _train_beam_decoder(
             args.datasets,
             args.language_model,
             args.rime_dictionary,
             args.output,
+            beam_width_grid,
+            characters_per_syllable_grid,
+            character_frequency_weight_grid,
         )
     if args.command == "sentence-benchmark":
         return _sentence_benchmark(

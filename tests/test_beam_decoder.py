@@ -1,13 +1,18 @@
 from pathlib import Path
+import json
 import math
 
 import pytest
 
+from rimeai_eval.cli import _build_parser, _parse_float_grid, _parse_int_grid
 from rimeai_runtime.beam_decoder import (
     BeamDecoderConfig,
+    BeamDecoderError,
     BeamSentenceDecoder,
     SegmentDecodeInput,
+    load_beam_config,
     train_beam_decoder_config,
+    write_beam_config_atomic,
 )
 from rimeai_runtime.ngram_ranker import train_ngram_model
 from rimeai_runtime.pinyin_guard import PinyinGuard
@@ -197,10 +202,13 @@ class _RecordingDecoder(BeamSentenceDecoder):
         super().__init__(language_model, guard, config)
         self.calls: list[tuple[str, str, list[str]]] = []
 
-    def suggest(self, *, context, pinyin, candidates):
+    def suggest(self, *, context, pinyin, candidates, scorer=None):
         self.calls.append((context, pinyin, list(candidates)))
         return super().suggest(
-            context=context, pinyin=pinyin, candidates=candidates
+            context=context,
+            pinyin=pinyin,
+            candidates=candidates,
+            scorer=scorer,
         )
 
 
@@ -427,3 +435,325 @@ def test_threshold_training_uses_validation_and_never_test_labels(
     assert config.dataset_sha256 == "e" * 64
     assert report["validation_samples"] == 1
     assert report["test_samples_used"] == 0
+
+
+def test_config_defaults_character_frequency_weight_to_one_half():
+    config = BeamDecoderConfig(
+        threshold=1.0,
+        beam_width=16,
+        characters_per_syllable=20,
+        language_model_sha256="a" * 64,
+        dictionary_sha256="b" * 64,
+        dataset_sha256="c" * 64,
+    )
+
+    assert config.character_frequency_weight == 0.5
+    assert config.to_dict()["character_frequency_weight"] == 0.5
+
+
+def test_loading_a_legacy_config_without_the_weight_field_is_bit_identical(
+    tmp_path: Path,
+):
+    legacy_payload = {
+        "schema_version": 1,
+        "decoder_type": "pinyin-beam-ngram",
+        "threshold": 4.25,
+        "beam_width": 16,
+        "characters_per_syllable": 20,
+        "language_model_sha256": "a" * 64,
+        "dictionary_sha256": "b" * 64,
+        "dataset_sha256": "c" * 64,
+    }
+    legacy_path = tmp_path / "legacy.json"
+    legacy_path.write_text(
+        json.dumps(legacy_payload, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+
+    loaded = load_beam_config(legacy_path)
+
+    assert loaded.character_frequency_weight == 0.5
+    legacy_decoder = BeamSentenceDecoder(
+        _language_model(), _guard(tmp_path), loaded
+    )
+    explicit_decoder = BeamSentenceDecoder(
+        _language_model(),
+        _guard(tmp_path),
+        BeamDecoderConfig(
+            threshold=loaded.threshold,
+            beam_width=loaded.beam_width,
+            characters_per_syllable=loaded.characters_per_syllable,
+            character_frequency_weight=0.5,
+            language_model_sha256="a" * 64,
+            dictionary_sha256="b" * 64,
+            dataset_sha256="c" * 64,
+        ),
+    )
+    for decoder in (legacy_decoder, explicit_decoder):
+        suggestion = decoder.suggest(
+            context="请执行这条",
+            pinyin="mingling",
+            candidates=["明令", "命令"],
+        )
+        assert suggestion.text == "命令"
+        assert suggestion.reason == "suggestion"
+    legacy_suggestion = legacy_decoder.suggest(
+        context="请执行这条", pinyin="mingling", candidates=["明令", "命令"]
+    )
+    explicit_suggestion = explicit_decoder.suggest(
+        context="请执行这条", pinyin="mingling", candidates=["明令", "命令"]
+    )
+    assert legacy_suggestion == explicit_suggestion
+
+
+def test_config_with_explicit_weight_round_trips(tmp_path: Path):
+    config = BeamDecoderConfig(
+        threshold=2.0,
+        beam_width=8,
+        characters_per_syllable=12,
+        character_frequency_weight=0.25,
+        language_model_sha256="a" * 64,
+        dictionary_sha256="b" * 64,
+        dataset_sha256="c" * 64,
+    )
+    path = tmp_path / "weighted.json"
+
+    write_beam_config_atomic(path, config)
+    loaded = load_beam_config(path)
+
+    assert loaded == config
+    assert loaded.character_frequency_weight == 0.25
+
+
+@pytest.mark.parametrize(
+    "weight",
+    [
+        -0.1,
+        float("nan"),
+        float("inf"),
+        True,
+        "0.5",
+        None,
+        [0.5],
+    ],
+)
+def test_invalid_character_frequency_weight_fails_closed(
+    tmp_path: Path, weight
+):
+    payload = {
+        "schema_version": 1,
+        "decoder_type": "pinyin-beam-ngram",
+        "threshold": 1.0,
+        "beam_width": 16,
+        "characters_per_syllable": 20,
+        "character_frequency_weight": weight,
+        "language_model_sha256": "a" * 64,
+        "dictionary_sha256": "b" * 64,
+        "dataset_sha256": "c" * 64,
+    }
+    path = tmp_path / "invalid.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(BeamDecoderError):
+        load_beam_config(path)
+
+
+def test_frequency_weight_zero_removes_the_static_prior(tmp_path: Path):
+    model = _language_model()
+    decoder = BeamSentenceDecoder(
+        model,
+        _guard(tmp_path),
+        BeamDecoderConfig(
+            threshold=0.0,
+            beam_width=16,
+            characters_per_syllable=20,
+            character_frequency_weight=0.0,
+            language_model_sha256="a" * 64,
+            dictionary_sha256="b" * 64,
+            dataset_sha256="c" * 64,
+        ),
+    )
+    scorer = decoder._default_scorer
+
+    assert decoder._next_score(scorer, "请执行", "命") == (
+        scorer.next_char_log_prob("请执行", "命")
+    )
+    assert decoder._next_score(scorer, "请执行", "命") != _decoder(
+        tmp_path
+    )._next_score(
+        _decoder(tmp_path)._default_scorer, "请执行", "命"
+    )
+
+
+def test_hyperparameter_scan_reports_the_grid_and_uses_only_validation(
+    tmp_path: Path,
+):
+    validation = [
+        _sample(
+            f"validation-{index}",
+            "validation",
+            "请执行这条",
+            "命令",
+            ["明令", "命令"],
+        )
+        for index in range(2)
+    ]
+    secret_test = [
+        _sample(
+            "test-1",
+            "test",
+            "不要读取测试答案",
+            "绝密",
+            ["公开", "绝密"],
+        )
+    ]
+
+    config, report = train_beam_decoder_config(
+        [*validation, *secret_test],
+        _language_model(),
+        _guard(tmp_path),
+        dataset_sha256="e" * 64,
+        language_model_sha256="f" * 64,
+        dictionary_sha256="1" * 64,
+        beam_width=[16, 8],
+        characters_per_syllable=[20, 10],
+        character_frequency_weight=[0.5, 0.25],
+    )
+    validation_only_config, validation_only_report = (
+        train_beam_decoder_config(
+            validation,
+            _language_model(),
+            _guard(tmp_path),
+            dataset_sha256="e" * 64,
+            language_model_sha256="f" * 64,
+            dictionary_sha256="1" * 64,
+            beam_width=[16, 8],
+            characters_per_syllable=[20, 10],
+            character_frequency_weight=[0.5, 0.25],
+        )
+    )
+
+    assert config == validation_only_config
+    assert report == validation_only_report
+    assert report["test_samples_used"] == 0
+    assert report["hyperparameter_scan"]["splits_used"] == ["validation"]
+    assert report["hyperparameter_scan"]["evaluated_combinations"] == 5
+    combinations = report["hyperparameter_scan"]["combinations"]
+    assert [row["stage"] for row in combinations] == [1, 1, 1, 1, 2]
+    assert {row["beam_width"] for row in combinations if row["stage"] == 1} == {
+        16
+    }
+    assert combinations[-1]["beam_width"] == 8
+    assert report["selected_hyperparameters"]["beam_width"] in (8, 16)
+    assert report["selected_hyperparameters"]["characters_per_syllable"] in (
+        10,
+        20,
+    )
+    assert report["selected_hyperparameters"][
+        "character_frequency_weight"
+    ] in (0.25, 0.5)
+
+
+def test_hyperparameter_scan_ties_keep_the_anchor_values(tmp_path: Path):
+    validation = [
+        _sample(
+            "validation-1", "validation", "请执行这条", "命令", ["命令"]
+        )
+    ]
+
+    config, report = train_beam_decoder_config(
+        validation,
+        _language_model(),
+        _guard(tmp_path),
+        dataset_sha256="e" * 64,
+        language_model_sha256="f" * 64,
+        dictionary_sha256="1" * 64,
+        beam_width=[16, 4],
+        characters_per_syllable=[20, 5],
+        character_frequency_weight=[0.5, 0.0],
+    )
+
+    # The single sample is already correct as the baseline candidate, so
+    # every combination ties and the anchor grid values must win.
+    assert config.beam_width == 16
+    assert config.characters_per_syllable == 20
+    assert config.character_frequency_weight == 0.5
+    assert report["selected_hyperparameters"] == {
+        "threshold": config.threshold,
+        "beam_width": 16,
+        "characters_per_syllable": 20,
+        "character_frequency_weight": 0.5,
+    }
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"beam_width": []},
+        {"beam_width": [0]},
+        {"beam_width": [2.5]},
+        {"characters_per_syllable": []},
+        {"characters_per_syllable": [True]},
+        {"character_frequency_weight": []},
+        {"character_frequency_weight": [-0.5]},
+        {"character_frequency_weight": [float("nan")]},
+    ],
+)
+def test_invalid_hyperparameter_grids_fail_closed(tmp_path: Path, kwargs):
+    validation = _sample(
+        "validation-1", "validation", "请执行这条", "命令", ["明令", "命令"]
+    )
+
+    with pytest.raises(BeamDecoderError):
+        train_beam_decoder_config(
+            [validation],
+            _language_model(),
+            _guard(tmp_path),
+            dataset_sha256="e" * 64,
+            language_model_sha256="f" * 64,
+            dictionary_sha256="1" * 64,
+            **kwargs,
+        )
+
+
+def test_train_beam_cli_parses_comma_separated_grids():
+    parser = _build_parser()
+
+    args = parser.parse_args(
+        [
+            "train-beam-decoder",
+            "dataset.jsonl",
+            "--language-model",
+            "lm.json.gz",
+            "--rime-dictionary",
+            "dict.yaml",
+            "--output",
+            "out.json",
+            "--beam-width",
+            "16,8,32",
+            "--characters-per-syllable",
+            "20,10",
+            "--character-frequency-weight",
+            "0.5,0,1.5",
+        ]
+    )
+
+    assert _parse_int_grid(args.beam_width, "--beam-width") == [16, 8, 32]
+    assert _parse_int_grid(
+        args.characters_per_syllable, "--characters-per-syllable"
+    ) == [20, 10]
+    assert _parse_float_grid(
+        args.character_frequency_weight, "--character-frequency-weight"
+    ) == [0.5, 0.0, 1.5]
+    assert _parse_int_grid("16", "--beam-width") == [16]
+
+
+def test_train_beam_cli_rejects_malformed_grids():
+    with pytest.raises(ValueError):
+        _parse_int_grid("16,x", "--beam-width")
+    with pytest.raises(ValueError):
+        _parse_int_grid("0", "--beam-width")
+    with pytest.raises(ValueError):
+        _parse_float_grid("-1", "--character-frequency-weight")
+    with pytest.raises(ValueError):
+        _parse_float_grid("nan", "--character-frequency-weight")

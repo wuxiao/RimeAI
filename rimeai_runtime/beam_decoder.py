@@ -8,7 +8,8 @@ import math
 import os
 from pathlib import Path
 import tempfile
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from collections.abc import Sequence
+from typing import Any
 
 from .lm_fusion import CharLMScorer, StaticCharLM
 from .ngram_ranker import NGramRankerModel
@@ -30,14 +31,19 @@ class BeamDecoderConfig:
     language_model_sha256: str
     dictionary_sha256: str
     dataset_sha256: str
+    # Weight of the order-2 character frequency prior in _next_score.
+    # Artifacts written before this field existed (schema_version 1 without
+    # the key) decode with the historical hardcoded value 0.5.
+    character_frequency_weight: float = 0.5
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "schema_version": 1,
             "decoder_type": "pinyin-beam-ngram",
             "threshold": self.threshold,
             "beam_width": self.beam_width,
             "characters_per_syllable": self.characters_per_syllable,
+            "character_frequency_weight": self.character_frequency_weight,
             "language_model_sha256": self.language_model_sha256,
             "dictionary_sha256": self.dictionary_sha256,
             "dataset_sha256": self.dataset_sha256,
@@ -69,7 +75,7 @@ class BeamSentenceDecoder:
         self.language_model = language_model
         self.guard = guard
         self.config = config
-        character_frequencies: Dict[str, int] = {}
+        character_frequencies: dict[str, int] = {}
         for gram, count in language_model.ngram_counts[2].items():
             character = gram[-1]
             character_frequencies[character] = (
@@ -77,7 +83,7 @@ class BeamSentenceDecoder:
             )
         self._character_frequencies = character_frequencies
         self._default_scorer = StaticCharLM(language_model)
-        reverse: Dict[str, set[str]] = {}
+        reverse: dict[str, set[str]] = {}
         for text, pronunciations in guard.pronunciations.items():
             if len(text) != 1:
                 continue
@@ -102,7 +108,7 @@ class BeamSentenceDecoder:
     ) -> float:
         # The frequency prior stays static, sourced from the decoder's own
         # order-2 table; only the language-model term honors `scorer`.
-        return 0.5 * math.log1p(
+        return self.config.character_frequency_weight * math.log1p(
             self._character_frequencies.get(character, 0)
         ) + scorer.next_char_log_prob(text, character)
 
@@ -130,7 +136,7 @@ class BeamSentenceDecoder:
         pinyin: str,
         candidates: Sequence[str],
         maximum_characters: int,
-    ) -> Optional[Tuple[str, List[str]]]:
+    ) -> tuple[str, list[str]] | None:
         for candidate in candidates[:10]:
             syllables = self.guard.segment(
                 candidate,
@@ -148,7 +154,7 @@ class BeamSentenceDecoder:
         pinyin: str,
         candidates: Sequence[str],
         scorer: CharLMScorer | None = None,
-    ) -> Tuple[str, float, Optional[float]]:
+    ) -> tuple[str, float, float | None]:
         """One static beam expansion returning the decoded text with the
         static margin (gate metric) and, when a scorer is given, the
         scorer-adjudicated margin."""
@@ -174,7 +180,7 @@ class BeamSentenceDecoder:
         # adjudicates the final margin (final path vs baseline), never the
         # beam search itself.
         static_scorer = self._default_scorer
-        beam: List[Tuple[str, float]] = [("", 0.0)]
+        beam: list[tuple[str, float]] = [("", 0.0)]
         context_suffix = context[-static_scorer.max_context_characters :]
         for position, syllable in enumerate(syllables):
             characters = set(
@@ -226,7 +232,7 @@ class BeamSentenceDecoder:
         pinyin: str,
         candidates: Sequence[str],
         scorer: CharLMScorer | None = None,
-    ) -> Tuple[str, float]:
+    ) -> tuple[str, float]:
         text, static_margin, fused_margin = self._decode_pair(
             context=context,
             pinyin=pinyin,
@@ -302,9 +308,9 @@ class BeamSentenceDecoder:
     ) -> BeamSuggestion:
         if not active_candidates:
             return BeamSuggestion("", 0.0, 0.0, "no_candidate")
-        confidences: List[float] = []
-        margins: List[float] = []
-        pieces: List[str] = []
+        confidences: list[float] = []
+        margins: list[float] = []
+        pieces: list[str] = []
         accumulated = context
         for index, segment in enumerate(segments):
             is_last = index == len(segments) - 1
@@ -354,26 +360,65 @@ class BeamSentenceDecoder:
         return BeamSuggestion(text, min(confidences), margin, "suggestion")
 
 
-def train_beam_decoder_config(
-    samples: Sequence[Dict[str, Any]],
+def _int_grid(
+    values: int | Sequence[int], name: str
+) -> tuple[int, ...]:
+    """Normalize a scalar or sequence int grid, failing closed."""
+    entries = (values,) if isinstance(values, int) else tuple(values)
+    if not entries:
+        raise BeamDecoderError(f"{name} grid must not be empty")
+    for entry in entries:
+        if isinstance(entry, bool) or not isinstance(entry, int):
+            raise BeamDecoderError(f"{name} grid entries must be integers")
+        if entry < 1:
+            raise BeamDecoderError(f"{name} grid entries must be >= 1")
+    return tuple(dict.fromkeys(entries))
+
+
+def _float_grid(
+    values: int | float | Sequence[int | float], name: str
+) -> tuple[float, ...]:
+    """Normalize a scalar or sequence float grid, failing closed."""
+    if isinstance(values, bool):
+        raise BeamDecoderError(f"{name} grid entries must be numbers")
+    entries = (
+        (values,) if isinstance(values, (int, float)) else tuple(values)
+    )
+    if not entries:
+        raise BeamDecoderError(f"{name} grid must not be empty")
+    for entry in entries:
+        if isinstance(entry, bool) or not isinstance(entry, (int, float)):
+            raise BeamDecoderError(f"{name} grid entries must be numbers")
+        if not math.isfinite(entry) or entry < 0.0:
+            raise BeamDecoderError(
+                f"{name} grid entries must be finite and >= 0"
+            )
+    return tuple(dict.fromkeys(float(entry) for entry in entries))
+
+
+def _evaluate_combination(
+    validation: Sequence[dict[str, Any]],
     language_model: NGramRankerModel,
     guard: PinyinGuard,
     *,
-    dataset_sha256: str,
+    beam_width: int,
+    characters_per_syllable: int,
+    character_frequency_weight: float,
     language_model_sha256: str,
     dictionary_sha256: str,
-    beam_width: int = 16,
-    characters_per_syllable: int = 20,
-) -> Tuple[BeamDecoderConfig, Dict[str, Any]]:
-    validation = [
-        sample for sample in samples if sample["split"] == "validation"
-    ]
-    if not validation:
-        raise BeamDecoderError("dataset has no validation samples")
+    dataset_sha256: str,
+) -> tuple[float, float, float]:
+    """Decode `validation` once, then sweep the gate threshold.
+
+    Selection objective matches the historical single-knob trainer: highest
+    validation sentence accuracy, threshold ties take the larger threshold.
+    Only validation samples are ever read here.
+    """
     provisional = BeamDecoderConfig(
         threshold=0.0,
         beam_width=beam_width,
         characters_per_syllable=characters_per_syllable,
+        character_frequency_weight=character_frequency_weight,
         language_model_sha256=language_model_sha256,
         dictionary_sha256=dictionary_sha256,
         dataset_sha256=dataset_sha256,
@@ -416,6 +461,113 @@ def train_beam_decoder_config(
         ):
             best_accuracy = accuracy
             best_threshold = threshold
+    raw_accuracy = (
+        sum(predicted == sample["gold_text"] for sample, predicted, _ in decoded)
+        / len(validation)
+    )
+    return best_threshold, best_accuracy, raw_accuracy
+
+
+def train_beam_decoder_config(
+    samples: Sequence[dict[str, Any]],
+    language_model: NGramRankerModel,
+    guard: PinyinGuard,
+    *,
+    dataset_sha256: str,
+    language_model_sha256: str,
+    dictionary_sha256: str,
+    beam_width: int | Sequence[int] = 16,
+    characters_per_syllable: int | Sequence[int] = 20,
+    character_frequency_weight: float | Sequence[float] = 0.5,
+) -> tuple[BeamDecoderConfig, dict[str, Any]]:
+    """Calibrate the beam decoder on the validation split only.
+
+    Two-stage scan instead of a full Cartesian product: stage 1 scans the
+    character-frequency weight x characters-per-syllable grid at the anchor
+    beam width (the first entry of the beam grid), stage 2 scans the
+    remaining beam widths at the stage-1 winner. Ties keep the earliest
+    grid entry, so putting the current production values first makes the
+    incumbent win unless a challenger is strictly better on validation.
+    """
+    validation = [
+        sample for sample in samples if sample["split"] == "validation"
+    ]
+    if not validation:
+        raise BeamDecoderError("dataset has no validation samples")
+    beam_grid = _int_grid(beam_width, "beam_width")
+    characters_grid = _int_grid(
+        characters_per_syllable, "characters_per_syllable"
+    )
+    weight_grid = _float_grid(
+        character_frequency_weight, "character_frequency_weight"
+    )
+    combination_kwargs = {
+        "language_model_sha256": language_model_sha256,
+        "dictionary_sha256": dictionary_sha256,
+        "dataset_sha256": dataset_sha256,
+    }
+    stage1_rows: list[dict[str, Any]] = []
+    best_threshold = 0.0
+    best_accuracy = -1.0
+    best_raw_accuracy = 0.0
+    best_beam = beam_grid[0]
+    best_characters = characters_grid[0]
+    best_weight = weight_grid[0]
+    for weight in weight_grid:
+        for characters in characters_grid:
+            threshold, accuracy, raw_accuracy = _evaluate_combination(
+                validation,
+                language_model,
+                guard,
+                beam_width=beam_grid[0],
+                characters_per_syllable=characters,
+                character_frequency_weight=weight,
+                **combination_kwargs,
+            )
+            stage1_rows.append(
+                {
+                    "stage": 1,
+                    "beam_width": beam_grid[0],
+                    "characters_per_syllable": characters,
+                    "character_frequency_weight": weight,
+                    "threshold": threshold,
+                    "validation_raw_sentence_accuracy": round(raw_accuracy, 6),
+                    "validation_sentence_accuracy": round(accuracy, 6),
+                }
+            )
+            if accuracy > best_accuracy:
+                best_threshold = threshold
+                best_accuracy = accuracy
+                best_raw_accuracy = raw_accuracy
+                best_characters = characters
+                best_weight = weight
+    stage2_rows: list[dict[str, Any]] = []
+    for width in beam_grid[1:]:
+        threshold, accuracy, raw_accuracy = _evaluate_combination(
+            validation,
+            language_model,
+            guard,
+            beam_width=width,
+            characters_per_syllable=best_characters,
+            character_frequency_weight=best_weight,
+            **combination_kwargs,
+        )
+        stage2_rows.append(
+            {
+                "stage": 2,
+                "beam_width": width,
+                "characters_per_syllable": best_characters,
+                "character_frequency_weight": best_weight,
+                "threshold": threshold,
+                "validation_raw_sentence_accuracy": round(raw_accuracy, 6),
+                "validation_sentence_accuracy": round(accuracy, 6),
+            }
+        )
+        if accuracy > best_accuracy:
+            best_threshold = threshold
+            best_accuracy = accuracy
+            best_raw_accuracy = raw_accuracy
+            best_beam = width
     baseline_accuracy = (
         sum(
             sample["candidates"][0] == sample["gold_text"]
@@ -423,14 +575,11 @@ def train_beam_decoder_config(
         )
         / len(validation)
     )
-    raw_accuracy = (
-        sum(predicted == sample["gold_text"] for sample, predicted, _ in decoded)
-        / len(validation)
-    )
     config = BeamDecoderConfig(
         threshold=best_threshold,
-        beam_width=beam_width,
-        characters_per_syllable=characters_per_syllable,
+        beam_width=best_beam,
+        characters_per_syllable=best_characters,
+        character_frequency_weight=best_weight,
         language_model_sha256=language_model_sha256,
         dictionary_sha256=dictionary_sha256,
         dataset_sha256=dataset_sha256,
@@ -442,13 +591,25 @@ def train_beam_decoder_config(
         "test_samples_used": 0,
         "validation": {
             "baseline_sentence_accuracy": round(baseline_accuracy, 6),
-            "raw_sentence_accuracy": round(raw_accuracy, 6),
+            "raw_sentence_accuracy": round(best_raw_accuracy, 6),
             "sentence_accuracy": round(best_accuracy, 6),
         },
         "selected_hyperparameters": {
             "threshold": best_threshold,
-            "beam_width": beam_width,
-            "characters_per_syllable": characters_per_syllable,
+            "beam_width": best_beam,
+            "characters_per_syllable": best_characters,
+            "character_frequency_weight": best_weight,
+        },
+        "hyperparameter_scan": {
+            "strategy": "two-stage",
+            "splits_used": ["validation"],
+            "selection_rule": (
+                "highest validation sentence accuracy; threshold ties take "
+                "the larger threshold; combination ties keep the earliest "
+                "grid entry (anchor values first)"
+            ),
+            "evaluated_combinations": len(stage1_rows) + len(stage2_rows),
+            "combinations": [*stage1_rows, *stage2_rows],
         },
     }
     return config, report
@@ -493,6 +654,15 @@ def load_beam_config(path: Path) -> BeamDecoderConfig:
         or payload.get("decoder_type") != "pinyin-beam-ngram"
     ):
         raise BeamDecoderError("unsupported beam decoder artifact")
+    # Optional since schema_version 1 artifacts gained the field: absent
+    # means the historical hardcoded 0.5 prior weight. Anything present
+    # must be a real, finite, non-negative number (bools and strings are
+    # rejected) so bad artifacts fail closed.
+    raw_frequency_weight = payload.get("character_frequency_weight", 0.5)
+    if isinstance(raw_frequency_weight, bool) or not isinstance(
+        raw_frequency_weight, (int, float)
+    ):
+        raise BeamDecoderError("beam decoder artifact fields are invalid")
     try:
         config = BeamDecoderConfig(
             threshold=float(payload["threshold"]),
@@ -500,6 +670,7 @@ def load_beam_config(path: Path) -> BeamDecoderConfig:
             characters_per_syllable=int(
                 payload["characters_per_syllable"]
             ),
+            character_frequency_weight=float(raw_frequency_weight),
             language_model_sha256=str(
                 payload["language_model_sha256"]
             ),
@@ -512,6 +683,8 @@ def load_beam_config(path: Path) -> BeamDecoderConfig:
         config.beam_width < 1
         or config.characters_per_syllable < 1
         or config.threshold < 0
+        or not math.isfinite(config.character_frequency_weight)
+        or config.character_frequency_weight < 0.0
     ):
         raise BeamDecoderError("beam decoder parameters are invalid")
     return config

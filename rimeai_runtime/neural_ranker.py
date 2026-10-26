@@ -5,24 +5,26 @@ artifact helpers does not require a model download, and every runtime load uses
 local files only so the daemon's Offline Lock remains enforceable.
 """
 
-from collections import defaultdict
-from dataclasses import dataclass
+from __future__ import annotations
+
 import gc
 import hashlib
 import json
 import math
 import os
-from pathlib import Path
 import random
 import sys
 import tempfile
+from collections import defaultdict
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from pathlib import Path
 from time import perf_counter
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Optional
 
 from .candidate_policy import partition_full_length_candidates
-from .ranking import Ranking, RankerError
-from .pinyin_guard import PinyinGuard
-
+from .pinyin_guard import PinyinGuard, generic_pinyin_segmentation
+from .ranking import RankerError, Ranking
 
 MODEL_TYPE = "rimeai-pinyin-listwise-cross-encoder"
 BASE_MODEL_ID = "BAAI/bge-small-zh-v1.5"
@@ -35,6 +37,12 @@ PINYIN_MARKER = "[PY]"
 CANDIDATE_MARKER = "[CAND]"
 RANK_MARKERS = tuple(f"[RANK_{index}]" for index in range(1, 11))
 FUSION_TYPE = "rimeai-neural-ngram-v1"
+# v2: scores are affine-normalized with pooled validation statistics instead
+# of per-sample z-scores, so two-candidate samples no longer collapse to a
+# structural margin of exactly 2 or 4w-2.
+FUSION_TYPE_GLOBAL_NORM = "rimeai-neural-ngram-v2"
+FUSION_TYPES = (FUSION_TYPE, FUSION_TYPE_GLOBAL_NORM)
+GLOBAL_NORM_METHOD = "validation-global-affine"
 
 
 class NeuralRankerError(ValueError):
@@ -46,8 +54,8 @@ class RankerExample:
     sample_id: str
     context: str
     pinyin: str
-    candidates: Tuple[str, ...]
-    baseline_indices: Tuple[int, ...]
+    candidates: tuple[str, ...]
+    baseline_indices: tuple[int, ...]
     label: int
     context_ambiguous: bool
 
@@ -63,7 +71,7 @@ def _sha256_path(path: Path) -> str:
     return digest.hexdigest()
 
 
-def build_special_tokens(guard: PinyinGuard) -> List[str]:
+def build_special_tokens(guard: PinyinGuard) -> list[str]:
     syllables = sorted(
         {
             pronunciation
@@ -84,29 +92,11 @@ def build_special_tokens(guard: PinyinGuard) -> List[str]:
 def _generic_pinyin_segmentation(
     pinyin: str,
     guard: PinyinGuard,
-) -> List[str]:
-    normalized = pinyin.lower().replace("'", "").replace(" ", "")
-    syllables = sorted(
-        {
-            pronunciation
-            for text, pronunciations in guard.pronunciations.items()
-            if len(text) == 1
-            for pronunciation in pronunciations
-        },
-        key=lambda value: (-len(value), value),
-    )
-    paths: Dict[int, List[str]] = {0: []}
-    for start in range(len(normalized) + 1):
-        if start not in paths:
-            continue
-        for syllable in syllables:
-            if normalized.startswith(syllable, start):
-                end = start + len(syllable)
-                candidate = paths[start] + [syllable]
-                previous = paths.get(end)
-                if previous is None or len(candidate) < len(previous):
-                    paths[end] = candidate
-    return paths.get(len(normalized), [normalized] if normalized else [])
+) -> list[str]:
+    # Moved to pinyin_guard.generic_pinyin_segmentation (with a cached
+    # syllable table) so the MLX worker's decode fallback can share it;
+    # this thin alias keeps existing imports and tests working.
+    return generic_pinyin_segmentation(pinyin, guard)
 
 
 def format_ranker_input(
@@ -145,13 +135,13 @@ def build_ranker_examples(
     samples: Sequence[Mapping[str, Any]],
     *,
     split: str,
-) -> List[RankerExample]:
+) -> list[RankerExample]:
     selected = [sample for sample in samples if sample.get("split") == split]
-    golds_by_pinyin: Dict[str, set[str]] = defaultdict(set)
+    golds_by_pinyin: dict[str, set[str]] = defaultdict(set)
     for sample in selected:
         golds_by_pinyin[str(sample["pinyin"])].add(str(sample["gold_text"]))
 
-    examples: List[RankerExample] = []
+    examples: list[RankerExample] = []
     for sample in selected:
         semantic_window = [
             {"id": str(index), "text": str(candidate)}
@@ -181,7 +171,7 @@ def calibrate_change_threshold(
     records: Sequence[Mapping[str, Any]],
     *,
     target_precision: float = 0.90,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     if not 0 < target_precision <= 1:
         raise NeuralRankerError("target precision must be from 0 (exclusive) to 1")
     if not records:
@@ -194,7 +184,7 @@ def calibrate_change_threshold(
             "precision": 0.0,
         }
     thresholds = sorted({float(record["margin"]) for record in records})
-    best: Optional[Dict[str, Any]] = None
+    best: dict[str, Any] | None = None
     for threshold in thresholds:
         selected = [
             record
@@ -237,7 +227,7 @@ def calibrate_change_threshold(
     }
 
 
-def standardize_scores(scores: Sequence[float]) -> List[float]:
+def standardize_scores(scores: Sequence[float]) -> list[float]:
     if not scores:
         return []
     mean = sum(scores) / len(scores)
@@ -247,6 +237,26 @@ def standardize_scores(scores: Sequence[float]) -> List[float]:
     if deviation == 0:
         return [0.0 for _ in scores]
     return [(score - mean) / deviation for score in scores]
+
+
+def _finite_float(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
+
+
+def pooled_affine_stats(scores: Sequence[float]) -> tuple[float, float]:
+    """Mean and population deviation over pooled candidate scores."""
+    if not scores:
+        raise NeuralRankerError("cannot normalize with no pooled scores")
+    mean = sum(scores) / len(scores)
+    deviation = math.sqrt(
+        sum((score - mean) ** 2 for score in scores) / len(scores)
+    )
+    if deviation <= 0:
+        raise NeuralRankerError("pooled score statistics are degenerate")
+    return mean, deviation
 
 
 @dataclass(frozen=True)
@@ -259,6 +269,40 @@ class FusionConfig:
     validation_dataset_sha256: str
     margin_threshold: float
     target_precision: float
+    # v2 (global-affine) extensions. Absent on v1 configs, which keep the
+    # per-sample z-score semantics bit-for-bit.
+    fusion_type: str = FUSION_TYPE
+    neural_mean: float | None = None
+    neural_std: float | None = None
+    ngram_mean: float | None = None
+    ngram_std: float | None = None
+
+    @classmethod
+    def _load_global_normalization(
+        cls,
+        payload: Mapping[str, Any],
+    ) -> dict[str, float]:
+        section = payload.get("score_normalization")
+        if (
+            not isinstance(section, dict)
+            or section.get("method") != GLOBAL_NORM_METHOD
+        ):
+            raise NeuralRankerError(
+                "fusion config score normalization is missing or unsupported"
+            )
+        stats: dict[str, float] = {}
+        for key in ("neural_mean", "neural_std", "ngram_mean", "ngram_std"):
+            value = _finite_float(section.get(key))
+            if value is None:
+                raise NeuralRankerError(
+                    f"fusion config score normalization '{key}' is invalid"
+                )
+            stats[key] = value
+        if stats["neural_std"] <= 0 or stats["ngram_std"] <= 0:
+            raise NeuralRankerError(
+                "fusion config score normalization deviations must be positive"
+            )
+        return stats
 
     @classmethod
     def load(
@@ -267,19 +311,26 @@ class FusionConfig:
         *,
         neural_artifact_id: Optional[str] = None,
         ngram_dataset_sha256: Optional[str] = None,
-    ) -> "FusionConfig":
+    ) -> FusionConfig:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as error:
             raise NeuralRankerError(f"cannot read fusion config '{path}'") from error
         decision = payload.get("decision") if isinstance(payload, dict) else None
+        fusion_type = payload.get("fusion_type") if isinstance(payload, dict) else None
         if (
             not isinstance(payload, dict)
             or payload.get("schema_version") != 1
-            or payload.get("fusion_type") != FUSION_TYPE
+            or not isinstance(fusion_type, str)
+            or fusion_type not in FUSION_TYPES
             or not isinstance(decision, dict)
         ):
             raise NeuralRankerError("unsupported neural fusion config")
+        normalization = (
+            cls._load_global_normalization(payload)
+            if fusion_type == FUSION_TYPE_GLOBAL_NORM
+            else {}
+        )
         try:
             config = cls(
                 path=path,
@@ -290,6 +341,8 @@ class FusionConfig:
                 validation_dataset_sha256=str(payload["validation_dataset_sha256"]),
                 margin_threshold=float(decision["margin_threshold"]),
                 target_precision=float(decision["target_precision"]),
+                fusion_type=fusion_type,
+                **normalization,
             )
         except (KeyError, TypeError, ValueError) as error:
             raise NeuralRankerError("neural fusion fields are invalid") from error
@@ -309,14 +362,57 @@ class FusionConfig:
             raise NeuralRankerError("fusion config n-gram artifact mismatch")
         return config
 
+    def fuse_scores(
+        self,
+        neural_scores: Sequence[float],
+        ngram_scores: Sequence[float],
+    ) -> list[float]:
+        """Normalize both score sources then apply the weighted fusion.
+
+        v1 configs keep the legacy per-sample z-score path verbatim; v2
+        configs affine-normalize raw scores with pooled validation statistics,
+        so the fused margin for two-candidate samples is no longer structurally
+        pinned to 2 or 4w-2.
+        """
+        if self.fusion_type == FUSION_TYPE_GLOBAL_NORM:
+            neural_mean = self.neural_mean
+            neural_std = self.neural_std
+            ngram_mean = self.ngram_mean
+            ngram_std = self.ngram_std
+            if (
+                neural_mean is None
+                or neural_std is None
+                or ngram_mean is None
+                or ngram_std is None
+            ):
+                raise NeuralRankerError(
+                    "fusion config global normalization parameters are missing"
+                )
+            neural = [
+                (score - neural_mean) / neural_std
+                for score in neural_scores
+            ]
+            ngram = [
+                (score - ngram_mean) / ngram_std
+                for score in ngram_scores
+            ]
+        else:
+            neural = standardize_scores(neural_scores)
+            ngram = standardize_scores(ngram_scores)
+        weight = self.neural_weight
+        return [
+            weight * neural[index] + (1.0 - weight) * ngram[index]
+            for index in range(len(neural))
+        ]
+
 
 @dataclass(frozen=True)
 class NeuralRankerArtifact:
     root: Path
-    manifest: Dict[str, Any]
+    manifest: dict[str, Any]
 
     @classmethod
-    def load(cls, root: Path) -> "NeuralRankerArtifact":
+    def load(cls, root: Path) -> NeuralRankerArtifact:
         manifest_path = root / "manifest.json"
         try:
             payload = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -423,7 +519,7 @@ def _load_encoder_scorer(
     head_path: Path,
     *,
     device: Any,
-) -> Tuple[Any, Any]:
+) -> tuple[Any, Any]:
     torch, load_file, _, AutoModel, AutoTokenizer = _neural_dependencies()
     tokenizer = AutoTokenizer.from_pretrained(
         str(encoder_path),
@@ -484,7 +580,7 @@ class NeuralListwiseRanker:
         )
         self.model_artifact_id = self.artifact.artifact_id
         self.cold_start_ms = (perf_counter() - started_at) * 1000
-        self.attempt_latencies_ms: List[float] = []
+        self.attempt_latencies_ms: list[float] = []
         self.attempted_samples = 0
         self.successful_samples = 0
 
@@ -495,7 +591,7 @@ class NeuralListwiseRanker:
         pinyin: str,
         candidates: Sequence[str],
         baseline_indices: Sequence[int],
-    ) -> List[float]:
+    ) -> list[float]:
         texts = [
             format_ranker_input(
                 context=context,
@@ -526,7 +622,7 @@ class NeuralListwiseRanker:
         context: str,
         pinyin: str,
         candidates: Sequence[str],
-    ) -> Tuple[List[str], float]:
+    ) -> tuple[list[str], float]:
         started_at = perf_counter()
         self.attempted_samples += 1
         semantic_window = [
@@ -569,7 +665,7 @@ class NeuralListwiseRanker:
         self.attempt_latencies_ms.append((perf_counter() - started_at) * 1000)
         return ranking, confidence
 
-    def rank(self, sample: Dict[str, Any]) -> Ranking:
+    def rank(self, sample: dict[str, Any]) -> Ranking:
         ranking, confidence = self.rank_candidates(
             context=sample["context"],
             pinyin=sample["pinyin"],
@@ -622,7 +718,7 @@ class HybridSemanticRanker:
         )
         self.model_artifact_id = self.config.artifact_id
         self.cold_start_ms = neural_ranker.cold_start_ms
-        self.attempt_latencies_ms: List[float] = []
+        self.attempt_latencies_ms: list[float] = []
         self.attempted_samples = 0
         self.successful_samples = 0
 
@@ -632,7 +728,7 @@ class HybridSemanticRanker:
         context: str,
         pinyin: str,
         candidates: Sequence[str],
-    ) -> Tuple[List[str], float]:
+    ) -> tuple[list[str], float]:
         started_at = perf_counter()
         self.attempted_samples += 1
         semantic_window = [
@@ -645,31 +741,23 @@ class HybridSemanticRanker:
         texts = [candidate["text"] for candidate in eligible]
         baseline_indices = [int(candidate["id"]) for candidate in eligible]
         try:
-            neural_scores = standardize_scores(
-                self.neural_ranker._scores(
-                    context=context,
-                    pinyin=pinyin,
-                    candidates=texts,
-                    baseline_indices=baseline_indices,
+            neural_scores = self.neural_ranker._scores(
+                context=context,
+                pinyin=pinyin,
+                candidates=texts,
+                baseline_indices=baseline_indices,
+            )
+            ngram_scores = [
+                self.ngram_ranker._candidate_score(
+                    context,
+                    candidate,
+                    baseline_index,
                 )
-            )
-            ngram_scores = standardize_scores(
-                [
-                    self.ngram_ranker._candidate_score(
-                        context,
-                        candidate,
-                        baseline_index,
-                    )
-                    for candidate, baseline_index in zip(texts, baseline_indices)
-                ]
-            )
+                for candidate, baseline_index in zip(texts, baseline_indices)
+            ]
+            fused_scores = self.config.fuse_scores(neural_scores, ngram_scores)
         except Exception as error:
             raise RankerError("hybrid semantic inference failed") from error
-        weight = self.config.neural_weight
-        fused_scores = [
-            weight * neural + (1.0 - weight) * ngram
-            for neural, ngram in zip(neural_scores, ngram_scores)
-        ]
         ranked_indices = sorted(
             range(len(texts)),
             key=lambda index: (-fused_scores[index], index),
@@ -698,7 +786,7 @@ class HybridSemanticRanker:
         self.attempt_latencies_ms.append((perf_counter() - started_at) * 1000)
         return ranking, confidence
 
-    def rank(self, sample: Dict[str, Any]) -> Ranking:
+    def rank(self, sample: dict[str, Any]) -> Ranking:
         ranking, confidence = self.rank_candidates(
             context=sample["context"],
             pinyin=sample["pinyin"],
@@ -711,44 +799,66 @@ def train_fusion_config(
     samples: Sequence[Mapping[str, Any]],
     *,
     dataset_sha256: str,
-    neural_ranker: NeuralListwiseRanker,
+    neural_ranker: Any,
     ngram_ranker: Any,
     output_path: Path,
     target_precision: float = 0.90,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
+    """Jointly calibrate the fusion weight and change threshold.
+
+    Scores are affine-normalized with pooled validation statistics (v2),
+    and each weight is evaluated together with its calibrated threshold.
+    The fixed selection order is: among weights whose calibrated threshold
+    meets the target precision with wins > losses, maximize net gain
+    (wins - losses), then calibrated changed_samples, then raw top-1
+    accuracy, then the lower weight. If no weight calibrates, every entry
+    has zero net gain and the raw top-1 tie-break decides while the
+    threshold stays at its unreachable fallback.
+    """
     validation = build_ranker_examples(samples, split="validation")
     if not validation:
         raise NeuralRankerError("dataset has no covered validation examples")
-    cached: List[Tuple[RankerExample, List[float], List[float]]] = []
+    cached: list[tuple[RankerExample, list[float], list[float]]] = []
     for example in validation:
-        neural_scores = standardize_scores(
-            neural_ranker._scores(
-                context=example.context,
-                pinyin=example.pinyin,
-                candidates=example.candidates,
-                baseline_indices=example.baseline_indices,
+        neural_scores = neural_ranker._scores(
+            context=example.context,
+            pinyin=example.pinyin,
+            candidates=example.candidates,
+            baseline_indices=example.baseline_indices,
+        )
+        ngram_scores = [
+            ngram_ranker._candidate_score(
+                example.context,
+                candidate,
+                baseline_index,
             )
-        )
-        ngram_scores = standardize_scores(
-            [
-                ngram_ranker._candidate_score(
-                    example.context,
-                    candidate,
-                    baseline_index,
-                )
-                for candidate, baseline_index in zip(
-                    example.candidates,
-                    example.baseline_indices,
-                )
-            ]
-        )
+            for candidate, baseline_index in zip(
+                example.candidates,
+                example.baseline_indices,
+            )
+        ]
         cached.append((example, neural_scores, ngram_scores))
 
-    candidates: List[Tuple[float, int, int, float, List[Dict[str, Any]]]] = []
+    neural_mean, neural_std = pooled_affine_stats(
+        [score for _, scores, _ in cached for score in scores]
+    )
+    ngram_mean, ngram_std = pooled_affine_stats(
+        [score for _, _, scores in cached for score in scores]
+    )
+    normalized: list[tuple[RankerExample, list[float], list[float]]] = [
+        (
+            example,
+            [(score - neural_mean) / neural_std for score in neural_scores],
+            [(score - ngram_mean) / ngram_std for score in ngram_scores],
+        )
+        for example, neural_scores, ngram_scores in cached
+    ]
+
+    weight_table: list[dict[str, Any]] = []
     for step in range(21):
         weight = step / 20
-        records: List[Dict[str, Any]] = []
-        for example, neural_scores, ngram_scores in cached:
+        records: list[dict[str, Any]] = []
+        for example, neural_scores, ngram_scores in normalized:
             scores = [
                 weight * neural + (1.0 - weight) * ngram
                 for neural, ngram in zip(neural_scores, ngram_scores)
@@ -767,43 +877,91 @@ def train_fusion_config(
                 }
             )
         hits = sum(bool(record["model_correct"]) for record in records)
-        wins = sum(
-            bool(record["changed"])
-            and bool(record["model_correct"])
-            and not bool(record["baseline_correct"])
-            for record in records
+        raw_changed = sum(bool(record["changed"]) for record in records)
+        calibration = calibrate_change_threshold(
+            [record for record in records if record["changed"]],
+            target_precision=target_precision,
         )
-        losses = sum(
-            bool(record["changed"])
-            and not bool(record["model_correct"])
-            and bool(record["baseline_correct"])
-            for record in records
+        net_gain = calibration["wins"] - calibration["losses"]
+        weight_table.append(
+            {
+                "weight": weight,
+                "raw_top1_accuracy": hits / len(records),
+                "raw_changed_samples": raw_changed,
+                "calibrated": calibration["changed_samples"] > 0,
+                "margin_threshold": calibration["margin_threshold"],
+                "wins": calibration["wins"],
+                "losses": calibration["losses"],
+                "changed_samples": calibration["changed_samples"],
+                "precision": calibration["precision"],
+                "net_gain": net_gain,
+            }
         )
-        changed = sum(bool(record["changed"]) for record in records)
-        candidates.append((hits / len(records), wins - losses, -changed, weight, records))
-    accuracy, net_gain, negative_changed, weight, records = max(candidates)
-    calibration = calibrate_change_threshold(
-        [record for record in records if record["changed"]],
-        target_precision=target_precision,
+
+    calibrated_rows = [row for row in weight_table if row["calibrated"]]
+    selection_pool = calibrated_rows or weight_table
+    best_row = max(
+        selection_pool,
+        key=lambda row: (
+            row["net_gain"],
+            row["changed_samples"],
+            row["raw_top1_accuracy"],
+            -row["weight"],
+        ),
     )
+    weight = best_row["weight"]
+    calibration = {
+        "margin_threshold": best_row["margin_threshold"],
+        "target_precision": target_precision,
+        "changed_samples": best_row["changed_samples"],
+        "wins": best_row["wins"],
+        "losses": best_row["losses"],
+        "precision": best_row["precision"],
+    }
     seed = (
-        f"{dataset_sha256}:{neural_ranker.model_artifact_id}:"
+        f"v2:{dataset_sha256}:{neural_ranker.model_artifact_id}:"
         f"{ngram_ranker.dataset_sha256}:{weight:.2f}:"
-        f"{calibration['margin_threshold']:.12f}"
+        f"{calibration['margin_threshold']:.12f}:"
+        f"{neural_mean:.9f}:{neural_std:.9f}:"
+        f"{ngram_mean:.9f}:{ngram_std:.9f}"
     ).encode("utf-8")
     payload = {
         "schema_version": 1,
-        "fusion_type": FUSION_TYPE,
+        "fusion_type": FUSION_TYPE_GLOBAL_NORM,
         "artifact_id": "rimeai-24m-fusion:" + hashlib.sha256(seed).hexdigest()[:16],
         "neural_weight": weight,
         "neural_artifact_id": neural_ranker.model_artifact_id,
         "ngram_dataset_sha256": ngram_ranker.dataset_sha256,
         "validation_dataset_sha256": dataset_sha256,
+        "score_normalization": {
+            "method": GLOBAL_NORM_METHOD,
+            "statistic": "pooled-validation-candidate-mean-std",
+            "neural_mean": neural_mean,
+            "neural_std": neural_std,
+            "ngram_mean": ngram_mean,
+            "ngram_std": ngram_std,
+        },
         "validation": {
-            "samples": len(records),
-            "raw_top1_accuracy": accuracy,
-            "net_gain": net_gain,
-            "changed_samples": -negative_changed,
+            "samples": len(normalized),
+            "baseline_top1_accuracy": (
+                sum(example.label == 0 for example in validation) / len(validation)
+            ),
+            "raw_top1_accuracy": best_row["raw_top1_accuracy"],
+            "net_gain": best_row["net_gain"],
+            "changed_samples": best_row["changed_samples"],
+            "wins": best_row["wins"],
+            "losses": best_row["losses"],
+            "precision": best_row["precision"],
+            "selection_criterion": (
+                "joint weight/threshold: among weights whose calibrated "
+                "threshold meets target precision with wins > losses, "
+                "maximize net gain (wins - losses), then calibrated "
+                "changed_samples, then raw top-1 accuracy, then the lower "
+                "weight; with no calibratable weight the raw top-1 "
+                "tie-break decides and the threshold stays disabled"
+            ),
+            "weight_grid": [row["weight"] for row in weight_table],
+            "weight_table": weight_table,
             "test_samples_used": 0,
         },
         "decision": calibration,
@@ -820,10 +978,10 @@ def train_fusion_config(
 def _flatten_batch_inputs(
     examples: Sequence[RankerExample],
     guard: PinyinGuard,
-) -> Tuple[List[str], List[int], List[int]]:
-    texts: List[str] = []
-    counts: List[int] = []
-    labels: List[int] = []
+) -> tuple[list[str], list[int], list[int]]:
+    texts: list[str] = []
+    counts: list[int] = []
+    labels: list[int] = []
     for example in examples:
         counts.append(len(example.candidates))
         labels.append(example.label)
@@ -853,9 +1011,9 @@ def _score_examples(
     max_length: int,
     batch_size: int,
     torch: Any,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     model.eval()
-    records: List[Dict[str, Any]] = []
+    records: list[dict[str, Any]] = []
     with torch.inference_mode():
         for start in range(0, len(examples), batch_size):
             chunk = examples[start : start + batch_size]
@@ -893,7 +1051,7 @@ def _score_examples(
     return records
 
 
-def _validation_summary(records: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+def _validation_summary(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     samples = len(records)
     changed = [record for record in records if record["changed"]]
     return {
@@ -944,8 +1102,8 @@ def _atomic_json(path: Path, payload: Mapping[str, Any]) -> None:
         raise
 
 
-def _artifact_files(root: Path) -> Dict[str, Dict[str, Any]]:
-    files: Dict[str, Dict[str, Any]] = {}
+def _artifact_files(root: Path) -> dict[str, dict[str, Any]]:
+    files: dict[str, dict[str, Any]] = {}
     for path in sorted(root.rglob("*")):
         if (
             not path.is_file()
@@ -977,7 +1135,7 @@ def train_neural_ranker(
     target_precision: float = 0.90,
     device: str = "auto",
     seed: int = 20260729,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     if epochs < 1 or batch_size < 1 or ambiguous_repetitions < 1:
         raise NeuralRankerError("training counts must be positive")
     checkpoint_path = output_path / ".checkpoint"
@@ -1026,10 +1184,17 @@ def train_neural_ranker(
     model = _EncoderScorer(encoder, scorer, torch.nn.Dropout(0.1)).to(selected_device)
     start_epoch = 1
     best_accuracy = -1.0
-    best_state: Optional[Tuple[Dict[str, Any], Dict[str, Any]]] = None
-    history: List[Dict[str, Any]] = []
+    best_state: tuple[dict[str, Any], dict[str, Any]] | None = None
+    history: list[dict[str, Any]] = []
     if checkpoint_state_path.is_file():
-        checkpoint_state = json.loads(checkpoint_state_path.read_text(encoding="utf-8"))
+        try:
+            checkpoint_state = json.loads(
+                checkpoint_state_path.read_text(encoding="utf-8")
+            )
+        except (OSError, json.JSONDecodeError) as error:
+            raise NeuralRankerError(
+                "cannot read the neural ranker training checkpoint"
+            ) from error
         if (
             checkpoint_state.get("dataset_sha256") != dataset_sha256
             or checkpoint_state.get("base_model_revision") != base_model_revision
@@ -1076,7 +1241,7 @@ def train_neural_ranker(
     for epoch in range(start_epoch, epochs + 1):
         random.Random(seed + epoch).shuffle(expanded_training)
         model.train()
-        losses: List[float] = []
+        losses: list[float] = []
         for start in range(0, len(expanded_training), batch_size):
             chunk = expanded_training[start : start + batch_size]
             texts, counts, labels = _flatten_batch_inputs(chunk, guard)
@@ -1220,7 +1385,7 @@ def train_neural_ranker(
         f"{calibration['margin_threshold']:.12f}"
     ).encode("utf-8")
     artifact_id = "rimeai-ranker-s-24m:" + hashlib.sha256(artifact_seed).hexdigest()[:16]
-    manifest: Dict[str, Any] = {
+    manifest: dict[str, Any] = {
         "schema_version": 1,
         "model_type": MODEL_TYPE,
         "artifact_id": artifact_id,

@@ -14,10 +14,20 @@ Protocol (schema_version 1, one JSON object per line):
              confidence [0,1], model_artifact_id, stats? {...}}
 
 `suggestion` is "" when no constrained suggestion survives the final
-fuzzy gate. `stats` is optional engine telemetry (prefill/cache
-counters) requested by evaluation tooling; the daemon's deployment
-service deliberately does not request it and drops it from the
-payload (reveal B-F6: dead telemetry).
+fuzzy gate. `confidence` is the geometric mean of the chosen tokens'
+probabilities RENORMALIZED WITHIN THE PINYIN MASK (each step scores
+the chosen token as p / Z where Z is the RAW softmax mass over that
+step's allowed candidates): values live in [0, 1], are comparable
+across sentence lengths, and are the basis for min_confidence gates.
+The legacy RAW softmax geometric mean (length-decaying, judged weakly
+informative by docs/baselines/constrained-qwen-v3-mlx.json) is
+preserved for evaluation comparison inside `stats.confidence_raw`
+when the request asks for stats; the wire field name `confidence` and
+its [0,1] bound are unchanged from schema 1. `stats` is otherwise
+optional engine telemetry (prefill/cache counters) requested by
+evaluation tooling; the daemon's deployment service deliberately
+does not request it and drops it from the payload (reveal B-F6: dead
+telemetry).
 """
 from __future__ import annotations
 

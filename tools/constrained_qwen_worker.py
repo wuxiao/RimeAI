@@ -7,10 +7,11 @@ and the pinyin mask decides what is legal."""
 import hashlib
 import json
 import os
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 import sys
 from time import monotonic
-from typing import Any, Dict, List, Mapping, Sequence, Tuple
+from typing import Any, NoReturn, cast
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -43,7 +44,7 @@ PROMPT_VERSION = "constrained-v2"
 SEED_CONTEXT = "。"
 
 
-def fail(message: str) -> None:
+def fail(message: str) -> NoReturn:
     print(f"constrained-qwen: {message}", file=sys.stderr, flush=True)
     raise SystemExit(2)
 
@@ -58,7 +59,7 @@ def sha256_file(path: Path) -> str:
 
 def validate_request(
     request: Any,
-) -> Tuple[str, str, str, List[str], int]:
+) -> tuple[str, str, str, list[str], int]:
     if not isinstance(request, dict):
         fail("request must be an object")
     if (
@@ -92,10 +93,15 @@ def validate_request(
         or not 1 <= max_characters <= 30
     ):
         fail("request fields failed validation")
-    return request_id, context, pinyin, candidates, max_characters
+    # The guard chain above proves the shapes; cast tells the type
+    # checker what the runtime already guarantees (no behavior change).
+    return cast(
+        tuple[str, str, str, list[str], int],
+        (request_id, context, pinyin, candidates, max_characters),
+    )
 
 
-def write_response(response: Dict[str, Any]) -> None:
+def write_response(response: dict[str, Any]) -> None:
     sys.stdout.write(
         json.dumps(
             response,
@@ -163,19 +169,27 @@ def load_runtime() -> WorkerRuntime:
     return WorkerRuntime(tokenizer, model, device, artifact_id)
 
 
-class _ProbabilityView:
+class _ProbabilityView(Mapping[int, float]):
     """Probability lookup backing the scorer protocol: the decoder only
     probes a handful of token ids per step, so the full vocab is never
-    materialized as a dict."""
+    materialized as a dict. The Mapping surface exists for the type
+    checker (and __getitem__ already carries the semantics), so get()
+    is simply the abc mixin: try the key, fall back to the default."""
 
     def __init__(self, probabilities: Any) -> None:
         self._probabilities = probabilities
 
-    def get(self, token_id: int, default: float = 0.0) -> float:
+    def __getitem__(self, token_id: int) -> float:
         index = int(token_id)
         if 0 <= index < self._probabilities.shape[-1]:
             return float(self._probabilities[index])
-        return default
+        raise KeyError(token_id)
+
+    def __iter__(self) -> "Any":
+        return iter(range(int(self._probabilities.shape[-1])))
+
+    def __len__(self) -> int:
+        return int(self._probabilities.shape[-1])
 
 
 def make_scorer(
@@ -239,7 +253,7 @@ def handle_request(
     guard: PinyinGuard,
     index: PinyinTokenIndex,
     request: Any,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     request_id, context, pinyin, candidates, max_characters = (
         validate_request(request)
     )

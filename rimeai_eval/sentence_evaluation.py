@@ -65,11 +65,13 @@ def evaluate_sentence_dataset(
         baseline = sample["candidates"][0]
         raw_suggestion = ""
         confidence = 0.0
+        raw_confidence: float | None = None
         decoder_error: Optional[str] = None
         try:
             suggestion = decoder.suggest(sample)
             raw_suggestion = suggestion.text
             confidence = suggestion.confidence
+            raw_confidence = suggestion.raw_confidence
         except SentenceDecoderProtocolError as error:
             errors += 1
             decoder_error = type(error).__name__
@@ -114,7 +116,15 @@ def evaluate_sentence_dataset(
                     "raw_suggestion": raw_suggestion,
                     "applied_text": applied,
                     "gold_text": sample["gold_text"],
+                    # Mask-renormalized confidence (length-comparable);
+                    # the legacy RAW softmax geometric mean follows when
+                    # the worker reports it (None otherwise).
                     "confidence": round(confidence, 6),
+                    "raw_confidence": (
+                        round(raw_confidence, 6)
+                        if raw_confidence is not None
+                        else None
+                    ),
                     "status": status,
                     "decoder_error": decoder_error,
                 }

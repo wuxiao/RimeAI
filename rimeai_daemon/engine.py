@@ -206,28 +206,34 @@ class LocalInferenceEngine:
             logger.warning("user LM artifact invalid; cleared path=%s", path)
 
     def _apply_user_evidence(
-        self, ranking: list[str], request: dict[str, Any]
+        self, ranking: list[str], request: dict[str, Any], *, window: int
     ) -> list[str]:
-        """Reranks the ranker's top window with the L2 user LM.
+        """Reranks the ranker's eligible window with the L2 user LM.
+
+        Only the first `window` entries — the eligible full-length
+        candidates the ranker actually reordered — take part: preserved
+        non-full-length candidates and the beyond-Top10 tail keep their
+        positions so user evidence can never bypass the completeness and
+        Top10 guards. The remainder is re-appended verbatim.
 
         Cold-start safe: without user evidence the ranking is returned
         unchanged."""
         user_lm = self._user_lm
-        if user_lm is None or len(ranking) < 2:
+        if user_lm is None or window < 2 or len(ranking) < 2:
             return ranking
         domain = request.get("domain")
         if not isinstance(domain, str):
             domain = None
         try:
             reranked, confidence = user_lm.rerank(
-                request["context"], ranking, domain=domain
+                request["context"], ranking[:window], domain=domain
             )
         except (TypeError, ValueError, ArithmeticError):
             return ranking
-        if confidence <= 0 or not reranked:
+        if confidence <= 0 or len(reranked) != window:
             return ranking
         logger.debug("user LM rerank applied domain=%s", domain)
-        return reranked
+        return list(reranked) + ranking[window:]
 
     def _fused_scorer(self, request: dict[str, Any]) -> FusedCharLM | None:
         """Per-request fused scorer, or None to keep the static default.
@@ -310,7 +316,9 @@ class LocalInferenceEngine:
                 context=request["context"],
                 candidates=candidates,
             )
-        ranking = self._apply_user_evidence(list(ranking), request)
+        ranking = self._apply_user_evidence(
+            list(ranking), request, window=len(comparable_candidates)
+        )
         ranked_candidate = ""
         if not ranking:
             decision = "no_candidate"

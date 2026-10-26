@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 import re
 import sys
-from typing import Any, Dict, List, Tuple
+from typing import Any, NoReturn, cast
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -28,7 +28,7 @@ PROMPT_VERSION = "syllable-decoder-v3"
 HAN_ONLY = re.compile(r"^[\u3400-\u9fff]{1,30}$")
 
 
-def fail(message: str) -> None:
+def fail(message: str) -> NoReturn:
     print(f"qwen-sentence: {message}", file=sys.stderr, flush=True)
     raise SystemExit(2)
 
@@ -41,7 +41,7 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def load_runtime() -> Tuple[Any, Any, torch.device, str]:
+def load_runtime() -> tuple[Any, Any, torch.device, str]:
     import transformers
 
     if torch.__version__.split("+", 1)[0] != EXPECTED_TORCH:
@@ -90,7 +90,7 @@ def load_runtime() -> Tuple[Any, Any, torch.device, str]:
 
 def validate_request(
     request: Any,
-) -> Tuple[str, str, str, List[str], int]:
+) -> tuple[str, str, str, list[str], int]:
     if not isinstance(request, dict):
         fail("request must be an object")
     if (
@@ -124,7 +124,12 @@ def validate_request(
         or not 1 <= max_characters <= 30
     ):
         fail("request fields failed validation")
-    return request_id, context, pinyin, candidates, max_characters
+    # The guard chain above proves the shapes; cast tells the type
+    # checker what the runtime already guarantees (no behavior change).
+    return cast(
+        tuple[str, str, str, list[str], int],
+        (request_id, context, pinyin, candidates, max_characters),
+    )
 
 
 def clean_suggestion(
@@ -153,10 +158,10 @@ def generate(
     *,
     context: str,
     pinyin: str,
-    candidates: List[str],
+    candidates: list[str],
     max_characters: int,
-    syllables: List[str],
-) -> Tuple[str, float]:
+    syllables: list[str],
+) -> tuple[str, float]:
     messages = [
         {
             "role": "system",
@@ -209,7 +214,7 @@ def generate(
         max_characters,
         len(syllables),
     )
-    token_probabilities: List[float] = []
+    token_probabilities: list[float] = []
     for index, logits in enumerate(output.scores):
         token_id = int(generated_ids[index].item())
         log_probability = torch.log_softmax(
@@ -226,7 +231,7 @@ def generate(
     return suggestion, max(0.0, min(1.0, confidence))
 
 
-def write_response(response: Dict[str, Any]) -> None:
+def write_response(response: dict[str, Any]) -> None:
     sys.stdout.write(
         json.dumps(
             response,

@@ -3,11 +3,20 @@
 Zero-prompt constrained decoding, identical in decision semantics to the
 frozen torch worker (tools/constrained_qwen_worker.py,
 docs/baselines/constrained-qwen-v2.json): same seed context, same
-ConstrainedGreedyDecoder beam (width 4, fuzzy pairs), same raw-softmax
-geometric-mean confidence, same final fuzzy gate. The engine differs only
-in numeric precision (8-bit affine MLX weights, fp16 activations; 4-bit
-was measured to collapse the seed-boundary distribution this route
-depends on — see models/qwen2.5-0.5b-mlx-8bit.lock.json
+ConstrainedGreedyDecoder beam (width 4, fuzzy pairs), same final fuzzy
+gate. Confidence is the pinyin-mask-renormalized geometric mean (see
+DecodeResult / constrained_worker_protocol): each step scores the
+chosen token as p / Z over that step's allowed candidates, so values
+are length-comparable in [0,1]; the legacy RAW softmax geometric mean
+rides along in stats.confidence_raw for evaluation-side comparison.
+An optional RIMEAI_MLX_LENGTH_PENALTY environment knob (float >= 0,
+default 0.0) enables the beam length penalty (GNMT-style
+log_p / steps**penalty ranking) for tuning experiments — 0.0 keeps
+the frozen joint-log-probability ranking bit-identical. The engine
+differs only in numeric precision (8-bit affine MLX weights, fp16
+activations; 4-bit was measured to collapse the seed-boundary
+distribution this route depends on — see
+models/qwen2.5-0.5b-mlx-8bit.lock.json
 precision_decision) and in KV management:
 
 - one persistent prompt cache serves base (seed+context) AND beam paths,
@@ -51,7 +60,7 @@ from .constrained_worker_protocol import (
     generate_response,
     validate_generate_request,
 )
-from .pinyin_guard import PinyinGuard
+from .pinyin_guard import PinyinGuard, segment_generic_pinyin
 
 MODEL_NAME = "qwen2.5-0.5b"
 MODEL_REVISION = "060db6499f32faf8b98477b0a26969ef7d8b9987"
@@ -70,6 +79,29 @@ BEAM_WIDTH = 4
 # Identical to the frozen torch worker: a one-token sentence-boundary
 # stabilizer, never a prompt or chat template.
 SEED_CONTEXT = "。"
+
+
+def _beam_length_penalty() -> float:
+    """Beam length penalty from RIMEAI_MLX_LENGTH_PENALTY (default 0.0).
+
+    0.0 keeps the frozen joint-log-probability beam ranking; the knob
+    exists for validation-split tuning only. Invalid values (non-float,
+    negative) fail closed so a typo can never silently rerank the beam.
+    """
+    raw = os.environ.get("RIMEAI_MLX_LENGTH_PENALTY")
+    if raw is None or raw == "":
+        return 0.0
+    try:
+        value = float(raw)
+    except ValueError as error:
+        raise MlxEngineError(
+            f"RIMEAI_MLX_LENGTH_PENALTY must be a float, got {raw!r}"
+        ) from error
+    if value < 0.0 or value > 4.0:
+        raise MlxEngineError(
+            f"RIMEAI_MLX_LENGTH_PENALTY must be within [0, 4], got {value}"
+        )
+    return value
 
 
 def sha256_file(path: Path) -> str:
@@ -377,7 +409,15 @@ class MlxConstrainedEngine:
         ) = validate_generate_request(request)
         syllables = self.guard.segment(candidates[0], pinyin)
         if syllables is None:
-            syllables = [pinyin]
+            # guard.segment keys on the top candidate's own readings and
+            # fails when that candidate cannot tile the typed pinyin; the
+            # old [pinyin] whole-string fallback names no syllable the
+            # PinyinTokenIndex knows, so decode almost always abstained.
+            # Use the shared generic dictionary segmentation when it fully
+            # tiles the string; its DP failure keeps [pinyin] behavior.
+            syllables = segment_generic_pinyin(pinyin, self.guard)
+            if syllables is None:
+                syllables = [pinyin]
         seed_ids = self._encode(SEED_CONTEXT)
         if context:
             seed_ids = seed_ids + self._encode(context)
@@ -389,6 +429,7 @@ class MlxConstrainedEngine:
             max_characters=max_characters,
             fuzzy=True,
             beam_width=BEAM_WIDTH,
+            length_penalty=_beam_length_penalty(),
         )
         if result.text and not fuzzy_segment_ok(
             self.guard, result.text, syllables
@@ -397,6 +438,13 @@ class MlxConstrainedEngine:
         stats: dict[str, Any] | None = None
         if want_stats:
             stats = dict(self.cache.stats)
+            # Dual-caliber confidence telemetry: `confidence` in the
+            # response envelope is the pinyin-mask-renormalized value;
+            # the legacy RAW softmax geometric mean rides here for
+            # evaluation-side calibration comparison, along with the
+            # beam ranking knob in effect for this request.
+            stats["confidence_raw"] = result.raw_confidence
+            stats["length_penalty"] = _beam_length_penalty()
         # Reveal C-F7: roll the shared cache back to the seed+context
         # endpoint after each request. The beam-tail rows (and their KV
         # entries, roughly 300KB per position of full-vocab logits) are

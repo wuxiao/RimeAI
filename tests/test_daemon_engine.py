@@ -3,6 +3,8 @@ from typing import Any
 
 from rimeai_daemon.engine import LocalInferenceEngine
 from rimeai_runtime.beam_decoder import BeamSentenceDecoder
+from rimeai_runtime.neural_ranker import HybridSemanticRanker
+from rimeai_runtime.ranking import RankerError
 
 
 class _Ranker:
@@ -437,6 +439,177 @@ def test_user_lm_domain_field_is_honored():
         domain="chat",
     ).infer(request)
     assert result["ranked_candidate"] == "聊天纪录"
+
+
+# -- user-evidence window guard ---------------------------------------------
+#
+# 候选集同时携带三类成员：Top10 内 5 字全长候选（eligible 窗口）、
+# Top10 内长度不同的 preserved 候选、Top10 之外的尾巴候选。fake ranker
+# 固定输出 [eligible 重排] + [preserved 原序] + [尾巴原样] 的结构，
+# 与真实 Hybrid / n-gram ranker 的输出布局一致。
+_GUARD_CONTEXT = "附近有没有"
+_GUARD_CANDIDATES = [
+    "附近服务为",  # 0-5：eligible 全长窗口
+    "附件服务为",
+    "附件服务网",
+    "福晋服务为",
+    "复检服务为",
+    "富锦服务为",
+    "放进去",  # 6-9：preserved（与首候选长度不同）
+    "风景区",
+    "附近服务",
+    "风景点",
+    "风景区里",  # 10-11：Top10 之外的尾巴
+    "放进去吧",
+]
+_GUARD_RANKING = [
+    "附件服务为",  # eligible 窗口内重排（前两项交换）
+    "附近服务为",
+    "附件服务网",
+    "福晋服务为",
+    "复检服务为",
+    "富锦服务为",
+    "放进去",  # preserved 保持原序
+    "风景区",
+    "附近服务",
+    "风景点",
+    "风景区里",  # 尾巴原样拼接
+    "放进去吧",
+]
+_GUARD_WINDOW = 6
+_GUARD_ELIGIBLE = _GUARD_CANDIDATES[:_GUARD_WINDOW]
+_GUARD_GUARDED = _GUARD_CANDIDATES[_GUARD_WINDOW:]
+
+
+def _guard_request():
+    return {
+        "context": _GUARD_CONTEXT,
+        "pinyin": "fjfww",
+        "candidates": list(_GUARD_CANDIDATES),
+        "allow_sentence": False,
+    }
+
+
+def test_user_evidence_cannot_promote_preserved_or_tail_candidates():
+    # 守卫回归：preserved（长度不同）与 >Top10 尾巴候选即使有足够
+    # 用户证据，也必须保持原位，不得被顶到第 1 绕过全长/Top10 守卫。
+    engine = _user_trained_engine(
+        list(_GUARD_RANKING),
+        0.91,
+        ["附近有没有放进去"] * 200 + ["附近有没有风景区里"] * 200,
+    )
+    # 证据足以越界：把完整 ranking 直接交给 user LM 时，preserved
+    # 或尾巴候选会被顶到第 1（即修复前的行为）。
+    leaked, leaked_confidence = engine._user_lm.rerank(
+        _GUARD_CONTEXT, _GUARD_RANKING
+    )
+    assert leaked[0] in ("放进去", "风景区里")
+    assert leaked_confidence > 0
+
+    guarded = engine._apply_user_evidence(
+        list(_GUARD_RANKING), _guard_request(), window=_GUARD_WINDOW
+    )
+    assert sorted(guarded[:_GUARD_WINDOW]) == sorted(
+        _GUARD_RANKING[:_GUARD_WINDOW]
+    )
+    assert guarded[_GUARD_WINDOW:] == _GUARD_RANKING[_GUARD_WINDOW:]
+    assert guarded[0] in _GUARD_ELIGIBLE
+
+    result = engine.infer(_guard_request())
+    assert result["decision"] in ("ranked_candidate", "same_top_candidate")
+    assert result["ranked_candidate"] in ("", *_GUARD_ELIGIBLE)
+
+
+def test_user_evidence_still_reranks_inside_eligible_window():
+    # 窗口限制不得误伤个性化：eligible 窗口内的候选仍可被用户证据
+    # 顶到第 1。
+    engine = _user_trained_engine(
+        list(_GUARD_RANKING), 0.91, ["附近有没有附件服务网"] * 200
+    )
+
+    result = engine.infer(_guard_request())
+
+    assert result["decision"] == "ranked_candidate"
+    assert result["ranked_candidate"] == "附件服务网"
+
+
+def test_user_evidence_absent_keeps_ranking_bit_for_bit():
+    # 无用户证据（未加载 LM，或已加载但无任何证据）时，ranking 必须
+    # 逐位不变。
+    request = _guard_request()
+    engine = _engine(list(_GUARD_RANKING), 0.91)
+    assert engine._apply_user_evidence(
+        list(_GUARD_RANKING), request, window=_GUARD_WINDOW
+    ) == _GUARD_RANKING
+
+    from rimeai_daemon.user_lm import UserLanguageModel
+
+    engine._user_lm = UserLanguageModel()
+    assert engine._apply_user_evidence(
+        list(_GUARD_RANKING), request, window=_GUARD_WINDOW
+    ) == _GUARD_RANKING
+
+
+def test_single_eligible_candidate_with_user_evidence_skips_rerank():
+    # eligible==1 时 ranker 直接返回原始 candidates；窗口 <2 必须
+    # 直接返回，用户证据不得触碰该列表。
+    candidates = ["附近服务为", "放进去", "风景区", "风景点", "风景区里"]
+    request = {
+        "context": _GUARD_CONTEXT,
+        "pinyin": "fjfww",
+        "candidates": candidates,
+        "allow_sentence": False,
+    }
+    engine = _user_trained_engine(
+        list(candidates), 1.0, ["附近有没有放进去"] * 200
+    )
+
+    assert engine._apply_user_evidence(
+        list(candidates), request, window=1
+    ) == candidates
+
+    result = engine.infer(request)
+    assert result["decision"] == "insufficient_candidates"
+    assert result["ranked_candidate"] == ""
+
+
+class _FakeHybridRanker(HybridSemanticRanker):
+    def __init__(self, ranking, confidence):
+        self.ranking = ranking
+        self.confidence = confidence
+
+    def rank_candidates(self, *, context, pinyin, candidates):
+        return list(self.ranking), self.confidence
+
+
+class _ExplodingRanker:
+    def rank(self, *, context, candidates):
+        raise RankerError("neural ranker inference failed")
+
+
+def test_hybrid_path_user_evidence_stays_inside_window():
+    engine = _user_trained_engine(
+        list(_GUARD_RANKING), 0.91, ["附近有没有放进去"] * 200
+    )
+    engine._ranker = _FakeHybridRanker(list(_GUARD_RANKING), 0.91)
+
+    result = engine.infer(_guard_request())
+
+    assert result["decision"] in ("ranked_candidate", "same_top_candidate")
+    assert result["ranked_candidate"] in ("", *_GUARD_ELIGIBLE)
+
+
+def test_fallback_path_user_evidence_stays_inside_window():
+    engine = _user_trained_engine(
+        list(_GUARD_RANKING), 0.91, ["附近有没有放进去"] * 200
+    )
+    engine._ranker = _ExplodingRanker()
+    engine._fallback_ranker = _Ranker(list(_GUARD_RANKING), 0.91)
+
+    result = engine.infer(_guard_request())
+
+    assert result["decision"] in ("ranked_candidate", "same_top_candidate")
+    assert result["ranked_candidate"] in ("", *_GUARD_ELIGIBLE)
 
 
 def _real_engine(user_lm_path):

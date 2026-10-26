@@ -170,12 +170,22 @@ class PinyinTokenIndex:
 @dataclass(frozen=True)
 class DecodeResult:
     text: str
-    # Geometric mean of RAW next-token softmax probabilities (NOT
-    # renormalized within the pinyin mask): absolute values are small and
-    # decay with sentence length. Comparable only within this route —
-    # never against prompt-route confidences or beam margins.
+    # Geometric mean of the CHOSEN token's probability renormalized
+    # within the pinyin mask: each step sums the RAW next-token
+    # softmax probabilities over that step's allowed candidates (Z)
+    # and scores the chosen token as p / Z. Values live in [0, 1] and
+    # are comparable across sentence lengths and against thresholds,
+    # unlike the raw softmax value below. Comparable only within this
+    # route — never against prompt-route confidences or beam margins.
     confidence: float
     consumed_syllables: int
+    # Legacy RAW geometric mean of the chosen tokens' next-token
+    # softmax probabilities (NOT renormalized): absolute values are
+    # small and decay with sentence length, which is why the v3-mlx
+    # baseline judged it weakly informative for gating. Kept for
+    # evaluation-side comparison; empty/abstained results carry 0.0
+    # for both fields, so positional construction sites stay valid.
+    raw_confidence: float = 0.0
 
 
 class ConstrainedGreedyDecoder:
@@ -186,7 +196,11 @@ class ConstrainedGreedyDecoder:
     >= 0.5 * argmax; ties break to the smaller token id). beam_width > 1
     expands every allowed candidate and keeps the best complete paths by
     joint log-probability, which recovers sentences whose best reading
-    needs the whole path compared, not stepwise winners.
+    needs the whole path compared, not stepwise winners. ``length_penalty``
+    (beam only, default 0.0) divides the joint log-probability by
+    steps**penalty GNMT-style before ranking, counteracting the built-in
+    bias toward fewer-token paths; 0.0 keeps the ranking bit-identical
+    to the plain joint log-probability.
     """
 
     ARGMAX_CONFIDENT = 0.9
@@ -202,8 +216,11 @@ class ConstrainedGreedyDecoder:
         max_characters: int = 30,
         fuzzy: bool = False,
         beam_width: int = 1,
+        length_penalty: float = 0.0,
     ) -> DecodeResult:
         if beam_width <= 1:
+            # Greedy follows one path, so no length competition exists;
+            # length_penalty is a beam-ranking knob only.
             return cls._decode_greedy(
                 scorer, syllables, index,
                 max_characters=max_characters, fuzzy=fuzzy,
@@ -211,6 +228,7 @@ class ConstrainedGreedyDecoder:
         return cls._decode_beam(
             scorer, syllables, index,
             max_characters=max_characters, fuzzy=fuzzy, beam_width=beam_width,
+            length_penalty=length_penalty,
         )
 
     @classmethod
@@ -227,6 +245,7 @@ class ConstrainedGreedyDecoder:
         generated: List[int] = []
         text_parts: List[str] = []
         log_probability_sum = 0.0
+        renormalized_log_sum = 0.0
         steps = 0
         while remaining:
             probabilities = scorer(generated)
@@ -238,6 +257,12 @@ class ConstrainedGreedyDecoder:
                 (probabilities.get(token_id, 0.0), token_id, reading)
                 for token_id, reading in allowed.items()
             ]
+            # Mask-normalizer Z: the RAW probability mass the pinyin
+            # mask lets through this step. The chosen token's p is
+            # always part of Z, so Z >= p > 0 on any surviving path
+            # (p <= 0 abstains below); the guard keeps a degenerate
+            # all-zero mask (Z == 0) from producing a divide-by-zero.
+            mask_total = sum(probability for probability, _, _ in scored)
             argmax_probability = max(
                 probability for probability, _, _ in scored
             )
@@ -259,10 +284,36 @@ class ConstrainedGreedyDecoder:
             generated.append(token_id)
             text_parts.append(token_text)
             log_probability_sum += math.log(max(probability, 1e-12))
+            if mask_total > 0.0:
+                renormalized_log_sum += math.log(probability / mask_total)
             steps += 1
             del remaining[: len(reading)]
-        confidence = math.exp(log_probability_sum / steps) if steps else 0.0
-        return DecodeResult("".join(text_parts), confidence, len(syllables))
+        raw_confidence = math.exp(log_probability_sum / steps) if steps else 0.0
+        # Per-step ratios p / Z stay <= 1 (Z sums every allowed token's
+        # probability, the chosen one included), so the exponential
+        # lives in (0, 1]; the clamp only guards pathological scorer
+        # inputs (e.g. negative probabilities on non-chosen tokens).
+        confidence = (
+            min(1.0, math.exp(renormalized_log_sum / steps))
+            if steps
+            else 0.0
+        )
+        return DecodeResult("".join(text_parts), confidence, len(syllables), raw_confidence)
+
+    @staticmethod
+    def _beam_rank_score(
+        log_probability_sum: float, steps: int, length_penalty: float
+    ) -> float:
+        """Ranking score for a beam state: the joint log-probability,
+        optionally divided by steps**length_penalty (GNMT-style).
+
+        length_penalty 0.0 returns the joint log-probability untouched
+        (bit-identical ranking); unfinished states (steps == 0) also
+        rank by the raw sum, since only their extensions compete.
+        """
+        if steps <= 0 or length_penalty == 0.0:
+            return log_probability_sum
+        return log_probability_sum / (steps ** length_penalty)
 
     @classmethod
     def _decode_beam(
@@ -274,16 +325,26 @@ class ConstrainedGreedyDecoder:
         max_characters: int,
         fuzzy: bool,
         beam_width: int,
+        length_penalty: float = 0.0,
     ) -> DecodeResult:
         total = len(syllables)
 
         def expand(state):
-            tokens, text, consumed, log_probability_sum, steps = state
+            tokens, text, consumed, log_probability_sum, steps, renorm_log_sum = state
             probabilities = scorer(tokens)
-            expanded = []
-            for token_id, reading in index.candidates(
+            allowed = index.candidates(
                 syllables[consumed:], fuzzy=fuzzy
-            ).items():
+            )
+            # Mask-normalizer Z shared by every child of this state:
+            # the RAW probability mass the mask lets through here.
+            # Every kept child has probability > 0 and is part of Z, so
+            # probability / mask_total stays in (0, 1].
+            mask_total = sum(
+                probabilities.get(token_id, 0.0)
+                for token_id in allowed
+            )
+            expanded = []
+            for token_id, reading in allowed.items():
                 probability = probabilities.get(token_id, 0.0)
                 if probability <= 0.0:
                     continue
@@ -297,13 +358,20 @@ class ConstrainedGreedyDecoder:
                         consumed + len(reading),
                         log_probability_sum + math.log(max(probability, 1e-12)),
                         steps + 1,
+                        renorm_log_sum
+                        + (
+                            math.log(probability / mask_total)
+                            if mask_total > 0.0
+                            else 0.0
+                        ),
                     )
                 )
             return expanded
 
-        frontier = [([], "", 0, 0.0, 0)]
+        frontier = [([], "", 0, 0.0, 0, 0.0)]
         completed: List[tuple] = []
         deepest = 0
+        best_completed_score: float | None = None
         while frontier:
             next_frontier: List[tuple] = []
             for state in frontier:
@@ -311,15 +379,62 @@ class ConstrainedGreedyDecoder:
                 for child in expand(state):
                     if child[2] == total:
                         completed.append(child)
+                        child_score = cls._beam_rank_score(
+                            child[3], child[4], length_penalty
+                        )
+                        if best_completed_score is None or child_score > best_completed_score:
+                            best_completed_score = child_score
                     else:
                         next_frontier.append(child)
-            next_frontier.sort(key=lambda state: (-state[3], state[0]))
+            next_frontier.sort(
+                key=lambda state: (
+                    -cls._beam_rank_score(state[3], state[4], length_penalty),
+                    state[0],
+                )
+            )
             frontier = next_frontier[:beam_width]
+            # Lossless early stop. RAW joint scores never increase along
+            # a path (every step adds log(max(p, 1e-12)) <= 0), so for a
+            # frontier state at raw score L (< 0) any completion of
+            # length len <= total scores at most L / len**penalty <=
+            # L / total**penalty under the rank score (dividing a
+            # negative bound by a larger positive divisor only raises
+            # it, so total — the largest possible len — bounds every
+            # completion). Once a complete path exists, any frontier
+            # state whose rank-score upper bound L / total**penalty
+            # sits strictly below the incumbent's rank score can only
+            # ever complete strictly below it and can never beat the
+            # incumbent under (-rank_score, tokens). With penalty 0 the
+            # bound is L itself, exactly the plain joint-log-probability
+            # prune. The comparison must stay strict: at equal scores
+            # the token-id lexicographic tie-break can still flip the
+            # winner, so equal-score states keep searching exactly as
+            # before. With no completed path there is no incumbent to
+            # prune against, so never prune.
+            if (
+                frontier
+                and best_completed_score is not None
+                and all(
+                    cls._beam_rank_score(state[3], total, length_penalty)
+                    < best_completed_score
+                    for state in frontier
+                )
+            ):
+                break
         if not completed:
             return DecodeResult("", 0.0, deepest)
-        best = min(completed, key=lambda state: (-state[3], state[0]))
-        confidence = math.exp(best[3] / best[4]) if best[4] else 0.0
-        return DecodeResult(best[1], confidence, total)
+        best = min(
+            completed,
+            key=lambda state: (
+                -cls._beam_rank_score(state[3], state[4], length_penalty),
+                state[0],
+            ),
+        )
+        raw_confidence = math.exp(best[3] / best[4]) if best[4] else 0.0
+        confidence = (
+            min(1.0, math.exp(best[5] / best[4])) if best[4] else 0.0
+        )
+        return DecodeResult(best[1], confidence, total, raw_confidence)
 
 
 def _syllable_matches(actual: str, typed: str, *, fuzzy: bool) -> bool:

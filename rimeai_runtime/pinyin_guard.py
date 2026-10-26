@@ -1,9 +1,10 @@
 """Independent pinyin-consistency checks backed by a frozen Rime dictionary."""
 
+from __future__ import annotations
+
+import re
 from dataclasses import dataclass
 from pathlib import Path
-import re
-from typing import Dict, FrozenSet, List, Optional, Set
 
 _HAN_TEXT = re.compile(r"^[\u3400-\u9fff]+$")
 _PINYIN = re.compile(r"^[a-zv]+$")
@@ -21,11 +22,11 @@ def _normalize_pinyin(value: str) -> str:
 
 @dataclass(frozen=True)
 class PinyinGuard:
-    pronunciations: Dict[str, FrozenSet[str]]
+    pronunciations: dict[str, frozenset[str]]
 
     @classmethod
-    def from_rime_dictionary(cls, path: Path) -> "PinyinGuard":
-        pronunciations: Dict[str, Set[str]] = {}
+    def from_rime_dictionary(cls, path: Path) -> PinyinGuard:
+        pronunciations: dict[str, set[str]] = {}
         body_started = False
         with path.open(encoding="utf-8") as dictionary:
             for line in dictionary:
@@ -77,7 +78,7 @@ class PinyinGuard:
         pinyin: str,
         *,
         maximum_characters: int = 30,
-    ) -> Optional[List[str]]:
+    ) -> list[str] | None:
         normalized = _normalize_pinyin(pinyin)
         if (
             not text
@@ -110,3 +111,73 @@ class PinyinGuard:
                 return None
             paths = next_paths
         return paths.get(len(normalized))
+
+
+# Per-instance memo attribute for _generic_syllable_table: PinyinGuard is
+# frozen, so the cache is written via object.__setattr__ — it never takes
+# part in eq/hash/repr and dies with the guard instance it belongs to.
+_GENERIC_SYLLABLES_CACHE = "_generic_segmentation_syllables"
+
+
+def _generic_syllable_table(guard: PinyinGuard) -> tuple[str, ...]:
+    """Every single-character reading, longest-first then lexicographic.
+
+    Rebuilding walks and re-sorts the whole dictionary, so the ordered
+    tuple is memoized per guard instance (a frozen guard's pronunciation
+    table never legitimately changes).
+    """
+    cached = getattr(guard, _GENERIC_SYLLABLES_CACHE, None)
+    if cached is None:
+        cached = tuple(
+            sorted(
+                {
+                    pronunciation
+                    for text, pronunciations in guard.pronunciations.items()
+                    if len(text) == 1
+                    for pronunciation in pronunciations
+                },
+                key=lambda value: (-len(value), value),
+            )
+        )
+        object.__setattr__(guard, _GENERIC_SYLLABLES_CACHE, cached)
+    return cached
+
+
+def _normalize_generic(pinyin: str) -> str:
+    # Frozen with the original neural_ranker normalization (no ü -> v
+    # folding): the algorithm's observable behavior must not change.
+    return pinyin.lower().replace("'", "").replace(" ", "")
+
+
+def segment_generic_pinyin(pinyin: str, guard: PinyinGuard) -> list[str] | None:
+    """Longest-syllable-first DP segmentation of a pinyin string.
+
+    Returns None when the string cannot be fully tiled into
+    single-character dictionary syllables; callers that need the
+    historical whole-string fallback use generic_pinyin_segmentation.
+    """
+    normalized = _normalize_generic(pinyin)
+    syllables = _generic_syllable_table(guard)
+    paths: dict[int, list[str]] = {0: []}
+    for start in range(len(normalized) + 1):
+        if start not in paths:
+            continue
+        for syllable in syllables:
+            if normalized.startswith(syllable, start):
+                end = start + len(syllable)
+                candidate = paths[start] + [syllable]
+                previous = paths.get(end)
+                if previous is None or len(candidate) < len(previous):
+                    paths[end] = candidate
+    return paths.get(len(normalized))
+
+
+def generic_pinyin_segmentation(pinyin: str, guard: PinyinGuard) -> list[str]:
+    """Segment ``pinyin`` into dictionary syllables, preferring fewer
+    syllables; on failure return ``[normalized]`` (or ``[]`` for empty
+    input) — the exact behavior of the former neural_ranker helper."""
+    segmented = segment_generic_pinyin(pinyin, guard)
+    if segmented is not None:
+        return segmented
+    normalized = _normalize_generic(pinyin)
+    return [normalized] if normalized else []
