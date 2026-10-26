@@ -47,6 +47,11 @@ extension SemanticSuggestionPipeline {
     ) {
         guard let consumed = consumePendingLocalResult(requestID: requestID)
         else {
+            // 迟到响应已被更新状态取代（latest-request-wins 或周期
+            // 重置）：该帧的 daemon 决策行以 superseded 收口，避免
+            // 永远 pending（LM-003 孤儿化第二层：本次驱动实测槽内
+            // 替换之外，stale 丢弃是 neural_late pending 的主要来源）。
+            dependencies.sendSentenceFeedback(requestID, "superseded")
             emit(.diagnostic(.staleResult))
             return
         }
@@ -305,19 +310,42 @@ extension SemanticSuggestionPipeline {
     /// （击键/选词会推进 revision，旧帧即 stale）→ Secure Input →
     /// 云端所有权 → 结构门。拼音正确性由 worker 端拼音掩码与终门
     /// 保证（约束解码合同），客户端不重复拼音校验。
-    public func applyNeuralSentenceLate(_ frame: DaemonSentenceLateFrame) {
+    /// 迟到帧期望槽守卫（一次性消费）：槽匹配且帧令牌一致时消费槽
+    /// 并返回期望令牌；已被取代（期望槽推进/周期重置）时对该帧发
+    /// superseded 收口 daemon 决策行并返回 nil（LM-003 孤儿化：
+    /// neural_late pending 的主要来源）。
+    private func consumeNeuralLateSlot(
+        _ frame: DaemonSentenceLateFrame
+    ) -> CompositionToken? {
         guard neuralLateRequestID == frame.requestID,
               let expectedToken = neuralLateToken,
               frame.matches(expectedToken)
         else {
+            if let droppedRequestID = frame.requestID {
+                dependencies.sendSentenceFeedback(
+                    droppedRequestID,
+                    "superseded"
+                )
+            }
             emit(.diagnostic(.staleResult))
-            return
+            return nil
         }
-        // 一次性消费：同帧不重复应用。
         neuralLateRequestID = nil
         neuralLateToken = nil
         neuralLateSegments = nil
+        return expectedToken
+    }
+
+    public func applyNeuralSentenceLate(_ frame: DaemonSentenceLateFrame) {
+        guard let expectedToken = consumeNeuralLateSlot(frame) else {
+            return
+        }
         guard composition.token == expectedToken else {
+            // 击键/选词已推进组合令牌：帧内容仍属旧组合，同样收口。
+            dependencies.sendSentenceFeedback(
+                frame.requestID ?? "",
+                "superseded"
+            )
             emit(.diagnostic(.staleResult))
             return
         }

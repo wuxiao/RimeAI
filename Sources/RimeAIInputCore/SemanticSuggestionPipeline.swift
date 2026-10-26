@@ -444,13 +444,18 @@ public final class SemanticSuggestionPipeline: @unchecked Sendable {
         }
     }
 
-    /// 登记展示槽建议的来源；云端接管本地建议时先发 superseded。
+    /// 登记展示槽建议的来源；本地帧被替换（无论新帧是云接管还是
+    /// 更新的本地帧）时先发 superseded，避免旧行永远 pending
+    /// （LM-003 验证发现的孤儿化：neural_late 帧被后续本地帧替换时
+    /// 无人 resolve）。云帧被替换不发——云反馈生命周期独立，由
+    /// emitDisplayedFeedback 走 sendCloudFeedback 收尾。同帧重复
+    /// 登记（同 requestID）不重复发；daemon 侧 superseded 幂等
+    /// （无 pending 行时 no-op）。
     func setDisplayedFeedback(
         requestID: String, cloud: Bool, text: String? = nil
     ) {
         if let existing = displayedFeedback,
            !existing.cloud,
-           cloud,
            existing.requestID != requestID {
             dependencies.sendSentenceFeedback(
                 existing.requestID,
