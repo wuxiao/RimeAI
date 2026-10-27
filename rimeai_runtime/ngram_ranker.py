@@ -116,6 +116,15 @@ class NGramRankerModel:
     # hyperparameters enable it.
     unigram_terminal: UnigramTerminal | None = None
 
+    @property
+    def rerank_window(self) -> int:
+        """The Top-K window this model actually reorders.
+
+        Single source of truth for the daemon's user-evidence guard:
+        the artifact's ``top_k`` hyperparameter (read back at load
+        time), never a daemon-side constant."""
+        return self.top_k
+
     def language_score(self, context: str, candidate: str) -> float:
         """Mean log-probability per character of `candidate` after
         `context` under this model's n-gram counts. Public read-only

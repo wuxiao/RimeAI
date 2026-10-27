@@ -174,6 +174,15 @@ class OnnxRankerArtifact:
         return int(self.manifest["architecture"]["max_length"])
 
     @property
+    def rank_markers(self) -> int:
+        """Rank-marker vocabulary size pinned by the artifact contract.
+
+        Candidates whose baseline index falls outside this window would
+        only ever see a clamped marker, so this is the artifact-owned
+        rerank window (B-F6: no runtime-side constant)."""
+        return int(self.manifest["architecture"]["rank_markers"])
+
+    @property
     def margin_threshold(self) -> float:
         return float(self.manifest["decision"]["margin_threshold"])
 
@@ -248,6 +257,11 @@ class OnnxNeuralListwiseRanker:
         self.attempted_samples = 0
         self.successful_samples = 0
 
+    @property
+    def rerank_window(self) -> int:
+        """The rerank window, owned by the artifact (rank markers)."""
+        return self.artifact.rank_markers
+
     def _scores(
         self,
         *,
@@ -295,9 +309,10 @@ class OnnxNeuralListwiseRanker:
     ) -> tuple[list[str], float]:
         started_at = perf_counter()
         self.attempted_samples += 1
+        window = self.rerank_window
         semantic_window = [
             {"id": str(index), "text": candidate}
-            for index, candidate in enumerate(candidates[:10])
+            for index, candidate in enumerate(candidates[:window])
         ]
         eligible, preserved = partition_full_length_candidates(semantic_window)
         if len(eligible) < 2:
@@ -318,7 +333,7 @@ class OnnxNeuralListwiseRanker:
         )
         ranking = [texts[index] for index in ranked_indices]
         ranking.extend(candidate["text"] for candidate in preserved)
-        ranking.extend(candidates[10:])
+        ranking.extend(candidates[window:])
         margin = scores[ranked_indices[0]] - scores[ranked_indices[1]]
         threshold = self.artifact.margin_threshold
         if ranking[0] == candidates[0]:

@@ -11,6 +11,9 @@ from rimeai_runtime.ranking import RankerError
 
 
 class _Ranker:
+    # B-F6: engine 从 ranker 读取窗口；fake 暴露与真实制品一致的 10。
+    rerank_window = 10
+
     def __init__(self, ranking, confidence):
         self.ranking = ranking
         self.confidence = confidence
@@ -693,12 +696,17 @@ class _FakeHybridRanker(HybridSemanticRanker):
     def __init__(self, ranking, confidence):
         self.ranking = ranking
         self.confidence = confidence
+        # B-F6：真实 Hybrid 窗口来自 ngram 侧 top_k；fake 走同一 property。
+        self.ngram_ranker = SimpleNamespace(top_k=10)
 
     def rank_candidates(self, *, context, pinyin, candidates):
         return list(self.ranking), self.confidence
 
 
 class _ExplodingRanker:
+    # 主 ranker 抛 RankerError 后窗口改读 fallback_ranker 的暴露值。
+    rerank_window = 10
+
     def rank(self, *, context, candidates):
         raise RankerError("neural ranker inference failed")
 
@@ -726,6 +734,173 @@ def test_fallback_path_user_evidence_stays_inside_window():
 
     assert result["decision"] in ("ranked_candidate", "same_top_candidate")
     assert result["ranked_candidate"] in ("", *_GUARD_ELIGIBLE)
+
+
+# -- B-F6: artifact-owned rerank window --------------------------------------
+#
+# 窗口大小单一事实源：ranker 制品暴露 rerank_window（ngram=top_k，
+# 神经=rank-marker 词表），engine 按其切片，不再硬编码 10。候选集含
+# 四类成员：窗口内全长 eligible、窗口内 preserved（短）、窗口外全长、
+# 窗口外尾巴。
+_BF6_CONTEXT = "附近有没有"
+_BF6_CANDIDATES = [
+    "附近服务为",  # 0-1、3-4：top_k=5 窗口内全长 eligible
+    "附件服务为",
+    "放进去",  # 2：窗口内 preserved（长度不同）
+    "附件服务网",
+    "福晋服务为",
+    "风景区",  # 5、8、9：preserved（窗口外）
+    "复检服务为",  # 6-7：全长，top-10 窗口内、top-5 窗口外
+    "富锦服务为",
+    "附近服务",
+    "风景点",
+    "风景区里",  # 10-11：Top10 之外的尾巴
+    "放进去吧",
+]
+_BF6_ELIGIBLE_TOP5 = {"附近服务为", "附件服务为", "附件服务网", "福晋服务为"}
+_BF6_ELIGIBLE_TOP10 = _BF6_ELIGIBLE_TOP5 | {"复检服务为", "富锦服务为"}
+
+
+def _bf6_request():
+    return {
+        "context": _BF6_CONTEXT,
+        "pinyin": "fjfww",
+        "candidates": list(_BF6_CANDIDATES),
+        "allow_sentence": False,
+    }
+
+
+def _top_k_ngram_ranker(tmp_path, *, top_k):
+    """训练小型真实 n-gram 制品（top_k 可调）并经加载器读回。"""
+    import dataclasses
+
+    from rimeai_runtime.ngram_ranker import (
+        load_ngram_model,
+        train_ngram_model,
+        write_ngram_model_atomic,
+    )
+
+    samples = [
+        {
+            "schema_version": 1,
+            "id": f"bf6-{index}",
+            "split": split,
+            "domain": "general",
+            "context": context,
+            "pinyin": "fjfww",
+            "candidates": ["附近服务为", "附件服务为", "附件服务网"],
+            "gold_text": gold,
+            "tags": [],
+        }
+        for index, (split, context, gold) in enumerate(
+            [
+                ("train", "附近有没有人", "附件服务为"),
+                ("train", "附近能找到", "附件服务网"),
+                ("train", "附近还有吗", "附件服务为"),
+                ("validation", "附近看不到", "附件服务网"),
+            ]
+        )
+    ]
+    model, _report = train_ngram_model(samples, dataset_sha256="f" * 64)
+    tuned = dataclasses.replace(model, top_k=top_k)
+    artifact = tmp_path / f"ngram-top-k-{top_k}.json.gz"
+    write_ngram_model_atomic(artifact, tuned)
+    return load_ngram_model(artifact)
+
+
+def test_user_evidence_respects_artifact_top_k_five_window(tmp_path):
+    # B-F6 击穿场景：制品 top_k=5 时，旧硬编码 [:10] 窗口会把 preserved
+    # （"放进去"，模型输出位 4）与窗口外成员交给 user LM 重排。窗口
+    # 必须收窄到制品声明的 5。
+    ranker = _top_k_ngram_ranker(tmp_path, top_k=5)
+    assert ranker.rerank_window == 5
+
+    ranking, _confidence = ranker.rank(
+        context=_BF6_CONTEXT, candidates=_BF6_CANDIDATES
+    )
+    # 模型输出布局：[窗口内 eligible 重排] + [窗口内 preserved] + [窗口外原样]
+    assert sorted(ranking[:4]) == sorted(_BF6_ELIGIBLE_TOP5)
+    assert ranking[4] == "放进去"
+    assert ranking[5:] == _BF6_CANDIDATES[5:]
+
+    engine = _user_trained_engine(
+        list(ranking), 0.91, ["附近有没有放进去"] * 200
+    )
+    engine._ranker = ranker
+
+    # 证据足以越界：按旧 [:10] 口径（comparable=6）交给 user LM 时，
+    # preserved 成员会被顶到第 1（即修复前的击穿路径）。
+    leaked, leaked_confidence = engine._user_lm.rerank(
+        _BF6_CONTEXT, ranking[:6]
+    )
+    assert leaked[0] == "放进去"
+    assert leaked_confidence > 0
+
+    guarded = engine._apply_user_evidence(
+        list(ranking), _bf6_request(), window=4
+    )
+    assert guarded[4:] == ranking[4:]
+    assert guarded[0] in _BF6_ELIGIBLE_TOP5
+
+    result = engine.infer(_bf6_request())
+    assert result["ranked_candidate"] in ("", *_BF6_ELIGIBLE_TOP5)
+    assert result["ranked_candidate"] != "放进去"
+
+
+def test_top_k_ten_keeps_current_window_behavior(tmp_path):
+    # B-F6 要求 top_k=10 现状行为逐位不变：窗口仍覆盖 top-10 全长
+    # eligible（含原序 6/7 的候选），用户证据可在窗口内顶位。
+    ranker = _top_k_ngram_ranker(tmp_path, top_k=10)
+    assert ranker.rerank_window == 10
+    comparable = LocalInferenceEngine._comparable_candidates(
+        _BF6_CANDIDATES, ranker.rerank_window
+    )
+    assert len(comparable) == 6
+
+    ranking, _confidence = ranker.rank(
+        context=_BF6_CONTEXT, candidates=_BF6_CANDIDATES
+    )
+    # 布局：[top-10 全长 eligible 重排] + [窗口内 preserved 原序] + [尾巴]
+    assert sorted(ranking[:6]) == sorted(_BF6_ELIGIBLE_TOP10)
+    assert ranking[6:10] == ["放进去", "风景区", "附近服务", "风景点"]
+    assert ranking[10:] == _BF6_CANDIDATES[10:]
+
+    engine = _user_trained_engine(
+        list(ranking), 0.91, ["附近有没有复检服务为"] * 200
+    )
+    engine._ranker = ranker
+
+    guarded = engine._apply_user_evidence(
+        list(ranking), _bf6_request(), window=6
+    )
+    # "复检服务为"（原序 6，top-10 窗口内、top-5 窗口外）仍可被顶到第 1
+    assert guarded[0] == "复检服务为"
+    assert guarded[6:] == ranking[6:]
+
+    result = engine.infer(_bf6_request())
+    assert result["ranked_candidate"] in ("", "复检服务为")
+
+
+def test_fallback_path_uses_fallback_ranker_window(tmp_path):
+    # RankError 回退路径必须改用 fallback_ranker 暴露的窗口：主
+    # ranker 窗口 10、fallback 制品 top_k=5 时，若误用主窗口，
+    # preserved（"放进去"）会被用户证据顶到第 1。
+    fallback = _top_k_ngram_ranker(tmp_path, top_k=5)
+    fallback_ranking, _confidence = fallback.rank(
+        context=_BF6_CONTEXT, candidates=_BF6_CANDIDATES
+    )
+    engine = _user_trained_engine(
+        list(fallback_ranking), 0.91, ["附近有没有放进去"] * 200
+    )
+    engine._ranker = _ExplodingRanker()  # rerank_window = 10
+    engine._fallback_ranker = fallback  # rerank_window = 5
+
+    leaked, _ = engine._user_lm.rerank(_BF6_CONTEXT, fallback_ranking[:6])
+    assert leaked[0] == "放进去"
+
+    result = engine.infer(_bf6_request())
+    assert result["ranked_candidate"] != "放进去"
+    assert result["ranked_candidate"] in ("", *_BF6_ELIGIBLE_TOP5)
 
 
 def _real_engine(user_lm_path):

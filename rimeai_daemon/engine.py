@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -212,9 +213,10 @@ class LocalInferenceEngine:
 
         Only the first `window` entries — the eligible full-length
         candidates the ranker actually reordered — take part: preserved
-        non-full-length candidates and the beyond-Top10 tail keep their
-        positions so user evidence can never bypass the completeness and
-        Top10 guards. The remainder is re-appended verbatim.
+        non-full-length candidates and the tail beyond the ranker's
+        Top-K window keep their positions so user evidence can never
+        bypass the completeness and Top-K guards. The remainder is
+        re-appended verbatim.
 
         Cold-start safe: without user evidence the ranking is returned
         unchanged."""
@@ -286,36 +288,54 @@ class LocalInferenceEngine:
             kwargs["scorer"] = scorer
         return decode(**kwargs)
 
+    @staticmethod
+    def _comparable_candidates(
+        candidates: Sequence[str], window: int
+    ) -> list[dict[str, str]]:
+        """Eligible (full-length) candidates inside the ranker's window.
+
+        B-F6: the window is owned by the ranker artifact (n-gram ``top_k``
+        / neural rank-marker vocabulary), never a daemon-side constant —
+        a mismatch would let user evidence rerank candidates the ranker
+        never touched (preserved members and the tail beyond Top-K)."""
+        semantic_window = [
+            {"id": str(index), "text": candidate}
+            for index, candidate in enumerate(candidates[:window])
+        ]
+        comparable, _ = partition_full_length_candidates(semantic_window)
+        return comparable
+
     def infer(self, request: dict[str, Any]) -> dict[str, Any]:
         # Cheap stat per request: consolidation rewrites the artifact in
         # another process; pick it up without a daemon restart.
         self._refresh_user_lm()
         candidates = request["candidates"]
-        semantic_window = [
-            {"id": str(index), "text": candidate}
-            for index, candidate in enumerate(candidates[:10])
-        ]
-        comparable_candidates, _ = partition_full_length_candidates(
-            semantic_window
-        )
+        ranker = self._ranker
         try:
-            if isinstance(self._ranker, HybridSemanticRanker):
-                ranking, rank_confidence = self._ranker.rank_candidates(
+            if isinstance(ranker, HybridSemanticRanker):
+                ranking, rank_confidence = ranker.rank_candidates(
                     context=request["context"],
                     pinyin=request["pinyin"],
                     candidates=candidates,
                 )
             else:
-                ranking, rank_confidence = self._ranker.rank(
+                ranking, rank_confidence = ranker.rank(
                     context=request["context"],
                     candidates=candidates,
                 )
         except RankerError:
             logger.debug("ranker failed; using fallback n-gram ranker", exc_info=True)
-            ranking, rank_confidence = self._fallback_ranker.rank(
+            ranker = self._fallback_ranker
+            ranking, rank_confidence = ranker.rank(
                 context=request["context"],
                 candidates=candidates,
             )
+        # B-F6: derive the guard window from the ranker that actually
+        # produced this ranking — on the fallback path that is the
+        # fallback ranker's window, not the primary's.
+        comparable_candidates = self._comparable_candidates(
+            candidates, ranker.rerank_window
+        )
         ranking = self._apply_user_evidence(
             list(ranking), request, window=len(comparable_candidates)
         )

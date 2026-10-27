@@ -581,6 +581,36 @@ def test_legacy_to_dict_key_layout_matches_f23fa49_artifacts():
     }
 
 
+def test_rerank_window_roundtrips_through_the_artifact(tmp_path: Path):
+    # B-F6：重排窗口是制品字段 top_k（load 时读回），rank() 只重排
+    # 窗口内候选；窗口外原样拼接，单 eligible 时置信度为 1.0。
+    import dataclasses
+
+    samples = [
+        _sample("train-1", "train", "请执行下面这条", "命令", ["明令", "命令"]),
+        _sample("train-2", "train", "终端运行这条", "命令", ["明令", "命令"]),
+        _sample(
+            "validation-1", "validation", "现在执行这条", "命令", ["明令", "命令"]
+        ),
+    ]
+    model, _report = train_ngram_model(samples, dataset_sha256="f" * 64)
+    tuned = dataclasses.replace(model, top_k=1)
+    artifact = tmp_path / "ngram-top-k-1.json.gz"
+    with gzip.open(artifact, "wt", encoding="utf-8") as handle:
+        json.dump(tuned.to_dict(), handle, ensure_ascii=False)
+
+    loaded = load_ngram_model(artifact)
+
+    assert loaded.top_k == 1
+    assert loaded.rerank_window == 1
+    ranking, confidence = loaded.rank(
+        context="请执行这条", candidates=["明令", "命令", "命令行"]
+    )
+    # top_k=1：窗口内仅 1 个 eligible → 无重排，窗口外候选逐位保留。
+    assert ranking == ["明令", "命令", "命令行"]
+    assert confidence == 1.0
+
+
 def _write_payload(tmp_path: Path, payload: dict) -> Path:
     artifact = tmp_path / "handwritten.json.gz"
     with gzip.open(artifact, "wt", encoding="utf-8") as file:

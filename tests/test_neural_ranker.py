@@ -686,6 +686,7 @@ class _PatchedNeuralListwise(NeuralListwiseRanker):
         self.artifact = SimpleNamespace(
             margin_threshold=margin_threshold,
             target_precision=target_precision,
+            rank_markers=10,  # B-F6: rerank_window 从制品契约取
         )
         self._fixed_scores = list(scores)
         self.attempt_latencies_ms = []
@@ -740,6 +741,75 @@ def test_neural_listwise_same_top_keeps_full_confidence():
 
     assert ranking == ["明令", "命令"]
     assert confidence == 1.0
+
+
+def test_neural_listwise_rerank_window_comes_from_artifact():
+    # B-F6：重排窗口是制品契约（architecture.rank_markers），
+    # 不是 ranker 里的硬编码常量。
+    ranker = _PatchedNeuralListwise([2.0, 1.0])
+
+    assert ranker.rerank_window == 10
+
+
+def test_neural_listwise_window_tail_keeps_original_order():
+    # 窗口外的候选原样拼接：神经分数只覆盖窗口内 eligible，
+    # 尾巴不参与重排也不丢失。
+    scores = [float(index) for index in range(10)]
+    ranker = _PatchedNeuralListwise(scores)
+    candidates = [f"候选{index:02d}" for index in range(12)]
+
+    ranking, _confidence = ranker.rank_candidates(
+        context="上下文", pinyin="houxuan", candidates=candidates
+    )
+
+    assert ranking[10:] == candidates[10:]
+    assert sorted(ranking[:10]) == sorted(candidates[:10])
+    assert ranking[0] == candidates[9]  # 分数最高者居首
+
+
+class _TopKNGram(_FixedNGram):
+    """_FixedNGram + 制品 top_k 暴露（B-F6 窗口事实源）。"""
+
+    def __init__(self, scores, top_k):
+        super().__init__(scores)
+        self.top_k = top_k
+
+
+def test_hybrid_rerank_window_follows_ngram_top_k(tmp_path):
+    # B-F6：Hybrid 的重排窗口来自 ngram 制品 top_k（单一事实源）；
+    # 窗口外候选原样拼接，绝不进入神经/ngram 打分。
+    ranker = HybridSemanticRanker(
+        _FixedNeural([9.0, 0.0, 8.0, 0.0]),
+        _TopKNGram([9.0, 0.0, 8.0, 0.0], top_k=4),
+        _write_config(tmp_path, _fusion_payload()),
+    )
+    candidates = [f"候选{index:02d}" for index in range(8)]
+
+    assert ranker.rerank_window == 4
+
+    ranking, _confidence = ranker.rank_candidates(
+        context="上下文", pinyin="houxuan", candidates=candidates
+    )
+
+    assert ranking[:4] == [
+        candidates[0],
+        candidates[2],
+        candidates[1],
+        candidates[3],
+    ]
+    assert ranking[4:] == candidates[4:]
+
+
+def test_hybrid_rerank_window_defaults_to_marker_vocabulary(tmp_path):
+    # ngram 协作者未暴露 top_k（训练 fake / 鸭子类型适配层）时，窗口
+    # 回落到神经侧 rank-marker 词表，与已发布制品的 10 一致。
+    ranker = HybridSemanticRanker(
+        _FixedNeural([1.0, 0.0]),
+        _FixedNGram([1.0, 0.0]),
+        _write_config(tmp_path, _fusion_payload()),
+    )
+
+    assert ranker.rerank_window == 10
 
 
 def _write_config(tmp_path, payload, name="fusion.json"):

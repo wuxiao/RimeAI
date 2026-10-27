@@ -471,6 +471,20 @@ class NeuralRankerArtifact:
     def max_length(self) -> int:
         return int(self.manifest["architecture"].get("max_length", 128))
 
+    @property
+    def rank_markers(self) -> int:
+        """Rank-marker vocabulary size recorded at training time.
+
+        Baseline indices beyond this window only ever see a clamped
+        marker, so this is the artifact-owned rerank window (B-F6).
+        Artifacts written before the field was recorded fall back to
+        the current marker vocabulary."""
+        return int(
+            self.manifest["architecture"].get(
+                "rank_markers", len(RANK_MARKERS)
+            )
+        )
+
 
 def _neural_dependencies():
     try:
@@ -584,6 +598,11 @@ class NeuralListwiseRanker:
         self.attempted_samples = 0
         self.successful_samples = 0
 
+    @property
+    def rerank_window(self) -> int:
+        """The rerank window, owned by the artifact (rank markers)."""
+        return self.artifact.rank_markers
+
     def _scores(
         self,
         *,
@@ -625,9 +644,10 @@ class NeuralListwiseRanker:
     ) -> tuple[list[str], float]:
         started_at = perf_counter()
         self.attempted_samples += 1
+        window = self.rerank_window
         semantic_window = [
             {"id": str(index), "text": candidate}
-            for index, candidate in enumerate(candidates[:10])
+            for index, candidate in enumerate(candidates[:window])
         ]
         eligible, preserved = partition_full_length_candidates(semantic_window)
         if len(eligible) < 2:
@@ -647,7 +667,7 @@ class NeuralListwiseRanker:
         indexed.sort(key=lambda item: (-item[1][1], item[0]))
         ranking = [item[1][0] for item in indexed]
         ranking.extend(candidate["text"] for candidate in preserved)
-        ranking.extend(candidates[10:])
+        ranking.extend(candidates[window:])
         ordered_scores = [item[1][1] for item in indexed]
         margin = ordered_scores[0] - ordered_scores[1]
         threshold = self.artifact.margin_threshold
@@ -729,6 +749,19 @@ class HybridSemanticRanker:
         self.attempted_samples = 0
         self.successful_samples = 0
 
+    @property
+    def rerank_window(self) -> int:
+        """The Top-K rerank window, owned by the n-gram artifact.
+
+        B-F6 single source of truth: the fusion reranks exactly the
+        window the paired n-gram artifact declares (``top_k``), never
+        an independent constant. Duck-typed n-gram collaborators
+        without a ``top_k`` (training fixtures) fall back to the neural
+        marker vocabulary, which matches every shipped artifact."""
+        return int(
+            getattr(self.ngram_ranker, "top_k", len(RANK_MARKERS))
+        )
+
     def rank_candidates(
         self,
         *,
@@ -738,9 +771,10 @@ class HybridSemanticRanker:
     ) -> tuple[list[str], float]:
         started_at = perf_counter()
         self.attempted_samples += 1
+        window = self.rerank_window
         semantic_window = [
             {"id": str(index), "text": candidate}
-            for index, candidate in enumerate(candidates[:10])
+            for index, candidate in enumerate(candidates[:window])
         ]
         eligible, preserved = partition_full_length_candidates(semantic_window)
         if len(eligible) < 2:
@@ -771,7 +805,7 @@ class HybridSemanticRanker:
         )
         ranking = [texts[index] for index in ranked_indices]
         ranking.extend(candidate["text"] for candidate in preserved)
-        ranking.extend(candidates[10:])
+        ranking.extend(candidates[window:])
         margin = (
             fused_scores[ranked_indices[0]] - fused_scores[ranked_indices[1]]
         )

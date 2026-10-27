@@ -110,6 +110,7 @@ class _PatchedOnnxRanker(OnnxNeuralListwiseRanker):
         self.artifact = SimpleNamespace(
             margin_threshold=margin_threshold,
             target_precision=target_precision,
+            rank_markers=10,  # B-F6: rerank_window 从制品契约取
         )
         self._fixed_scores = list(scores)
         self.attempt_latencies_ms = []
@@ -168,3 +169,35 @@ def test_onnx_same_top_keeps_full_confidence():
 
     assert ranking == ["明令", "命令"]
     assert confidence == 1.0
+
+
+def test_onnx_rerank_window_comes_from_artifact(tmp_path):
+    # B-F6：重排窗口是制品字段（architecture.rank_markers，加载时
+    # 经 EXPECTED_ARCHITECTURE 逐字段校验），不是运行时硬编码。
+    from rimeai_runtime.onnx_ranker import OnnxRankerArtifact as RuntimeArtifact
+
+    root = tmp_path / "ranker"
+    _write_artifact(root)
+
+    artifact = RuntimeArtifact.load(root)
+
+    assert artifact.rank_markers == 10
+
+    ranker = _PatchedOnnxRanker([2.0, 1.0])
+    assert ranker.rerank_window == 10
+
+
+def test_onnx_window_tail_keeps_original_order():
+    # 窗口外候选原样拼接：ONNX 会话只对窗口内 eligible 打分，
+    # 尾巴不参与重排也不丢失。
+    scores = [float(index) for index in range(10)]
+    ranker = _PatchedOnnxRanker(scores)
+    candidates = [f"候选{index:02d}" for index in range(12)]
+
+    ranking, _confidence = ranker.rank_candidates(
+        context="上下文", pinyin="houxuan", candidates=candidates
+    )
+
+    assert ranking[10:] == candidates[10:]
+    assert sorted(ranking[:10]) == sorted(candidates[:10])
+    assert ranking[0] == candidates[9]

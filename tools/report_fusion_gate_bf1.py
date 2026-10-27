@@ -29,6 +29,20 @@ Usage:
       --rime-dictionary .rimeai/rime/shared/luna_pinyin.dict.yaml \
       --fusion-config .rimeai/models/rimeai-ranker-s-24m-fusion-v2.json \
       --output .rimeai/reports/fusion-gate-tighten-bf1.json
+
+Optional arguments generalize the report beyond the p0 calibration corpus
+without changing any p0 output (omit them and every p0 byte is identical):
+
+  --limitation-note TEXT   append TEXT to report["limitations"] (recorded
+                            verbatim, e.g. gold-script noise on an
+                            independent corpus).
+  --decision-split SPLIT   add a pre-registered independent-corpus decision
+                            block computed on SPLIT (validation or test):
+                            blocked net benefit >= 0 ->
+                            independent_corpus_supports_current_tightening,
+                            < 0 -> revisit_flagged (no automatic rollback).
+  --decision-rule TEXT     the pre-registered rule text recorded alongside
+                            the decision block.
 """
 
 from __future__ import annotations
@@ -37,6 +51,7 @@ import argparse
 import json
 import math
 import os
+import shlex
 import sys
 from pathlib import Path
 from typing import Any
@@ -265,10 +280,24 @@ def _write_atomic_json(path: Path, payload: dict[str, Any]) -> None:
     temporary = path.with_name(f".{path.name}.tmp")
     with temporary.open("w", encoding="utf-8") as file:
         json.dump(payload, file, ensure_ascii=False, sort_keys=True, indent=2)
-        file.write("\n")
         file.flush()
         os.fsync(file.fileno())
     os.replace(temporary, path)
+
+
+_CALIBRATION_NOTE_SAME_DOMAIN = (
+    "(validation {validation} matches the incumbent config's "
+    "calibration cohort)"
+)
+_STABILITY_NOTE_SAME_DOMAIN = (
+    "v1 per-sample z-score fusion amplifies tiny run-to-run "
+    "inference noise on samples whose score deviation is near zero, "
+    "so borderline counts drift slightly across runs (three runs: "
+    "blocked 10/8/7, wins lost 3/3/2, net benefit +1/+1/+2). "
+    "Invariant across runs: losses avoided = 4, validation net "
+    "benefit strictly positive, verdict = merge; borderline "
+    "neutrals never enter the net-benefit decision."
+)
 
 
 def main() -> int:
@@ -279,6 +308,28 @@ def main() -> int:
     parser.add_argument("--rime-dictionary", required=True, type=Path)
     parser.add_argument("--fusion-config", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument(
+        "--limitation-note",
+        action="append",
+        default=None,
+        metavar="TEXT",
+        help="record TEXT verbatim in report['limitations'] (e.g. gold-script "
+        "noise when evaluating an independent corpus)",
+    )
+    parser.add_argument(
+        "--decision-split",
+        choices=("validation", "test"),
+        default=None,
+        help="add a pre-registered independent-corpus decision block on this "
+        "split: blocked net benefit >= 0 supports the current tightening, "
+        "< 0 flags a revisit (no automatic rollback)",
+    )
+    parser.add_argument(
+        "--decision-rule",
+        default=None,
+        metavar="TEXT",
+        help="pre-registered decision rule text recorded in the decision block",
+    )
     args = parser.parse_args()
 
     dataset = load_dataset(args.dataset)
@@ -291,6 +342,26 @@ def main() -> int:
     neural = load_neural_ranker(args.neural_model, guard, device="auto")
     ngram = load_ngram_model(args.language_model)
     incumbent = HybridSemanticRanker(neural, ngram, args.fusion_config)
+    same_domain = (
+        dataset.sha256 == incumbent.config.validation_dataset_sha256
+    )
+
+    command = (
+        "PYTHONDONTWRITEBYTECODE=1 .venv/bin/python "
+        "tools/report_fusion_gate_bf1.py "
+        f"--dataset {args.dataset} "
+        f"--neural-model {args.neural_model} "
+        f"--language-model {args.language_model} "
+        f"--rime-dictionary {args.rime_dictionary} "
+        f"--fusion-config {args.fusion_config} "
+        f"--output {args.output}"
+    )
+    for note in args.limitation_note or []:
+        command += f" --limitation-note {shlex.quote(note)}"
+    if args.decision_split is not None:
+        command += f" --decision-split {args.decision_split}"
+    if args.decision_rule is not None:
+        command += f" --decision-rule {shlex.quote(args.decision_rule)}"
 
     report: dict[str, Any] = {
         "schema_version": 1,
@@ -301,18 +372,7 @@ def main() -> int:
         "making the daemon gate exactly equivalent to the calibrated "
         "margin_threshold; applied to HybridSemanticRanker, "
         "NeuralListwiseRanker, and OnnxNeuralListwiseRanker",
-        "commands": {
-            "report": (
-                "PYTHONDONTWRITEBYTECODE=1 .venv/bin/python "
-                "tools/report_fusion_gate_bf1.py "
-                f"--dataset {args.dataset} "
-                f"--neural-model {args.neural_model} "
-                f"--language-model {args.language_model} "
-                f"--rime-dictionary {args.rime_dictionary} "
-                f"--fusion-config {args.fusion_config} "
-                f"--output {args.output}"
-            )
-        },
+        "commands": {"report": command},
         "dataset_sha256": dataset.sha256,
         "daemon_min_confidence": DAEMON_MIN_CONFIDENCE,
         "legacy_gate_ratio": LEGACY_GATE_RATIO,
@@ -365,13 +425,38 @@ def main() -> int:
             "test": None,  # filled after the test split is scored
         },
         "note": (
-            "raw_dataset counts the jsonl splits (validation 982 / test 974); "
+            "raw_dataset counts the jsonl splits "
+            f"(validation {raw_split_counts.get('validation', 0)} / "
+            f"test {raw_split_counts.get('test', 0)}); "
             "evaluated counts build_ranker_examples output — samples with "
             ">= 2 full-length candidates whose gold is present, the only "
-            "samples a ranker can act on (validation 673 matches the "
-            "incumbent config's calibration cohort)"
+            "samples a ranker can act on "
+            + (
+                _CALIBRATION_NOTE_SAME_DOMAIN.format(
+                    validation=len(validation_rows)
+                )
+                if same_domain
+                else "(cross-domain: this dataset is not the fusion config's "
+                "calibration cohort — see cross_domain_application)"
+            )
         ),
     }
+    if not same_domain:
+        report["cross_domain_application"] = {
+            "fusion_config_calibrated_on_dataset_sha256": (
+                incumbent.config.validation_dataset_sha256
+            ),
+            "ngram_model_dataset_sha256": incumbent.config.ngram_dataset_sha256,
+            "evaluated_dataset_sha256": dataset.sha256,
+            "note": (
+                "the fusion config (margin_threshold / target_precision) and "
+                "the char n-gram model were calibrated on the p0 dataset; "
+                "applying them to this dataset is a cross-domain "
+                "application — interpret every number with this context"
+            ),
+        }
+    if args.limitation_note:
+        report["limitations"] = list(args.limitation_note)
     report["validation_verdict"] = (
         "merge_semantic_change"
         if net_benefit >= 0
@@ -403,31 +488,71 @@ def main() -> int:
     delta = report["test"]["gate_after"]["net_gain"] - report["test"][
         "gate_before"
     ]["net_gain"]
+    stability_note = (
+        _STABILITY_NOTE_SAME_DOMAIN
+        if same_domain
+        else (
+            "v1 per-sample z-score fusion amplifies tiny run-to-run "
+            "inference noise on samples whose score deviation is near "
+            "zero, so borderline counts drift slightly across runs; this "
+            "report is a single run on an independent corpus (the "
+            "three-run stability figures apply only to the p0 "
+            "calibration dataset). Borderline neutrals never enter the "
+            "net-benefit decision."
+        )
+    )
+    summary = (
+        "The tightened gate blocks every flip in [0.1253*tau, tau) — "
+        f"validation: {len(blocked)} flips blocked "
+        f"({blocked_losses} losses avoided, {blocked_wins} wins lost, "
+        f"net benefit {net_benefit:+d}); test net gain "
+        f"{report['test']['gate_before']['net_gain']} -> "
+        f"{report['test']['gate_after']['net_gain']} "
+        f"({delta:+d}). The daemon 0.55 gate now equals the calibrated "
+        "margin_threshold."
+    )
+    if args.decision_split is not None:
+        decision_rows = (
+            validation_rows if args.decision_split == "validation" else test_rows
+        )
+        decision_blocked = _blocked_details(decision_rows)
+        decision_wins = sum(
+            1 for row in decision_blocked if row["outcome"] == "win_blocked"
+        )
+        decision_losses = sum(
+            1 for row in decision_blocked if row["outcome"] == "loss_blocked"
+        )
+        decision_benefit = decision_losses - decision_wins
+        decision_verdict = (
+            "independent_corpus_supports_current_tightening"
+            if decision_benefit >= 0
+            else "revisit_flagged"
+        )
+        report["independent_corpus_decision"] = {
+            "split": args.decision_split,
+            "rule": args.decision_rule,
+            "blocked_flips": len(decision_blocked),
+            "blocked_wins": decision_wins,
+            "blocked_losses": decision_losses,
+            "blocked_net_benefit": decision_benefit,
+            "verdict": decision_verdict,
+            "action_on_negative": (
+                "flag for coordinator revisit; no code is rolled back "
+                "automatically"
+            ),
+        }
+        summary += (
+            f" Independent corpus ({args.decision_split}): blocked net "
+            f"benefit {decision_benefit:+d} -> {decision_verdict}."
+        )
     report["conclusion"] = {
         "validation_blocked_net_benefit": net_benefit,
         "validation_verdict": report["validation_verdict"],
         "test_net_gain_delta": delta,
         "test_top1_delta": report["test"]["gate_after"]["top1_accuracy"]
         - report["test"]["gate_before"]["top1_accuracy"],
-        "stability_note": (
-            "v1 per-sample z-score fusion amplifies tiny run-to-run "
-            "inference noise on samples whose score deviation is near zero, "
-            "so borderline counts drift slightly across runs (three runs: "
-            "blocked 10/8/7, wins lost 3/3/2, net benefit +1/+1/+2). "
-            "Invariant across runs: losses avoided = 4, validation net "
-            "benefit strictly positive, verdict = merge; borderline "
-            "neutrals never enter the net-benefit decision."
-        ),
-        "summary": (
-            "The tightened gate blocks every flip in [0.1253*tau, tau) — "
-            f"validation: {len(blocked)} flips blocked "
-            f"({blocked_losses} losses avoided, {blocked_wins} wins lost, "
-            f"net benefit {net_benefit:+d}); test net gain "
-            f"{report['test']['gate_before']['net_gain']} -> "
-            f"{report['test']['gate_after']['net_gain']} "
-            f"({delta:+d}). The daemon 0.55 gate now equals the calibrated "
-            "margin_threshold."
-        ),
+        "stability_note": stability_note,
+        "summary": summary,
     }
 
     _write_atomic_json(args.output, report)
