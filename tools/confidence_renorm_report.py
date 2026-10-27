@@ -13,6 +13,7 @@ model.
 
 import argparse
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +25,22 @@ def load_details(path: Path) -> list[dict[str, Any]]:
             for line in file:
                 line = line.strip()
                 if line:
-                    rows.append(json.loads(line))
+                    row = json.loads(line)
+                    # reveal C-F8：缺 raw_confidence 键 = 口径切换前的
+                    # 旧产物（其 confidence 列本身就是 RAW 值）——明确
+                    # 报错退出，不再在 discrimination() 里裸 KeyError，
+                    # 也不允许 precision_coverage 把缺键静默当 0.0。
+                    if "raw_confidence" not in row:
+                        raise SystemExit(
+                            f"error: details '{path}' row "
+                            f"id={row.get('id', '?')!r} lacks the "
+                            "'raw_confidence' key: the input is a RAW-"
+                            "caliber product emitted before the mask-"
+                            "renormalization switch (its 'confidence' "
+                            "column already IS the RAW value); this dual-"
+                            "caliber report needs post-switch details"
+                        )
+                    rows.append(row)
     except (OSError, json.JSONDecodeError) as error:
         raise SystemExit(
             f"error: cannot read details '{path}': {error}"
@@ -215,6 +231,19 @@ RENORM_THRESHOLDS = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.9
 RAW_THRESHOLDS = [0.0, 1e-05, 1e-04, 1e-03, 1e-02, 1e-01, 0.2, 0.4, 0.6]
 
 
+def _write_atomic_json(path: Path, payload: dict[str, Any]) -> None:
+    """reveal C-F8：报告原子写（临时文件 + fsync + os.replace），
+    与仓库既有 _write_atomic_json 模式一致——中断不再留下半份报告。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    with temporary.open("w", encoding="utf-8") as file:
+        json.dump(payload, file, ensure_ascii=False, indent=1)
+        file.write("\n")
+        file.flush()
+        os.fsync(file.fileno())
+    os.replace(temporary, path)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -288,11 +317,7 @@ def main() -> int:
     }
 
     out_path = Path(args.out)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(
-        json.dumps(report, ensure_ascii=False, indent=1) + "\n",
-        encoding="utf-8",
-    )
+    _write_atomic_json(out_path, report)
     print(json.dumps(report, ensure_ascii=False, sort_keys=True))
     return 0
 

@@ -508,11 +508,127 @@ def test_unigram_terminal_round_trips_through_artifact(tmp_path: Path):
     with gzip.open(artifact, "rt", encoding="utf-8") as file:
         serialized = json.load(file)
     smoothing = serialized["hyperparameters"]["smoothing"]
+    assert serialized["schema_version"] == 3
     assert smoothing["unigram_terminal"] == {
         "add_k": trained_terminal.add_k,
         "discount": trained_terminal.discount,
     }
     assert serialized["unigram_counts"] == trained_terminal.unigram_counts
+
+
+def test_unigram_terminal_artifact_is_invisible_to_stale_loaders():
+    """New-semantics artifacts must self-describe as schema v3 (B-F3).
+
+    The schema bump is the whole fix: the stale loader at f23fa49 and
+    earlier gated on ``payload.get("schema_version") != 2``, so a v3
+    artifact makes that load fail closed instead of succeeding and
+    silently scoring with the legacy terminal. Asserting
+    ``schema_version == 3`` (i.e. ``!= 2``) below is exactly the
+    "stale loader rejects the new artifact" precondition; the same
+    holds for the beam config's v2 bump in test_beam_decoder.py.
+    """
+    model, _ = train_ngram_model(
+        _unigram_samples(),
+        dataset_sha256="u" * 64,
+        terminal_method_grid=("unigram",),
+        **_V3_WEIGHTS,
+    )
+    payload = model.to_dict()
+
+    assert payload["schema_version"] == 3
+    # f23fa49 loader gate: schema_version must equal 2 -> this artifact
+    # fails that load instead of loading with legacy semantics.
+    assert payload["schema_version"] != 2
+
+
+def test_legacy_to_dict_key_layout_matches_f23fa49_artifacts():
+    """Legacy-terminal artifacts serialize exactly like f23fa49 output.
+
+    Same key set, same version (2), no unigram keys: with sort_keys
+    JSON writers (write_ngram_model_atomic) the bytes are identical to
+    artifacts produced by the f23fa49 trainer.
+    """
+    model, _ = train_ngram_model(
+        _unigram_samples(), dataset_sha256="u" * 64
+    )
+    payload = model.to_dict()
+
+    assert payload["schema_version"] == 2
+    assert set(payload) == {
+        "schema_version",
+        "model_type",
+        "dataset_sha256",
+        "split_counts",
+        "hyperparameters",
+        "candidate_frequencies",
+        "ngram_counts",
+        "prefix_counts",
+    }
+    assert set(payload["hyperparameters"]) == {
+        "rank_weight",
+        "frequency_weight",
+        "language_weight",
+        "orders",
+        "max_context_characters",
+        "top_k",
+        "smoothing",
+    }
+    assert set(payload["hyperparameters"]["smoothing"]) == {
+        "method",
+        "alpha",
+        "terminal_numerator",
+        "terminal_denominator",
+    }
+
+
+def _write_payload(tmp_path: Path, payload: dict) -> Path:
+    artifact = tmp_path / "handwritten.json.gz"
+    with gzip.open(artifact, "wt", encoding="utf-8") as file:
+        json.dump(payload, file, ensure_ascii=False)
+    return artifact
+
+
+def test_load_rejects_schema_v2_carrying_unigram_terminal(tmp_path: Path):
+    """Hand-written or corrupted v2 artifacts must fail closed.
+
+    v2 + unigram_terminal is exactly the ambiguous mix the schema bump
+    exists to prevent: the stale loader would accept the version and
+    silently score with legacy semantics.
+    """
+    model, _ = train_ngram_model(
+        _unigram_samples(),
+        dataset_sha256="u" * 64,
+        terminal_method_grid=("unigram",),
+        **_V3_WEIGHTS,
+    )
+    payload = model.to_dict()
+    payload["schema_version"] = 2
+
+    with pytest.raises(NGramModelError, match="schema v3"):
+        load_ngram_model(_write_payload(tmp_path, payload))
+
+
+def test_load_rejects_schema_v3_without_unigram_terminal(tmp_path: Path):
+    model, _ = train_ngram_model(
+        _unigram_samples(), dataset_sha256="u" * 64
+    )
+    payload = model.to_dict()
+    payload["schema_version"] = 3
+
+    with pytest.raises(NGramModelError, match="unigram_terminal"):
+        load_ngram_model(_write_payload(tmp_path, payload))
+
+
+@pytest.mark.parametrize("version", [1, 4])
+def test_load_rejects_unknown_schema_versions(tmp_path: Path, version: int):
+    model, _ = train_ngram_model(
+        _unigram_samples(), dataset_sha256="u" * 64
+    )
+    payload = model.to_dict()
+    payload["schema_version"] = version
+
+    with pytest.raises(NGramModelError, match="unsupported"):
+        load_ngram_model(_write_payload(tmp_path, payload))
 
 
 def test_legacy_artifact_scores_bit_for_bit_without_terminal(tmp_path: Path):
@@ -642,6 +758,52 @@ def test_extra_train_leakage_raises_on_id_or_text_overlap():
             primary,
             dataset_sha256="u" * 64,
             extra_train_samples=[leaked_by_text],
+            **_V3_WEIGHTS,
+        )
+
+
+def test_leakage_check_blocks_prefix_rewrites_beyond_the_counting_window():
+    """A rewritten prefix beyond the 40-char window cannot dodge overlap.
+
+    _build_counts only ever sees context[-40:], so a held-out sample
+    whose context was rewritten outside that window counts identically
+    to the original. The leakage key (_normalized_text) truncates the
+    context with the same window, so the overlap is still caught
+    instead of silently double-counting (B-F9).
+    """
+    from rimeai_runtime.ngram_ranker import _normalized_text
+
+    shared_tail = "终端流程演练" * 7  # 42 chars, beyond the counting window
+    heldout = _sample(
+        "validation-1",
+        "validation",
+        "甲乙丙丁" + shared_tail,
+        "命令",
+        ["明令", "命令"],
+    )
+    rewritten = _sample(
+        "extra-rewritten",
+        "train",
+        "子丑寅卯" + shared_tail,
+        "命令",
+        ["明令", "命令"],
+    )
+    primary = [
+        _sample("train-1", "train", "他每天练习", "命令", ["明令", "命令"]),
+        _sample("train-2", "train", "发布执行", "命令", ["明令", "命令"]),
+        heldout,
+    ]
+
+    # Same counting key ([-40:] window + gold), different raw context:
+    # the rewrite used to make the two keys differ and dodge the check.
+    assert _normalized_text(rewritten) == _normalized_text(heldout)
+    assert rewritten["context"] != heldout["context"]
+
+    with pytest.raises(NGramModelError, match="leaks held-out validation"):
+        train_ngram_model(
+            primary,
+            dataset_sha256="u" * 64,
+            extra_train_samples=[rewritten],
             **_V3_WEIGHTS,
         )
 

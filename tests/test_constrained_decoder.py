@@ -1272,3 +1272,43 @@ def test_user_fusion_rejects_invalid_user_scores():
             user_scorer=lambda prefix, text: -0.5,
             user_weight=-0.1,
         )
+
+
+def test_decode_rejects_invalid_length_penalty():
+    # 契约：length_penalty 必须是有限且 >= 0 的浮点数——NaN 让 beam
+    # 排序全崩（NaN 比较恒为 False，min/sort 回退到列表首位），负数
+    # 使早停上界 L / total**penalty 不再成立（total**penalty < 1 放大
+    # 负数上界，"无损"剪枝可能剪掉真正赢家）。与 user_weight 同款
+    # fail loud，且在 decode() 入口校验，greedy 分支同样拒绝。
+    scorer = _FixedScorer({(): {0: 0.6, 1: 0.3}, (0,): {1: 0.9}})
+    for beam_width in (1, 4):
+        for penalty in (
+            float("nan"),
+            float("inf"),
+            float("-inf"),
+            -1.0,
+            -1e-9,
+        ):
+            with pytest.raises(ValueError):
+                ConstrainedGreedyDecoder.decode(
+                    scorer,
+                    ("ni", "hao"),
+                    _index(),
+                    beam_width=beam_width,
+                    length_penalty=penalty,
+                )
+
+
+def test_decode_accepts_finite_nonnegative_length_penalty():
+    # 合法域不变：0.0 与正有限值照常接受，行为与改前一致。
+    scorer = _FixedScorer({(): {0: 0.6, 1: 0.3}, (0,): {1: 0.9}})
+    for beam_width in (1, 4):
+        for penalty in (0.0, 1.0, 2.5):
+            result = ConstrainedGreedyDecoder.decode(
+                scorer,
+                ("ni", "hao"),
+                _index(),
+                beam_width=beam_width,
+                length_penalty=penalty,
+            )
+            assert result.text != ""

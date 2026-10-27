@@ -209,7 +209,10 @@ class ConstrainedGreedyDecoder:
     (beam only, default 0.0) divides the joint log-probability by
     steps**penalty GNMT-style before ranking, counteracting the built-in
     bias toward fewer-token paths; 0.0 keeps the ranking bit-identical
-    to the plain joint log-probability.
+    to the plain joint log-probability. Must be a finite float >= 0
+    (validated fail-loud at the decode() entry, greedy included): NaN
+    silently corrupts beam ranking, and a negative penalty breaks the
+    lossless early-stop upper bound L / total**penalty.
     """
 
     ARGMAX_CONFIDENT = 0.9
@@ -284,6 +287,14 @@ class ConstrainedGreedyDecoder:
         """
         if not math.isfinite(user_weight) or user_weight < 0.0:
             raise ValueError("user_weight must be a finite float >= 0")
+        # Same fail-loud contract as user_weight, checked at the entry
+        # for both branches: NaN comparisons are always False, so a NaN
+        # penalty silently degrades beam min/sort to list order, and a
+        # negative penalty makes the early-stop bound L / total**penalty
+        # invalid (a divisor below 1 inflates the negative bound), so
+        # "lossless" pruning could drop the true winner.
+        if not math.isfinite(length_penalty) or length_penalty < 0.0:
+            raise ValueError("length_penalty must be a finite float >= 0")
         fusion_active = user_scorer is not None and user_weight != 0.0
         if beam_width <= 1:
             # Greedy follows one path, so no length competition exists;

@@ -2,6 +2,14 @@
   "schema_version": 1,
   "status": "frozen_test_baseline",
   "recorded_at": "2026-10-13",
+  "confidence_caliber_annotation": {
+    "added_at": "2026-10-26",
+    "kind": "incremental-note",
+    "note": "Post-freeze caliber change (no frozen number in this file is altered): DecodeResult.confidence — the wire 'confidence' field — switched to the pinyin-mask-renormalized geometric mean (each step scores the chosen token as p/Z over that step's allowed candidates), while every number above was measured under the RAW softmax geometric-mean caliber recorded in comparison.constrained-v2.confidence_semantics. Do not compare 'confidence' values across that boundary. The legacy RAW value now rides in the response envelope's optional stats.confidence_raw (workers emit it when request.stats=true), and every worker self-declares its caliber via the optional response field confidence_caliber ('mask-renormalized-geometric-mean' or 'raw-softmax-geometric-mean').",
+    "raw_confidence_location": "response.stats.confidence_raw (requested via request.stats=true)",
+    "caliber_marker_field": "response.confidence_caliber",
+    "frozen_numbers_caliber": "raw-softmax-geometric-mean"
+  },
   "dataset": {
     "path": ".rimeai/datasets/p0-librime-1.17.0-luna-simp.jsonl",
     "sha256": "f0d46219a334d9d408518e387899c57b4881da27e8388d721827ebc86087b35d",

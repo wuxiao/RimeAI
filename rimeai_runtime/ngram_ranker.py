@@ -17,6 +17,10 @@ from .candidate_policy import partition_full_length_candidates
 
 ORDERS = (2, 3, 4, 5)
 TOP_K = 10
+# Both the counting pass (_build_counts) and the leakage-check key
+# (_normalized_text) truncate the context to this window, so rewriting
+# characters outside it cannot dodge a text-overlap check.
+_TRAIN_CONTEXT_CHARACTERS = 40
 _RANK_WEIGHTS = (0.1, 0.25, 0.5, 1.0, 2.0)
 _FREQUENCY_WEIGHTS = (0.0, 0.25, 0.5, 1.0, 2.0)
 _LANGUAGE_WEIGHTS = (0.0, 0.25, 0.5, 1.0, 2.0)
@@ -27,9 +31,16 @@ _UNIGRAM_ADD_KS = (0.01, 0.1, 1.0)
 
 
 def _normalized_text(sample: Mapping[str, Any]) -> str:
-    """Whitespace-insensitive comparison key for leakage checks."""
+    """Whitespace-insensitive comparison key for leakage checks.
+
+    The context is truncated to the same training counting window
+    (``_TRAIN_CONTEXT_CHARACTERS``) so a rewritten prefix beyond that
+    window cannot dodge the overlap check: two contexts differing only
+    before the window count identically and must collide here too.
+    """
+    context = sample.get("context", "")
     return "\x00".join(
-        part for part in (sample.get("context", ""), sample.get("gold_text", ""))
+        (context[-_TRAIN_CONTEXT_CHARACTERS:], sample.get("gold_text", ""))
     ).replace(" ", "").replace("\t", "").replace("\n", "")
 
 
@@ -193,7 +204,14 @@ class NGramRankerModel:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "schema_version": 2,
+            # schema v2 = legacy add-k terminal (bit-for-bit with the
+            # f23fa49 artifacts); schema v3 = unigram-backoff terminal.
+            # Bumping the version (instead of quietly adding keys) keeps
+            # the repo fail-closed: a stale loader that only knows v2
+            # refuses v3 instead of silently scoring with legacy terminal.
+            "schema_version": (
+                3 if self.unigram_terminal is not None else 2
+            ),
             "model_type": "char-ngram-ranker",
             "dataset_sha256": self.dataset_sha256,
             "split_counts": self.split_counts,
@@ -253,7 +271,7 @@ def _build_counts(
     for sample in samples:
         gold = sample["gold_text"]
         frequencies[gold] += 1
-        text = "^" + sample["context"][-40:] + gold + "$"
+        text = "^" + sample["context"][-_TRAIN_CONTEXT_CHARACTERS:] + gold + "$"
         for character in text:
             unigram_counter[character] += 1
         for order in ORDERS:
@@ -673,12 +691,13 @@ def load_ngram_model(path: Path) -> NGramRankerModel:
         raise NGramModelError(f"cannot read model artifact '{path}'") from error
     if (
         not isinstance(payload, dict)
-        or payload.get("schema_version") != 2
+        or payload.get("schema_version") not in (2, 3)
         or payload.get("model_type") != "char-ngram-ranker"
     ):
         raise NGramModelError(
             "unsupported n-gram model artifact; retrain the model to "
-            "produce a schema v2 artifact"
+            "produce a schema v2 (legacy terminal) or v3 (unigram "
+            "terminal) artifact"
         )
     hyperparameters = payload.get("hyperparameters")
     if not isinstance(hyperparameters, dict):
@@ -705,6 +724,20 @@ def load_ngram_model(path: Path) -> NGramRankerModel:
         raise
     except (KeyError, TypeError, ValueError, AttributeError) as error:
         raise NGramModelError("model artifact fields are invalid") from error
+    # Cross-check the terminal payload against the declared schema
+    # version: v2 must stay legacy-only and v3 must actually carry the
+    # unigram terminal. Hand-written or corrupted mixes fail closed
+    # instead of silently picking one scoring semantic.
+    if payload.get("schema_version") == 2 and unigram_terminal is not None:
+        raise NGramModelError(
+            "schema v2 artifact carries unigram_terminal smoothing; "
+            "retrain the model to produce a schema v3 artifact"
+        )
+    if payload.get("schema_version") == 3 and unigram_terminal is None:
+        raise NGramModelError(
+            "schema v3 artifact is missing the unigram_terminal "
+            "smoothing hyperparameters; retrain the model"
+        )
     try:
         return NGramRankerModel(
             dataset_sha256=payload["dataset_sha256"],

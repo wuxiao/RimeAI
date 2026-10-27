@@ -122,6 +122,23 @@ def _write_worker_script(directory: Path, behavior: str) -> Path:
                         "confidence": 0.5,
                         "model_artifact_id": "stub:mlx-8bit:v3",
                     }}
+                elif behavior == "caliber":
+                    # reveal C-F1：worker 响应携带可选 confidence_caliber
+                    # 字段（口径自声明）——daemon 侧无严格结构门，字段被
+                    # 忽略（不进 payload），交付不受影响。
+                    response = {{
+                        "schema_version": 1,
+                        "request_id": request["request_id"],
+                        "suggestion": "请执行命令",
+                        "confidence": 0.5,
+                        "model_artifact_id": "stub:mlx-8bit:v3",
+                        "confidence_caliber": "mask-renormalized-geometric-mean",
+                        "stats": {{
+                            "confidence_raw": 0.01,
+                            "user_lm_weight": 0.0,
+                            "length_penalty": 0.0,
+                        }},
+                    }}
                 sys.stdout.write(
                     json.dumps(response, ensure_ascii=False) + "\\n"
                 )
@@ -234,6 +251,27 @@ def test_service_decodes_and_passes_payload_through(tmp_path: Path) -> None:
         artifacts = service.artifacts()
         assert artifacts[0]["role"] == "neural_sentence"
         assert artifacts[0]["model_artifact_id"] == "stub:mlx-8bit:v3"
+    finally:
+        service.close()
+
+
+def test_service_accepts_confidence_caliber_field(tmp_path: Path) -> None:
+    # reveal C-F1：口径切换后 worker 响应新增可选字段 confidence_caliber
+    # （+stats 遥测）。daemon 对未知响应字段无严格结构门：字段被忽略、
+    # 不进交付 payload，交付行为与旧 worker 完全一致（向后/向前兼容；
+    # 不改任何门语义）。
+    script = _write_worker_script(tmp_path, "caliber")
+    service = NeuralSentenceService(
+        _config([sys.executable, str(script)]), project_root=tmp_path
+    )
+    try:
+        payload = service.decode(_request())
+        assert payload is not None
+        assert payload["suggestion"] == "请执行命令"
+        assert payload["confidence"] == 0.5
+        assert "confidence_caliber" not in payload
+        assert "stats" not in payload
+        assert service.stats["delivered"] == 1
     finally:
         service.close()
 

@@ -251,14 +251,13 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     train_ngram_parser.add_argument(
         "--terminal-method",
-        choices=("legacy", "unigram"),
         action="store",
         default=None,
         help=(
             "scan only this terminal smoothing method instead of the "
             "default legacy-only grid (pass 'unigram' to train a v3-style "
             "unigram-backoff artifact; 'legacy,unigram' comma form scans "
-            "both)"
+            "both; each entry must be 'legacy' and/or 'unigram')"
         ),
     )
 

@@ -8,6 +8,7 @@ import pytest
 
 from rimeai_runtime.constrained_decoder import PinyinTokenIndex
 from rimeai_runtime.constrained_worker_protocol import (
+    CONFIDENCE_CALIBER_MASK_RENORM,
     GenerateRequestError,
     generate_response,
     validate_generate_request,
@@ -206,10 +207,34 @@ def test_length_penalty_env_knob_defaults_and_bounds(monkeypatch) -> None:
     assert _beam_length_penalty() == 0.5
     monkeypatch.setenv("RIMEAI_MLX_LENGTH_PENALTY", "1.0")
     assert _beam_length_penalty() == 1.0
-    for bad in ("abc", "-0.5", "5"):
+    for bad in ("abc", "-0.5", "5", "nan", "NaN", "inf", "-inf"):
         monkeypatch.setenv("RIMEAI_MLX_LENGTH_PENALTY", bad)
         with pytest.raises(MlxEngineError):
             _beam_length_penalty()
+
+
+def test_handle_request_uses_startup_parsed_length_penalty(monkeypatch) -> None:
+    # reveal A-F5：length_penalty 由 main() 启动期解析一次存入
+    # engine，handle_request 与 stats 复用——不再逐请求读环境。旧代码
+    # 在 typo 时 worker 存活却对每个请求抛错弃权（与 user-LM 启动期
+    # exit(2) 的 fail-fast 不一致），stats 里还二次解析环境。
+    monkeypatch.setenv("RIMEAI_MLX_LENGTH_PENALTY", "abc")  # 启动期即被拒
+    engine = _engine()
+    engine._length_penalty = 0.5  # main() 启动期解析后存入的合法值
+    response = engine.handle_request(
+        {
+            "schema_version": 1,
+            "task": "generate_sentence",
+            "request_id": "r-lp",
+            "context": "",
+            "pinyin": "nihao",
+            "candidates": ["你好"],
+            "max_characters": 30,
+            "stats": True,
+        }
+    )
+    assert response["suggestion"] == "你好"
+    assert response["stats"]["length_penalty"] == 0.5
 
 
 def _request(**overrides: object) -> dict[str, object]:
@@ -302,6 +327,43 @@ def test_generate_response_envelope() -> None:
         stats={"cache_fed_tokens": 3},
     )
     assert with_stats["stats"] == {"cache_fed_tokens": 3}
+    # reveal C-F1：口径标记是可选字段——显式传入才出现（旧客户端按
+    # 字段读取，不受影响；缺省 = 旧产物/未知口径）。
+    with_marker = generate_response(
+        request_id="r",
+        suggestion="你好",
+        confidence=0.5,
+        model_artifact_id="artifact",
+        confidence_caliber=CONFIDENCE_CALIBER_MASK_RENORM,
+    )
+    assert (
+        with_marker["confidence_caliber"]
+        == "mask-renormalized-geometric-mean"
+    )
+    assert "confidence_caliber" not in plain
+
+
+def test_handle_request_declares_mask_renormalized_caliber() -> None:
+    # reveal C-F1：第二批把 confidence 从 RAW softmax 几何平均换成
+    # 掩码内归一化口径，但 wire 字段名/schema_version 未变——新旧
+    # 产物不可区分。信封现在自声明口径。
+    engine = _engine()
+    response = engine.handle_request(
+        {
+            "schema_version": 1,
+            "task": "generate_sentence",
+            "request_id": "r-caliber",
+            "context": "",
+            "pinyin": "nihao",
+            "candidates": ["你好"],
+            "max_characters": 30,
+        }
+    )
+    assert response["suggestion"] == "你好"
+    assert (
+        response["confidence_caliber"]
+        == "mask-renormalized-geometric-mean"
+    )
 
 
 # --------------------------------------------------------------------------
@@ -327,6 +389,8 @@ def test_handle_request_line_fails_closed_on_internal_error() -> None:
     assert response["confidence"] == 0.0
     assert response["request_id"] == "req-1"
     assert response["model_artifact_id"] == model_artifact_id()
+    # fail-closed 兜底信封同样自声明口径（worker 恒为掩码内归一化）。
+    assert response["confidence_caliber"] == "mask-renormalized-geometric-mean"
 
     with pytest.raises(GenerateRequestError):
         handle_request_line(

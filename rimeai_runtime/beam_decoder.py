@@ -37,13 +37,26 @@ class BeamDecoderConfig:
     character_frequency_weight: float = 0.5
 
     def to_dict(self) -> dict[str, Any]:
+        # schema v1 = historical artifacts: no character_frequency_weight
+        # key at all, decoded with the hardcoded 0.5 prior (the serialized
+        # key set matches the f23fa49 artifacts bit-for-bit). Any other
+        # weight bumps the artifact to schema v2 with an explicit key, so
+        # a stale loader that only knows v1 refuses it instead of
+        # silently decoding with 0.5.
+        uses_default_weight = self.character_frequency_weight == 0.5
         return {
-            "schema_version": 1,
+            "schema_version": 1 if uses_default_weight else 2,
             "decoder_type": "pinyin-beam-ngram",
             "threshold": self.threshold,
             "beam_width": self.beam_width,
             "characters_per_syllable": self.characters_per_syllable,
-            "character_frequency_weight": self.character_frequency_weight,
+            **(
+                {}
+                if uses_default_weight
+                else {
+                    "character_frequency_weight": self.character_frequency_weight
+                }
+            ),
             "language_model_sha256": self.language_model_sha256,
             "dictionary_sha256": self.dictionary_sha256,
             "dataset_sha256": self.dataset_sha256,
@@ -650,10 +663,21 @@ def load_beam_config(path: Path) -> BeamDecoderConfig:
         raise BeamDecoderError(f"cannot read decoder artifact '{path}'") from error
     if (
         not isinstance(payload, dict)
-        or payload.get("schema_version") != 1
+        or payload.get("schema_version") not in (1, 2)
         or payload.get("decoder_type") != "pinyin-beam-ngram"
     ):
         raise BeamDecoderError("unsupported beam decoder artifact")
+    # schema v1 = the historical artifacts: the weight key is absent and
+    # the prior is the hardcoded 0.5. schema v2 artifacts must carry an
+    # explicit weight. Failing closed on every mix (v2 without the key,
+    # v1 with a non-default value) keeps a stale loader from silently
+    # decoding a new artifact with the old 0.5 semantics.
+    has_explicit_weight = "character_frequency_weight" in payload
+    if payload.get("schema_version") == 2 and not has_explicit_weight:
+        raise BeamDecoderError(
+            "schema v2 beam decoder artifact requires an explicit "
+            "character_frequency_weight; retrain the decoder"
+        )
     # Optional since schema_version 1 artifacts gained the field: absent
     # means the historical hardcoded 0.5 prior weight. Anything present
     # must be a real, finite, non-negative number (bools and strings are
@@ -687,4 +711,13 @@ def load_beam_config(path: Path) -> BeamDecoderConfig:
         or config.character_frequency_weight < 0.0
     ):
         raise BeamDecoderError("beam decoder parameters are invalid")
+    if (
+        payload.get("schema_version") == 1
+        and config.character_frequency_weight != 0.5
+    ):
+        raise BeamDecoderError(
+            "schema v1 beam decoder artifact must not carry a "
+            "non-default character_frequency_weight; retrain the decoder "
+            "to produce a schema v2 artifact"
+        )
     return config

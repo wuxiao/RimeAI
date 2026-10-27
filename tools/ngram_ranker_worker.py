@@ -8,7 +8,7 @@ import math
 import os
 from pathlib import Path
 import sys
-from typing import Any, Dict, List, Tuple
+from typing import Any, NoReturn
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -16,12 +16,12 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from rimeai_runtime.ngram_ranker import NGramModelError, load_ngram_model
 
 
-def fail(message: str) -> None:
+def fail(message: str) -> NoReturn:
     print(f"ngram-ranker: {message}", file=sys.stderr, flush=True)
     raise SystemExit(2)
 
 
-def validate_request(request: Any) -> Tuple[str, str, List[Dict[str, str]]]:
+def validate_request(request: Any) -> tuple[str, str, list[dict[str, str]]]:
     if not isinstance(request, dict):
         fail("request must be an object")
     if request.get("schema_version") != 1 or request.get("task") != "rerank":
@@ -42,7 +42,7 @@ def validate_request(request: Any) -> Tuple[str, str, List[Dict[str, str]]]:
         or not 1 <= len(candidates) <= 20
     ):
         fail("request fields failed validation")
-    normalized: List[Dict[str, str]] = []
+    normalized: list[dict[str, str]] = []
     seen_ids = set()
     seen_text = set()
     for candidate in candidates:

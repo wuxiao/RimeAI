@@ -104,7 +104,15 @@ def main() -> int:
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
 
+    # reveal C-F8：--output 与任一 sha 锁定输入同路径都必须在重负载
+    # 之前被拒绝——旧保护集合只有 v3/v4 config，覆盖 dataset/
+    # language-model/rime-dictionary/training-report 会在数分钟计算
+    # 后原地把输入制品覆盖掉。
     for label, path in (
+        ("--dataset", args.dataset),
+        ("--language-model", args.language_model),
+        ("--rime-dictionary", args.rime_dictionary),
+        ("--training-report", args.training_report),
         ("--v3-config", args.v3_config),
         ("--v4-config", args.v4_config),
     ):

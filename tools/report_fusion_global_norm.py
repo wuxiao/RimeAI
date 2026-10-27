@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from statistics import fmean
@@ -142,6 +143,19 @@ def _evaluate(
     }
 
 
+def _write_atomic_json(path: Path, payload: dict[str, Any]) -> None:
+    """reveal C-F8：报告原子写（临时文件 + fsync + os.replace），
+    与仓库既有 _write_atomic_json 模式一致——中断不再留下半份报告。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    with temporary.open("w", encoding="utf-8") as file:
+        json.dump(payload, file, ensure_ascii=False, sort_keys=True, indent=2)
+        file.write("\n")
+        file.flush()
+        os.fsync(file.fileno())
+    os.replace(temporary, path)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", required=True, type=Path)
@@ -251,11 +265,7 @@ def main() -> int:
         ),
     }
 
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(
-        json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    _write_atomic_json(args.output, report)
     print(json.dumps(report["splits"], ensure_ascii=False, sort_keys=True))
     return 0
 

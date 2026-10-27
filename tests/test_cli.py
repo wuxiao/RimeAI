@@ -1678,3 +1678,119 @@ def test_evaluate_reports_character_error_rate(tmp_path):
     metrics = json.loads(result.stdout)["metrics"]
     assert metrics["cer"] == 0.5
     assert metrics["conditional_cer"] == 0.0
+
+
+def _write_train_ngram_dataset(tmp_path: Path) -> Path:
+    samples = [
+        {
+            "schema_version": 1,
+            "id": "train-1",
+            "split": "train",
+            "domain": "general",
+            "context": "请执行下面这条",
+            "pinyin": "fixture",
+            "candidates": ["明令", "命令"],
+            "gold_text": "命令",
+            "tags": [],
+        },
+        {
+            "schema_version": 1,
+            "id": "train-2",
+            "split": "train",
+            "domain": "general",
+            "context": "终端运行这条",
+            "pinyin": "fixture",
+            "candidates": ["明令", "命令"],
+            "gold_text": "命令",
+            "tags": [],
+        },
+        {
+            "schema_version": 1,
+            "id": "validation-1",
+            "split": "validation",
+            "domain": "general",
+            "context": "现在执行这条",
+            "pinyin": "fixture",
+            "candidates": ["明令", "命令"],
+            "gold_text": "命令",
+            "tags": [],
+        },
+    ]
+    dataset = tmp_path / "train-ngram.jsonl"
+    dataset.write_text(
+        "".join(
+            json.dumps(sample, ensure_ascii=False) + "\n" for sample in samples
+        ),
+        encoding="utf-8",
+    )
+    return dataset
+
+
+def test_train_ngram_terminal_method_accepts_comma_combination(tmp_path):
+    # help 承诺 'legacy,unigram' 逗号形式扫描两种终端平滑方法：CLI
+    # 不得在 argparse 层拒绝，必须走进 handler 的逗号解析分支并
+    # 把两种方法都送进扫描网格。
+    dataset = _write_train_ngram_dataset(tmp_path)
+    artifact = tmp_path / "model.json.gz"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "rimeai_eval",
+            "train-ngram",
+            str(dataset),
+            "--output",
+            str(artifact),
+            "--terminal-method",
+            "legacy,unigram",
+        ],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["smoothing_scan"]["terminal_method_grid"] == [
+        "legacy",
+        "unigram",
+    ]
+    assert report["selected_hyperparameters"]["terminal_method"] in (
+        "legacy",
+        "unigram",
+    )
+    assert artifact.is_file()
+
+
+def test_train_ngram_terminal_method_rejects_unknown_entry(tmp_path):
+    # 非法值由 handler 既有分支校验：exit 2 + 'error:' 消息风格，
+    # 而不是 argparse 的 'invalid choice' SystemExit 文本。
+    dataset = _write_train_ngram_dataset(tmp_path)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "rimeai_eval",
+            "train-ngram",
+            str(dataset),
+            "--output",
+            str(tmp_path / "model.json.gz"),
+            "--terminal-method",
+            "kneser-ney",
+        ],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert (
+        result.stderr
+        == "error: --terminal-method entries must be 'legacy' and/or "
+        "'unigram'\n"
+    )

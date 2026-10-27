@@ -28,6 +28,16 @@ from rimeai_runtime.constrained_decoder import (
 from rimeai_runtime.pinyin_guard import PinyinGuard
 
 
+def _mask_renorm_caliber_marker() -> str:
+    """掩码内归一化口径标记（共享协议模块；局部导入遵循本文件
+    sys.path bootstrap 之后的既有导入约束）。"""
+    from rimeai_runtime.constrained_worker_protocol import (
+        CONFIDENCE_CALIBER_MASK_RENORM,
+    )
+
+    return CONFIDENCE_CALIBER_MASK_RENORM
+
+
 MODEL_NAME = "qwen2.5-0.5b"
 MODEL_REVISION = "060db6499f32faf8b98477b0a26969ef7d8b9987"
 MODEL_SHA256 = "88c142557820ccad55bb59756bfcfcf891de9cc6202816bd346445188a0ed342"
@@ -59,7 +69,7 @@ def sha256_file(path: Path) -> str:
 
 def validate_request(
     request: Any,
-) -> tuple[str, str, str, list[str], int]:
+) -> tuple[str, str, str, list[str], int, bool]:
     if not isinstance(request, dict):
         fail("request must be an object")
     if (
@@ -72,6 +82,7 @@ def validate_request(
     pinyin = request.get("pinyin")
     candidates = request.get("candidates")
     max_characters = request.get("max_characters")
+    stats = request.get("stats", False)
     if (
         not isinstance(request_id, str)
         or not request_id
@@ -91,13 +102,14 @@ def validate_request(
         or not isinstance(max_characters, int)
         or isinstance(max_characters, bool)
         or not 1 <= max_characters <= 30
+        or not isinstance(stats, bool)
     ):
         fail("request fields failed validation")
     # The guard chain above proves the shapes; cast tells the type
     # checker what the runtime already guarantees (no behavior change).
     return cast(
-        tuple[str, str, str, list[str], int],
-        (request_id, context, pinyin, candidates, max_characters),
+        tuple[str, str, str, list[str], int, bool],
+        (request_id, context, pinyin, candidates, max_characters, stats),
     )
 
 
@@ -254,9 +266,14 @@ def handle_request(
     index: PinyinTokenIndex,
     request: Any,
 ) -> dict[str, Any]:
-    request_id, context, pinyin, candidates, max_characters = (
-        validate_request(request)
-    )
+    (
+        request_id,
+        context,
+        pinyin,
+        candidates,
+        max_characters,
+        want_stats,
+    ) = validate_request(request)
     syllables = guard.segment(candidates[0], pinyin)
     if syllables is None:
         syllables = [pinyin]
@@ -274,13 +291,21 @@ def handle_request(
     )
     if result.text and not fuzzy_segment_ok(guard, result.text, syllables):
         result = DecodeResult("", 0.0, result.consumed_syllables)
-    return {
+    # reveal C-F3：共享解码器（constrained_decoder.py）已把
+    # DecodeResult.confidence 换成掩码内归一化口径——本 worker 的
+    # 解冻仅限信封：自声明口径标记，并在被请求时把旧 RAW 口径经
+    # stats.confidence_raw 带回（评测侧双口径对比不再缺列）。
+    response: dict[str, Any] = {
         "schema_version": 1,
         "request_id": request_id,
         "suggestion": result.text,
         "confidence": result.confidence,
         "model_artifact_id": runtime.artifact_id,
+        "confidence_caliber": _mask_renorm_caliber_marker(),
     }
+    if want_stats:
+        response["stats"] = {"confidence_raw": result.raw_confidence}
+    return response
 
 
 def main() -> int:

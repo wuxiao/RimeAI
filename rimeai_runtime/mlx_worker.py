@@ -57,6 +57,7 @@ from .constrained_decoder import (
     fuzzy_segment_ok,
 )
 from .constrained_worker_protocol import (
+    CONFIDENCE_CALIBER_MASK_RENORM,
     GenerateRequestError,
     generate_response,
     validate_generate_request,
@@ -88,7 +89,11 @@ def _beam_length_penalty() -> float:
 
     0.0 keeps the frozen joint-log-probability beam ranking; the knob
     exists for validation-split tuning only. Invalid values (non-float,
-    negative) fail closed so a typo can never silently rerank the beam.
+    negative, non-finite — reveal A-F1: ``nan`` slipped past the range
+    check because ``nan < 0`` and ``nan > 4`` are both False) fail
+    closed so a typo can never silently rerank the beam. Parsed ONCE
+    at startup in main() (reveal A-F5); handle_request reuses the
+    engine-stored value.
     """
     raw = os.environ.get("RIMEAI_MLX_LENGTH_PENALTY")
     if raw is None or raw == "":
@@ -99,6 +104,11 @@ def _beam_length_penalty() -> float:
         raise MlxEngineError(
             f"RIMEAI_MLX_LENGTH_PENALTY must be a float, got {raw!r}"
         ) from error
+    if not math.isfinite(value):
+        raise MlxEngineError(
+            "RIMEAI_MLX_LENGTH_PENALTY must be a finite float, "
+            f"got {raw!r}"
+        )
     if value < 0.0 or value > 4.0:
         raise MlxEngineError(
             f"RIMEAI_MLX_LENGTH_PENALTY must be within [0, 4], got {value}"
@@ -386,6 +396,10 @@ class MlxConstrainedEngine:
     # main() 接线的实例（测试手工装配路径）与旧行为完全一致。
     _user_lm: UserLanguageModelView | None = None
     _user_weight: float = 0.0
+    # reveal A-F5：beam length penalty 在 main() 启动期解析一次存此
+    # （非法值 fail-fast exit(2)，与 user-LM 同口径）；handle_request
+    # 与 stats 复用，不再逐请求读环境。
+    _length_penalty: float = 0.0
 
     def __init__(
         self,
@@ -507,7 +521,7 @@ class MlxConstrainedEngine:
             max_characters=max_characters,
             fuzzy=True,
             beam_width=BEAM_WIDTH,
-            length_penalty=_beam_length_penalty(),
+            length_penalty=self._length_penalty,
             user_scorer=user_scorer,
             user_weight=user_weight if user_scorer is not None else 0.0,
         )
@@ -524,7 +538,7 @@ class MlxConstrainedEngine:
             # evaluation-side calibration comparison, along with the
             # beam ranking knobs in effect for this request.
             stats["confidence_raw"] = result.raw_confidence
-            stats["length_penalty"] = _beam_length_penalty()
+            stats["length_penalty"] = self._length_penalty
             stats["user_lm_weight"] = self._user_weight
         # Reveal C-F7: roll the shared cache back to the seed+context
         # endpoint after each request. The beam-tail rows (and their KV
@@ -539,6 +553,9 @@ class MlxConstrainedEngine:
             confidence=result.confidence,
             model_artifact_id=model_artifact_id(),
             stats=stats,
+            # reveal C-F1：信封自声明口径（字段名/schema 未变，靠标记
+            # 区分口径切换前后的产物）。
+            confidence_caliber=CONFIDENCE_CALIBER_MASK_RENORM,
         )
 
 
@@ -589,6 +606,8 @@ def handle_request_line(engine: Any, line: str) -> dict[str, Any] | None:
             "suggestion": "",
             "confidence": 0.0,
             "model_artifact_id": model_artifact_id(),
+            # 兜底信封同样自声明口径（本 worker 恒为掩码内归一化）。
+            "confidence_caliber": CONFIDENCE_CALIBER_MASK_RENORM,
         }
 
 
@@ -617,6 +636,14 @@ def main() -> int:
         # 显式配置才启用 L2 浅融合；一切配置错误 fail-closed（退出 2），
         # 绝不静默降级；默认（两个环境变量都未设）行为与无融合时逐位一致。
         engine._user_lm, engine._user_weight = _user_lm_fusion_config()
+    except MlxEngineError as error:
+        print(f"constrained-mlx: {error}", file=sys.stderr, flush=True)
+        return 2
+    try:
+        # reveal A-F5：length penalty 同样只在启动期解析一次；非法值
+        # fail-fast（exit 2），不会进入“worker 存活但逐请求弃权”的
+        # 静默坏状态。
+        engine._length_penalty = _beam_length_penalty()
     except MlxEngineError as error:
         print(f"constrained-mlx: {error}", file=sys.stderr, flush=True)
         return 2

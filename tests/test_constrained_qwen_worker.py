@@ -201,6 +201,34 @@ def test_scorer_scores_each_beam_path_against_its_own_history():
     assert response["suggestion"] == "我们明天"
 
 
+def test_handle_request_declares_caliber_and_raw_confidence_stats():
+    # reveal C-F3：共享解码器已把 confidence 换成掩码内归一化口径，
+    # 但 torch worker 信封未自声明、也不回 stats.confidence_raw——
+    # 新旧产物在 wire 上不可区分。现在：信封带口径标记，stats 被
+    # 请求时回 raw_confidence。
+    model = _ScriptedModel(12, rows=[0, 1])
+    response = handle_request(
+        _runtime(model), _guard(), _index(), _request(stats=True)
+    )
+    assert response["suggestion"] == "你好"
+    assert (
+        response["confidence_caliber"]
+        == "mask-renormalized-geometric-mean"
+    )
+    assert 0.0 <= response["stats"]["confidence_raw"] <= 1.0
+
+
+def test_handle_request_without_stats_flag_omits_stats():
+    # 口径标记恒在；stats 遥测仅在被请求时携带（部署侧不请求）。
+    model = _ScriptedModel(12, rows=[0, 1])
+    response = handle_request(_runtime(model), _guard(), _index(), _request())
+    assert (
+        response["confidence_caliber"]
+        == "mask-renormalized-geometric-mean"
+    )
+    assert "stats" not in response
+
+
 def test_beam_abstains_when_all_complete_paths_exceed_max_characters():
     model = _ScriptedModel(12, rows=[0, 1])
     # syllables need 3 chars, cap is 2: no complete path fits

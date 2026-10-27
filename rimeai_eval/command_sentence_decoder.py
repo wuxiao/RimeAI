@@ -25,10 +25,26 @@ class SentenceSuggestion:
     confidence: float
     # Legacy RAW-softmax geometric-mean confidence when the worker
     # reports it via the optional stats payload (None when absent,
-    # e.g. the frozen torch worker never sends stats). Kept for
-    # evaluation-side dual-caliber comparison against the
-    # mask-renormalized `confidence`.
+    # e.g. a pre-stats worker). Kept for evaluation-side dual-caliber
+    # comparison against the mask-renormalized `confidence`.
     raw_confidence: "float | None" = None
+    # reveal C-F6：worker 自声明的 confidence 口径标记与生效旋钮
+    # （stats.user_lm_weight / stats.length_penalty）。旧 worker 不
+    # 回 stats/标记 → 全 None，消费方必须按缺失兼容。
+    confidence_caliber: "str | None" = None
+    user_lm_weight: "float | None" = None
+    length_penalty: "float | None" = None
+
+
+def _optional_finite(value: Any) -> "float | None":
+    """Stats 旋钮读取：非有限数/非数值按缺失处理（None）。"""
+    if (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and isfinite(value)
+    ):
+        return float(value)
+    return None
 
 
 class CommandSentenceDecoder:
@@ -231,6 +247,8 @@ class CommandSentenceDecoder:
         self.model_artifact_id = artifact_id
         stats = response.get("stats")
         raw_confidence: float | None = None
+        user_lm_weight: float | None = None
+        length_penalty: float | None = None
         if isinstance(stats, dict):
             stats_raw = stats.get("confidence_raw")
             if (
@@ -239,7 +257,22 @@ class CommandSentenceDecoder:
                 and isfinite(stats_raw)
             ):
                 raw_confidence = float(stats_raw)
-        return SentenceSuggestion(text, float(confidence), raw_confidence)
+            # reveal C-F6：透出 worker 回传的生效旋钮（此前被直接
+            # 丢弃），评测侧才能核对“哪个旋钮真的生效了”。
+            user_lm_weight = _optional_finite(stats.get("user_lm_weight"))
+            length_penalty = _optional_finite(stats.get("length_penalty"))
+        caliber = response.get("confidence_caliber")
+        confidence_caliber: str | None = (
+            caliber if isinstance(caliber, str) and caliber else None
+        )
+        return SentenceSuggestion(
+            text,
+            float(confidence),
+            raw_confidence,
+            confidence_caliber,
+            user_lm_weight,
+            length_penalty,
+        )
 
     def _sample_peak_rss(self) -> None:
         process = self._process

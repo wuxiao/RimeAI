@@ -448,7 +448,55 @@ def test_config_defaults_character_frequency_weight_to_one_half():
     )
 
     assert config.character_frequency_weight == 0.5
-    assert config.to_dict()["character_frequency_weight"] == 0.5
+    serialized = config.to_dict()
+    # Default weight keeps the historical artifact shape: schema v1 with
+    # no character_frequency_weight key at all, so the serialized bytes
+    # match f23fa49 output bit-for-bit.
+    assert serialized["schema_version"] == 1
+    assert "character_frequency_weight" not in serialized
+    assert set(serialized) == {
+        "schema_version",
+        "decoder_type",
+        "threshold",
+        "beam_width",
+        "characters_per_syllable",
+        "language_model_sha256",
+        "dictionary_sha256",
+        "dataset_sha256",
+    }
+
+
+def test_non_default_weight_writes_schema_v2_and_is_invisible_to_stale_loaders(
+    tmp_path: Path,
+):
+    """Weighted configs must self-describe as schema v2 (B-F3).
+
+    The stale loader at f23fa49 and earlier gated on
+    ``payload.get("schema_version") != 1``, so a v2 artifact fails that
+    load closed instead of succeeding and silently decoding with the
+    hardcoded 0.5 prior. Asserting ``schema_version == 2`` below is
+    exactly that "stale loader rejects the new artifact" precondition.
+    """
+    config = BeamDecoderConfig(
+        threshold=2.0,
+        beam_width=8,
+        characters_per_syllable=12,
+        character_frequency_weight=0.25,
+        language_model_sha256="a" * 64,
+        dictionary_sha256="b" * 64,
+        dataset_sha256="c" * 64,
+    )
+
+    serialized = config.to_dict()
+    assert serialized["schema_version"] == 2
+    assert serialized["character_frequency_weight"] == 0.25
+    # f23fa49 loader gate: schema_version must equal 1 -> this artifact
+    # fails that load instead of decoding with 0.5 semantics.
+    assert serialized["schema_version"] != 1
+
+    path = tmp_path / "weighted-v2.json"
+    write_beam_config_atomic(path, config)
+    assert load_beam_config(path) == config
 
 
 def test_loading_a_legacy_config_without_the_weight_field_is_bit_identical(
@@ -541,7 +589,7 @@ def test_invalid_character_frequency_weight_fails_closed(
     tmp_path: Path, weight
 ):
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "decoder_type": "pinyin-beam-ngram",
         "threshold": 1.0,
         "beam_width": 16,
@@ -555,6 +603,71 @@ def test_invalid_character_frequency_weight_fails_closed(
     path.write_text(json.dumps(payload), encoding="utf-8")
 
     with pytest.raises(BeamDecoderError):
+        load_beam_config(path)
+
+
+def test_load_rejects_schema_v2_without_explicit_weight(tmp_path: Path):
+    payload = {
+        "schema_version": 2,
+        "decoder_type": "pinyin-beam-ngram",
+        "threshold": 1.0,
+        "beam_width": 16,
+        "characters_per_syllable": 20,
+        "language_model_sha256": "a" * 64,
+        "dictionary_sha256": "b" * 64,
+        "dataset_sha256": "c" * 64,
+    }
+    path = tmp_path / "v2-missing-weight.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(BeamDecoderError, match="explicit"):
+        load_beam_config(path)
+
+
+def test_schema_v1_accepts_only_the_default_weight(tmp_path: Path):
+    base = {
+        "schema_version": 1,
+        "decoder_type": "pinyin-beam-ngram",
+        "threshold": 1.0,
+        "beam_width": 16,
+        "characters_per_syllable": 20,
+        "language_model_sha256": "a" * 64,
+        "dictionary_sha256": "b" * 64,
+        "dataset_sha256": "c" * 64,
+    }
+
+    # Explicitly-written default value is still fine (artifacts written
+    # between abe63dd and the schema bump carry it under v1).
+    with_default = {**base, "character_frequency_weight": 0.5}
+    path = tmp_path / "v1-explicit-default.json"
+    path.write_text(json.dumps(with_default), encoding="utf-8")
+    assert load_beam_config(path).character_frequency_weight == 0.5
+
+    # Anything else under v1 fails closed: a stale loader must never
+    # decode a v1 artifact with non-default frequency semantics.
+    with_non_default = {**base, "character_frequency_weight": 0.25}
+    path = tmp_path / "v1-non-default.json"
+    path.write_text(json.dumps(with_non_default), encoding="utf-8")
+    with pytest.raises(BeamDecoderError, match="schema v2"):
+        load_beam_config(path)
+
+
+@pytest.mark.parametrize("version", [0, 3])
+def test_load_rejects_unknown_beam_schema_versions(tmp_path: Path, version):
+    payload = {
+        "schema_version": version,
+        "decoder_type": "pinyin-beam-ngram",
+        "threshold": 1.0,
+        "beam_width": 16,
+        "characters_per_syllable": 20,
+        "language_model_sha256": "a" * 64,
+        "dictionary_sha256": "b" * 64,
+        "dataset_sha256": "c" * 64,
+    }
+    path = tmp_path / "unknown-version.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(BeamDecoderError, match="unsupported"):
         load_beam_config(path)
 
 

@@ -23,6 +23,19 @@ def _percentile(values: Sequence[float], percentile: float) -> float:
     return round(ordered[index], 6)
 
 
+def _aggregate_optional(values: list[Any]) -> Any:
+    """Aggregates per-sample optional observations for the report.
+
+    reveal C-F6：无观测 → None（报告省略该键）；全部一致 → 标量；
+    出现多值（如 worker 中途重启换配置）→ 排序去重列表，绝不静默
+    取“最后一个”。"""
+    present = [value for value in values if value is not None]
+    if not present:
+        return None
+    distinct = sorted(set(present))
+    return distinct[0] if len(distinct) == 1 else distinct
+
+
 def _slice_metrics(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     samples = len(rows)
     baseline_hits = sum(row["baseline_hit"] for row in rows)
@@ -60,21 +73,35 @@ def evaluate_sentence_dataset(
     pinyin_rejections = 0
     empty_suggestions = 0
     low_confidence = 0
+    # reveal C-F6：逐样本收集口径标记与生效旋钮，透出进 details 与
+    # 汇总（旧 worker 无 stats/标记 → 全程 None，消费方按缺失兼容）。
+    observed_calibers: list[str | None] = []
+    observed_weights: list[float | None] = []
+    observed_penalties: list[float | None] = []
 
     for sample in samples:
         baseline = sample["candidates"][0]
         raw_suggestion = ""
         confidence = 0.0
         raw_confidence: float | None = None
+        confidence_caliber: str | None = None
+        user_lm_weight: float | None = None
+        length_penalty: float | None = None
         decoder_error: Optional[str] = None
         try:
             suggestion = decoder.suggest(sample)
             raw_suggestion = suggestion.text
             confidence = suggestion.confidence
             raw_confidence = suggestion.raw_confidence
+            confidence_caliber = suggestion.confidence_caliber
+            user_lm_weight = suggestion.user_lm_weight
+            length_penalty = suggestion.length_penalty
         except SentenceDecoderProtocolError as error:
             errors += 1
             decoder_error = type(error).__name__
+        observed_calibers.append(confidence_caliber)
+        observed_weights.append(user_lm_weight)
+        observed_penalties.append(length_penalty)
 
         applied = baseline
         status = "fallback-error" if decoder_error else "fallback-empty"
@@ -125,6 +152,13 @@ def evaluate_sentence_dataset(
                         if raw_confidence is not None
                         else None
                     ),
+                    # reveal C-F6：本行生效旋钮与口径标记（None =
+                    # worker 未回传；旧产物缺整个键，读取方用 .get）。
+                    "effective_knobs": {
+                        "user_lm_weight": user_lm_weight,
+                        "length_penalty": length_penalty,
+                    },
+                    "confidence_caliber": confidence_caliber,
                     "status": status,
                     "decoder_error": decoder_error,
                 }
@@ -148,6 +182,16 @@ def evaluate_sentence_dataset(
     if decoder.peak_rss_bytes is not None:
         decoder_report["resource"] = {
             "peak_rss_bytes": decoder.peak_rss_bytes
+        }
+    caliber = _aggregate_optional(observed_calibers)
+    if caliber is not None:
+        decoder_report["confidence_caliber"] = caliber
+    weight = _aggregate_optional(observed_weights)
+    penalty = _aggregate_optional(observed_penalties)
+    if weight is not None or penalty is not None:
+        decoder_report["effective_knobs"] = {
+            "user_lm_weight": weight,
+            "length_penalty": penalty,
         }
 
     return {

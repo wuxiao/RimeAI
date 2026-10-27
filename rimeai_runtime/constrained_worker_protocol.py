@@ -23,11 +23,15 @@ The legacy RAW softmax geometric mean (length-decaying, judged weakly
 informative by docs/baselines/constrained-qwen-v3-mlx.json) is
 preserved for evaluation comparison inside `stats.confidence_raw`
 when the request asks for stats; the wire field name `confidence` and
-its [0,1] bound are unchanged from schema 1. `stats` is otherwise
-optional engine telemetry (prefill/cache counters) requested by
-evaluation tooling; the daemon's deployment service deliberately
-does not request it and drops it from the payload (reveal B-F6: dead
-telemetry).
+its [0,1] bound are unchanged from schema 1. Because that caliber
+switch left the field name and schema_version untouched, every worker
+self-declares its caliber via the OPTIONAL response field
+`confidence_caliber` (the constants below): an absent marker means a
+pre-switch (RAW caliber) or foreign product — never mix `confidence`
+values across calibers. `stats` is otherwise optional engine telemetry
+(prefill/cache counters, beam knobs) requested by evaluation tooling;
+the daemon's deployment service deliberately does not request it and
+drops it from the payload (reveal B-F6: dead telemetry).
 """
 from __future__ import annotations
 
@@ -39,6 +43,12 @@ MAX_PINYIN_CHARS = 256
 MAX_CANDIDATES = 20
 MAX_CANDIDATE_CHARS = 128
 MAX_CHARACTERS = 30
+
+# reveal C-F1/C-F2/C-F3：`confidence` 口径自声明标记。掩码内归一化
+# 口径（constrained 路线现行）与 RAW softmax 几何平均口径（prompt
+# 路线、及口径切换前的旧产物）同名同域不同义，靠该字段区分。
+CONFIDENCE_CALIBER_MASK_RENORM = "mask-renormalized-geometric-mean"
+CONFIDENCE_CALIBER_RAW_SOFTMAX = "raw-softmax-geometric-mean"
 
 
 class GenerateRequestError(ValueError):
@@ -103,6 +113,7 @@ def generate_response(
     confidence: float,
     model_artifact_id: str,
     stats: Mapping[str, Any] | None = None,
+    confidence_caliber: str | None = None,
 ) -> dict[str, Any]:
     response: dict[str, Any] = {
         "schema_version": 1,
@@ -113,4 +124,6 @@ def generate_response(
     }
     if stats is not None:
         response["stats"] = dict(stats)
+    if confidence_caliber is not None:
+        response["confidence_caliber"] = confidence_caliber
     return response

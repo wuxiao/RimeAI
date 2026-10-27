@@ -20,6 +20,16 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from rimeai_runtime.pinyin_guard import PinyinGuard
 
 
+def _raw_caliber_marker() -> str:
+    """RAW 口径标记（来自共享协议模块；局部导入遵循本文件
+    sys.path bootstrap 之后的既有导入约束）。"""
+    from rimeai_runtime.constrained_worker_protocol import (
+        CONFIDENCE_CALIBER_RAW_SOFTMAX,
+    )
+
+    return CONFIDENCE_CALIBER_RAW_SOFTMAX
+
+
 MODEL_REVISION = "7ae557604adf67be50417f59c2c2f167def9a775"
 MODEL_SHA256 = "fdf756fa7fcbe7404d5c60e26bff1a0c8b8aa1f72ced49e7dd0210fe288fb7fe"
 EXPECTED_TORCH = "2.8.0"
@@ -231,6 +241,28 @@ def generate(
     return suggestion, max(0.0, min(1.0, confidence))
 
 
+def build_response(
+    request_id: str,
+    suggestion: str,
+    confidence: float,
+    artifact_id: str,
+) -> dict[str, Any]:
+    """Response envelope for the prompt route.
+
+    reveal C-F2：本路线的 confidence 是 RAW softmax 几何平均（长度
+    衰减，与 constrained 路线的掩码内归一化口径不可比），信封自声明
+    RAW 口径，评测侧才能拒绝跨口径比较；打分数值保持不变。
+    """
+    return {
+        "schema_version": 1,
+        "request_id": request_id,
+        "suggestion": suggestion,
+        "confidence": confidence,
+        "model_artifact_id": artifact_id,
+        "confidence_caliber": _raw_caliber_marker(),
+    }
+
+
 def write_response(response: dict[str, Any]) -> None:
     sys.stdout.write(
         json.dumps(
@@ -273,13 +305,7 @@ def main() -> int:
             syllables=syllables,
         )
         write_response(
-            {
-                "schema_version": 1,
-                "request_id": request_id,
-                "suggestion": suggestion,
-                "confidence": confidence,
-                "model_artifact_id": artifact_id,
-            }
+            build_response(request_id, suggestion, confidence, artifact_id)
         )
     return 0
 
