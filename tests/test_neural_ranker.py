@@ -1,5 +1,6 @@
 import json
 import math
+from types import SimpleNamespace
 
 import pytest
 
@@ -9,6 +10,7 @@ from rimeai_runtime.neural_ranker import (
     GLOBAL_NORM_METHOD,
     FusionConfig,
     HybridSemanticRanker,
+    NeuralListwiseRanker,
     NeuralRankerArtifact,
     NeuralRankerError,
     RankerExample,
@@ -426,7 +428,7 @@ _GLOBAL_NORM = {
 def test_two_candidate_v1_fusion_degenerates_to_zero_margin():
     # 数值复现：per-sample z-score 下两候选意见相反且 w=0.5 时，
     # 融合分恒等（margin=0），按原索引回落 Rime 原序，
-    # confidence=0.5 < ranker_min_confidence=0.55，神经结构性无法翻转。
+    # same-top 分支 confidence=1.0，神经结构性无法翻转。
     import tempfile
     from pathlib import Path
 
@@ -509,7 +511,11 @@ def _legacy_v1_ranking_and_confidence(
     margin_threshold,
     target_precision,
 ):
-    """改造前 HybridSemanticRanker v1 路径的逐行副本（行为 oracle）。"""
+    """v1 z-score 排序路径的逐行副本（行为 oracle）。
+
+    reveal B-F1 修复后的 confidence 口径：below-threshold 翻转映射
+    0.55·ratio（严格小于 0.55），与运行时三处 ranker 一致。
+    """
     fused_scores = [
         weight * standardize_scores(neural_raw)[index]
         + (1.0 - weight) * standardize_scores(ngram_raw)[index]
@@ -529,7 +535,7 @@ def _legacy_v1_ranking_and_confidence(
         )
     else:
         ratio = 0.0 if margin_threshold <= 0 else max(0.0, margin / margin_threshold)
-        confidence = min(0.899, 0.5 + 0.399 * ratio)
+        confidence = 0.55 * ratio
     return ranked_indices, confidence
 
 
@@ -586,6 +592,154 @@ def test_v1_fusion_config_matches_legacy_zscore_path_bit_for_bit(
     )
     assert ranking == [candidates[index] for index in legacy_indices]
     assert confidence == legacy_confidence
+
+
+# 旧 below-threshold 公式越过 daemon 0.55 门的临界 ratio：
+# min(0.899, 0.5 + 0.399·ratio) >= 0.55  <=>  ratio >= 0.05/0.399 ≈ 0.1253。
+_LEGACY_GATE_RATIO = 0.05 / 0.399
+_UNIT_NORM = {
+    "method": GLOBAL_NORM_METHOD,
+    "neural_mean": 0.0,
+    "neural_std": 1.0,
+    "ngram_mean": 0.0,
+    "ngram_std": 1.0,
+}
+
+
+def _unit_norm_hybrid(tmp_path, *, margin, threshold=0.3, weight=0.5):
+    """v2 单位仿射归一 + w：fused = w·neural_raw + (1-w)·ngram_raw。
+
+    neural_raw=[0,0]、ngram_raw=[0, margin/w] 使候选 1 以精确 fused
+    margin 胜出，翻转 Rime 首选（候选 0）。
+    """
+    config = _write_config(
+        tmp_path,
+        _fusion_payload(
+            fusion_type=FUSION_TYPE_GLOBAL_NORM,
+            neural_weight=weight,
+            margin_threshold=threshold,
+            score_normalization=_UNIT_NORM,
+        ),
+    )
+    return HybridSemanticRanker(
+        _FixedNeural([0.0, 0.0]),
+        _FixedNGram([0.0, margin / weight]),
+        config,
+    )
+
+
+@pytest.mark.parametrize("ratio", [0.0001, 0.13, 0.5, 0.9, 0.999])
+def test_hybrid_below_threshold_flip_maps_under_daemon_gate(tmp_path, ratio):
+    # reveal B-F1：margin ∈ [0.1253τ, τ) 的翻转让旧公式以 0.55~0.899
+    # 放行；新映射 0.55·ratio 严格小于 0.55，daemon 门精确等价 margin ≥ τ。
+    # ratio→0 的行同时覆盖 max(0, margin/τ) 的 clamp 面（margin<0 在
+    # 排序后结构性不可出现，公式内防御保留）。
+    threshold = 0.3
+    ranker = _unit_norm_hybrid(tmp_path, margin=ratio * threshold)
+
+    ranking, confidence = ranker.rank_candidates(
+        context="上下文", pinyin="mingling", candidates=["明令", "命令"]
+    )
+
+    assert ranking == ["命令", "明令"]
+    assert confidence == pytest.approx(0.55 * ratio)
+    assert confidence < 0.55
+    if ratio >= _LEGACY_GATE_RATIO:
+        legacy = min(0.899, 0.5 + 0.399 * ratio)
+        assert legacy >= 0.55  # 旧口径会放行同一翻转
+
+
+@pytest.mark.parametrize("excess", [0.0, 0.15])
+def test_hybrid_at_or_above_threshold_flip_still_admitted(tmp_path, excess):
+    # margin ≥ τ：calibrated 分支语义不变，confidence ≥ target_precision
+    # 恒越过 0.55 门。
+    threshold = 0.3
+    ranker = _unit_norm_hybrid(tmp_path, margin=threshold + excess)
+
+    ranking, confidence = ranker.rank_candidates(
+        context="上下文", pinyin="mingling", candidates=["明令", "命令"]
+    )
+
+    assert ranking == ["命令", "明令"]
+    assert confidence == pytest.approx(0.9 + 0.1 * (1.0 - math.exp(-excess)))
+    assert confidence >= 0.55
+
+
+def test_hybrid_uncalibrated_zero_threshold_keeps_legacy_behavior(tmp_path):
+    # threshold ≤ 0 的退化（未校准 fallback）：margin ≥ 0 = τ 恒成立，
+    # 翻转走 calibrated 分支，below 分支（ratio 强制 0 → confidence 0.0
+    # < 0.55）数学上不可达，防御保留且未引入新放行路径。
+    ranker = _unit_norm_hybrid(tmp_path, margin=0.6, threshold=0.0)
+
+    ranking, confidence = ranker.rank_candidates(
+        context="上下文", pinyin="mingling", candidates=["明令", "命令"]
+    )
+
+    assert ranking == ["命令", "明令"]
+    assert confidence == pytest.approx(0.9 + 0.1 * (1.0 - math.exp(-0.6)))
+
+
+class _PatchedNeuralListwise(NeuralListwiseRanker):
+    """绕开 torch/模型加载：固定 _scores，仅驱动门语义。"""
+
+    def __init__(self, scores, *, margin_threshold=0.3, target_precision=0.9):
+        self.artifact = SimpleNamespace(
+            margin_threshold=margin_threshold,
+            target_precision=target_precision,
+        )
+        self._fixed_scores = list(scores)
+        self.attempt_latencies_ms = []
+        self.attempted_samples = 0
+        self.successful_samples = 0
+
+    def _scores(self, **kwargs):
+        return list(self._fixed_scores)
+
+
+@pytest.mark.parametrize("ratio", [0.13, 0.5, 0.9, 0.999])
+def test_neural_listwise_below_threshold_flip_maps_under_daemon_gate(ratio):
+    # reveal B-F1：与 HybridSemanticRanker 同款门语义，[0.1253τ, τ) 的
+    # 翻转现在必须落在 below_confidence（confidence < 0.55）。
+    threshold = 0.3
+    ranker = _PatchedNeuralListwise(
+        [1.0, 1.0 + ratio * threshold], margin_threshold=threshold
+    )
+
+    ranking, confidence = ranker.rank_candidates(
+        context="上下文", pinyin="mingling", candidates=["明令", "命令"]
+    )
+
+    assert ranking == ["命令", "明令"]
+    assert confidence == pytest.approx(0.55 * ratio)
+    assert confidence < 0.55
+    assert min(0.899, 0.5 + 0.399 * ratio) >= 0.55  # 旧口径会放行
+
+
+@pytest.mark.parametrize("excess", [0.0, 0.15])
+def test_neural_listwise_at_or_above_threshold_flip_still_admitted(excess):
+    threshold = 0.3
+    ranker = _PatchedNeuralListwise(
+        [1.0, 1.0 + threshold + excess], margin_threshold=threshold
+    )
+
+    ranking, confidence = ranker.rank_candidates(
+        context="上下文", pinyin="mingling", candidates=["明令", "命令"]
+    )
+
+    assert ranking == ["命令", "明令"]
+    assert confidence == pytest.approx(0.9 + 0.1 * (1.0 - math.exp(-excess)))
+    assert confidence >= 0.55
+
+
+def test_neural_listwise_same_top_keeps_full_confidence():
+    ranker = _PatchedNeuralListwise([2.0, 1.0])
+
+    ranking, confidence = ranker.rank_candidates(
+        context="上下文", pinyin="mingling", candidates=["明令", "命令"]
+    )
+
+    assert ranking == ["明令", "命令"]
+    assert confidence == 1.0
 
 
 def _write_config(tmp_path, payload, name="fusion.json"):
@@ -838,3 +992,77 @@ def test_train_fusion_config_v1_examples_still_rank_bit_for_bit(tmp_path):
     )
     assert ranking == [["明令", "命令"][index] for index in legacy_indices]
     assert confidence == legacy_confidence
+
+
+def test_train_fusion_config_legacy_zscore_writes_loadable_v1_payload(tmp_path):
+    # reveal B-F4：legacy-zscore 口径的显式 opt-out——产出 v1 config
+    # （fusion_type=v1、无 score_normalization），可被 FusionConfig.load
+    # 识别，选择语义沿用 f23fa49 的 max(accuracy, wins-losses, -changed,
+    # weight) 网格。
+    neural = _ScoreByPositionNeural(
+        {"命令": [1.0, 4.0], "任务": [1.0, 5.0], "历史": [3.0, 1.0]}
+    )
+    ngram = _ScoreByPositionNGram(
+        {"命令": [2.0, 1.0], "任务": [2.0, 1.0], "历史": [2.0, 1.0]}
+    )
+    output = tmp_path / "fusion-v1-repro.json"
+
+    payload = train_fusion_config(
+        _FUSION_SAMPLES,
+        dataset_sha256="d" * 64,
+        neural_ranker=neural,
+        ngram_ranker=ngram,
+        output_path=output,
+        target_precision=0.5,
+        fusion_type=FUSION_TYPE,
+    )
+
+    assert payload["fusion_type"] == FUSION_TYPE
+    assert "score_normalization" not in payload
+    # v1 选择语义：per-sample z-score 下 w=1.0 是唯一 raw top-1 = 1.0 的
+    # 网格点（神经 z 序命中全部 gold），max(accuracy, ...) 选中它。
+    assert payload["neural_weight"] == 1.0
+    assert payload["validation"]["samples"] == 3
+    assert payload["validation"]["test_samples_used"] == 0
+    assert payload["decision"]["wins"] == 2
+    reloaded = FusionConfig.load(output)
+    assert reloaded.fusion_type == FUSION_TYPE
+    assert reloaded.neural_weight == 1.0
+    assert reloaded.neural_mean is None  # v1 不携带归一化统计
+
+
+def test_train_fusion_config_default_caliber_stays_global_norm(tmp_path):
+    # 默认（不传 fusion_type）必须保持 v2 现行行为。
+    neural = _ScoreByPositionNeural(
+        {"命令": [1.0, 4.0], "任务": [1.0, 5.0], "历史": [3.0, 1.0]}
+    )
+    ngram = _ScoreByPositionNGram(
+        {"命令": [2.0, 1.0], "任务": [2.0, 1.0], "历史": [2.0, 1.0]}
+    )
+    output = tmp_path / "fusion-default.json"
+
+    payload = train_fusion_config(
+        _FUSION_SAMPLES,
+        dataset_sha256="d" * 64,
+        neural_ranker=neural,
+        ngram_ranker=ngram,
+        output_path=output,
+        target_precision=0.5,
+    )
+
+    assert payload["fusion_type"] == FUSION_TYPE_GLOBAL_NORM
+    assert payload["score_normalization"]["method"] == GLOBAL_NORM_METHOD
+
+
+def test_train_fusion_config_rejects_unknown_fusion_type(tmp_path):
+    neural = _ScoreByPositionNeural({"命令": [1.0, 4.0]})
+    ngram = _ScoreByPositionNGram({"命令": [2.0, 1.0]})
+    with pytest.raises(NeuralRankerError, match="unsupported fusion type"):
+        train_fusion_config(
+            _FUSION_SAMPLES,
+            dataset_sha256="d" * 64,
+            neural_ranker=neural,
+            ngram_ranker=ngram,
+            output_path=tmp_path / "unused.json",
+            fusion_type="rimeai-neural-ngram-v3",
+        )

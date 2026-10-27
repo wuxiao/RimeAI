@@ -66,7 +66,11 @@
       "validation": {"changed_samples": 71, "net_gain": 51, "raw_top1_accuracy": 0.9539375928677564, "samples": 673, "test_samples_used": 0},
       "validation_dataset_sha256": "f0d46219a334d9d408518e387899c57b4881da27e8388d721827ebc86087b35d"
     },
-    "previous_fusion_v1_margin_threshold": 0.47086944401130104
+    "previous_fusion_v1_margin_threshold": 0.47086944401130104,
+    "caliber_guard_note": {
+      "applies_since_commit": "5013448",
+      "note": "Incremental annotation (reveal B-F4); all frozen values and command text above are unchanged. Since 5013448 train-neural-fusion writes the v2 global-norm caliber by default and refuses (exit 2) to change the fusion caliber of an existing config in place. The command's --output path (.rimeai/models/rimeai-ranker-s-24m-fusion-v2.json) currently holds v1 per-sample z-score content, so rerunning the recorded command verbatim now exits 2 instead of silently swapping the caliber under the daemon. Reproduce this frozen v1 baseline with --fusion-type legacy-zscore and a fresh output filename (or move the incumbent aside first)."
+    }
   },
   "language_profile_drift": {
     "command": ".venv/bin/python -m rimeai_eval language-profile --history-db ~/Library/Application\\ Support/RimeAI/History/history.sqlite3 --frozen-samples .rimeai/datasets/p0-librime-1.17.0-luna-simp.jsonl --baseline-model .rimeai/models/p0-char-ngram-v2.json.gz --report .rimeai/reports/language-profile-backoff-v2-eval.json",

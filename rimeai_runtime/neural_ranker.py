@@ -660,7 +660,14 @@ class NeuralListwiseRanker:
             ) * (1.0 - math.exp(-excess))
         else:
             ratio = 0.0 if threshold <= 0 else max(0.0, margin / threshold)
-            confidence = min(0.899, 0.5 + 0.399 * ratio)
+            # reveal B-F1: the calibrated threshold is the release gate.
+            # Below-threshold flips must map strictly under the daemon's 0.55
+            # ranker_min_confidence (0.55 * ratio < 0.55 for ratio < 1), so a
+            # flip is admitted exactly when margin >= threshold — the only
+            # region whose precision was calibrated to target_precision.
+            # threshold <= 0 (uncalibrated fallback) keeps ratio at 0.0 and
+            # therefore admits no flip either.
+            confidence = 0.55 * ratio
         self.successful_samples += 1
         self.attempt_latencies_ms.append((perf_counter() - started_at) * 1000)
         return ranking, confidence
@@ -781,7 +788,14 @@ class HybridSemanticRanker:
                 if self.config.margin_threshold <= 0
                 else max(0.0, margin / self.config.margin_threshold)
             )
-            confidence = min(0.899, 0.5 + 0.399 * ratio)
+            # reveal B-F1: the calibrated threshold is the release gate.
+            # Below-threshold flips must map strictly under the daemon's 0.55
+            # ranker_min_confidence (0.55 * ratio < 0.55 for ratio < 1), so a
+            # flip is admitted exactly when margin >= threshold — the only
+            # region whose precision was calibrated to target_precision.
+            # threshold <= 0 (uncalibrated fallback) keeps ratio at 0.0 and
+            # therefore admits no flip either.
+            confidence = 0.55 * ratio
         self.successful_samples += 1
         self.attempt_latencies_ms.append((perf_counter() - started_at) * 1000)
         return ranking, confidence
@@ -803,18 +817,29 @@ def train_fusion_config(
     ngram_ranker: Any,
     output_path: Path,
     target_precision: float = 0.90,
+    fusion_type: str = FUSION_TYPE_GLOBAL_NORM,
 ) -> dict[str, Any]:
     """Jointly calibrate the fusion weight and change threshold.
 
-    Scores are affine-normalized with pooled validation statistics (v2),
-    and each weight is evaluated together with its calibrated threshold.
-    The fixed selection order is: among weights whose calibrated threshold
-    meets the target precision with wins > losses, maximize net gain
-    (wins - losses), then calibrated changed_samples, then raw top-1
-    accuracy, then the lower weight. If no weight calibrates, every entry
-    has zero net gain and the raw top-1 tie-break decides while the
-    threshold stays at its unreachable fallback.
+    ``fusion_type`` selects the score caliber of the written config:
+    ``FUSION_TYPE_GLOBAL_NORM`` (default, v2 pooled affine) or
+    ``FUSION_TYPE`` (v1 per-sample z-score, kept for reproducing frozen
+    baselines). The v2 path jointly calibrates each weight with its
+    threshold; the v1 path keeps the legacy selection semantics (max
+    ``(accuracy, wins - losses, -changed, weight)`` over the grid, then
+    threshold calibration) exactly as before the global-norm switch.
     """
+    if fusion_type == FUSION_TYPE:
+        return _train_legacy_zscore_fusion_config(
+            samples,
+            dataset_sha256=dataset_sha256,
+            neural_ranker=neural_ranker,
+            ngram_ranker=ngram_ranker,
+            output_path=output_path,
+            target_precision=target_precision,
+        )
+    if fusion_type != FUSION_TYPE_GLOBAL_NORM:
+        raise NeuralRankerError(f"unsupported fusion type '{fusion_type}'")
     validation = build_ranker_examples(samples, split="validation")
     if not validation:
         raise NeuralRankerError("dataset has no covered validation examples")
@@ -861,7 +886,7 @@ def train_fusion_config(
         for example, neural_scores, ngram_scores in normalized:
             scores = [
                 weight * neural + (1.0 - weight) * ngram
-                for neural, ngram in zip(neural_scores, ngram_scores)
+                for neural, ngram in zip(neural_scores, ngram_scores, strict=True)
             ]
             order = sorted(
                 range(len(scores)),
@@ -975,6 +1000,132 @@ def train_fusion_config(
     return payload
 
 
+def _train_legacy_zscore_fusion_config(
+    samples: Sequence[Mapping[str, Any]],
+    *,
+    dataset_sha256: str,
+    neural_ranker: Any,
+    ngram_ranker: Any,
+    output_path: Path,
+    target_precision: float = 0.90,
+) -> dict[str, Any]:
+    """Calibrate the legacy v1 (per-sample z-score) fusion caliber.
+
+    reveal B-F4: kept as an explicit opt-out so frozen baselines recorded
+    under the v1 caliber (e.g. docs/baselines/sentence-benchmark-
+    backoff-v2.json) stay reproducible. Selection semantics follow the
+    pre-global-norm implementation: grid over 21 weights on per-sample
+    standardized scores, pick max (accuracy, wins - losses, -changed,
+    weight), then calibrate the change threshold on the winner's changed
+    records. The payload carries no score_normalization section, which is
+    what marks a config as v1 to FusionConfig.load.
+    """
+    validation = build_ranker_examples(samples, split="validation")
+    if not validation:
+        raise NeuralRankerError("dataset has no covered validation examples")
+    cached: list[tuple[RankerExample, list[float], list[float]]] = []
+    for example in validation:
+        neural_scores = standardize_scores(
+            neural_ranker._scores(
+                context=example.context,
+                pinyin=example.pinyin,
+                candidates=example.candidates,
+                baseline_indices=example.baseline_indices,
+            )
+        )
+        ngram_scores = standardize_scores(
+            [
+                ngram_ranker._candidate_score(
+                    example.context,
+                    candidate,
+                    baseline_index,
+                )
+                for candidate, baseline_index in zip(
+                    example.candidates,
+                    example.baseline_indices,
+                    strict=True,
+                )
+            ]
+        )
+        cached.append((example, neural_scores, ngram_scores))
+
+    candidates: list[
+        tuple[float, int, int, float, list[dict[str, Any]]]
+    ] = []
+    for step in range(21):
+        weight = step / 20
+        records: list[dict[str, Any]] = []
+        for example, neural_scores, ngram_scores in cached:
+            scores = [
+                weight * neural + (1.0 - weight) * ngram
+                for neural, ngram in zip(neural_scores, ngram_scores, strict=True)
+            ]
+            order = sorted(
+                range(len(scores)),
+                key=lambda index: (-scores[index], index),
+            )
+            predicted = order[0]
+            records.append(
+                {
+                    "margin": scores[order[0]] - scores[order[1]],
+                    "baseline_correct": example.label == 0,
+                    "model_correct": predicted == example.label,
+                    "changed": predicted != 0,
+                }
+            )
+        hits = sum(bool(record["model_correct"]) for record in records)
+        wins = sum(
+            bool(record["changed"])
+            and bool(record["model_correct"])
+            and not bool(record["baseline_correct"])
+            for record in records
+        )
+        losses = sum(
+            bool(record["changed"])
+            and not bool(record["model_correct"])
+            and bool(record["baseline_correct"])
+            for record in records
+        )
+        changed = sum(bool(record["changed"]) for record in records)
+        candidates.append(
+            (hits / len(records), wins - losses, -changed, weight, records)
+        )
+    accuracy, net_gain, negative_changed, weight, records = max(candidates)
+    calibration = calibrate_change_threshold(
+        [record for record in records if record["changed"]],
+        target_precision=target_precision,
+    )
+    seed = (
+        f"{dataset_sha256}:{neural_ranker.model_artifact_id}:"
+        f"{ngram_ranker.dataset_sha256}:{weight:.2f}:"
+        f"{calibration['margin_threshold']:.12f}"
+    ).encode()
+    payload = {
+        "schema_version": 1,
+        "fusion_type": FUSION_TYPE,
+        "artifact_id": "rimeai-24m-fusion:" + hashlib.sha256(seed).hexdigest()[:16],
+        "neural_weight": weight,
+        "neural_artifact_id": neural_ranker.model_artifact_id,
+        "ngram_dataset_sha256": ngram_ranker.dataset_sha256,
+        "validation_dataset_sha256": dataset_sha256,
+        "validation": {
+            "samples": len(records),
+            "raw_top1_accuracy": accuracy,
+            "net_gain": net_gain,
+            "changed_samples": -negative_changed,
+            "test_samples_used": 0,
+        },
+        "decision": calibration,
+    }
+    _atomic_json(output_path, payload)
+    FusionConfig.load(
+        output_path,
+        neural_artifact_id=neural_ranker.model_artifact_id,
+        ngram_dataset_sha256=ngram_ranker.dataset_sha256,
+    )
+    return payload
+
+
 def _flatten_batch_inputs(
     examples: Sequence[RankerExample],
     guard: PinyinGuard,
@@ -996,6 +1147,7 @@ def _flatten_batch_inputs(
             for candidate, baseline_index in zip(
                 example.candidates,
                 example.baseline_indices,
+                strict=True,
             )
         )
     return texts, counts, labels

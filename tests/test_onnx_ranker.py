@@ -1,9 +1,12 @@
 import hashlib
 import json
+import math
+from types import SimpleNamespace
 
 import pytest
 
 from rimeai_eval.onnx_ranker import OnnxRankerArtifact, _canonical_json
+from rimeai_runtime.onnx_ranker import OnnxNeuralListwiseRanker
 
 
 def _write_artifact(root):
@@ -98,3 +101,70 @@ def test_onnx_artifact_rejects_invalid_contract(tmp_path, mutation, message):
 
     with pytest.raises(ValueError, match=message):
         OnnxRankerArtifact.load(root)
+
+
+class _PatchedOnnxRanker(OnnxNeuralListwiseRanker):
+    """绕开 onnxruntime/模型加载：固定 _scores，仅驱动门语义。"""
+
+    def __init__(self, scores, *, margin_threshold=0.3, target_precision=0.9):
+        self.artifact = SimpleNamespace(
+            margin_threshold=margin_threshold,
+            target_precision=target_precision,
+        )
+        self._fixed_scores = list(scores)
+        self.attempt_latencies_ms = []
+        self.attempted_samples = 0
+        self.successful_samples = 0
+
+    def _scores(self, **kwargs):
+        return list(self._fixed_scores)
+
+
+@pytest.mark.parametrize("ratio", [0.0001, 0.13, 0.5, 0.9, 0.999])
+def test_onnx_below_threshold_flip_maps_under_daemon_gate(ratio):
+    # reveal B-F1：calibrated threshold 即放行门。Release 路径与训练侧
+    # NeuralListwiseRanker / HybridSemanticRanker 同款语义——
+    # margin ∈ [0.1253τ, τ) 的翻转（旧公式以 0.55~0.899 放行）现在必须
+    # 落在 below_confidence（confidence < 0.55）；ratio→0 同时覆盖
+    # max(0, margin/τ) 的 clamp 面（margin<0 结构性不可出现，防御保留）。
+    threshold = 0.3
+    ranker = _PatchedOnnxRanker(
+        [1.0, 1.0 + ratio * threshold], margin_threshold=threshold
+    )
+
+    ranking, confidence = ranker.rank_candidates(
+        context="上下文", pinyin="mingling", candidates=["明令", "命令"]
+    )
+
+    assert ranking == ["命令", "明令"]
+    assert confidence == pytest.approx(0.55 * ratio)
+    assert confidence < 0.55
+    if ratio >= 0.05 / 0.399:  # 旧口径越过 0.55 门的临界 ≈ 0.1253
+        assert min(0.899, 0.5 + 0.399 * ratio) >= 0.55
+
+
+@pytest.mark.parametrize("excess", [0.0, 0.15])
+def test_onnx_at_or_above_threshold_flip_still_admitted(excess):
+    threshold = 0.3
+    ranker = _PatchedOnnxRanker(
+        [1.0, 1.0 + threshold + excess], margin_threshold=threshold
+    )
+
+    ranking, confidence = ranker.rank_candidates(
+        context="上下文", pinyin="mingling", candidates=["明令", "命令"]
+    )
+
+    assert ranking == ["命令", "明令"]
+    assert confidence == pytest.approx(0.9 + 0.1 * (1.0 - math.exp(-excess)))
+    assert confidence >= 0.55
+
+
+def test_onnx_same_top_keeps_full_confidence():
+    ranker = _PatchedOnnxRanker([2.0, 1.0])
+
+    ranking, confidence = ranker.rank_candidates(
+        context="上下文", pinyin="mingling", candidates=["明令", "命令"]
+    )
+
+    assert ranking == ["明令", "命令"]
+    assert confidence == 1.0

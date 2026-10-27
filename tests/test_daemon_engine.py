@@ -1,9 +1,12 @@
+import json
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from rimeai_daemon.engine import LocalInferenceEngine
 from rimeai_runtime.beam_decoder import BeamSentenceDecoder
-from rimeai_runtime.neural_ranker import HybridSemanticRanker
+from rimeai_runtime.neural_ranker import GLOBAL_NORM_METHOD, HybridSemanticRanker
 from rimeai_runtime.ranking import RankerError
 
 
@@ -211,6 +214,119 @@ def test_engine_reports_below_confidence_instead_of_an_empty_rejection():
 
     assert result["decision"] == "below_confidence"
     assert result["ranked_candidate"] == ""
+
+
+# --- reveal B-F1：calibrated threshold 即放行门 -------------------------
+# 用真实 HybridSemanticRanker（v2 单位仿射归一 + w=0.5）精确固定 fused
+# margin：neural=[0,0]、ngram=[0, margin/w] → fused=[0, margin]，候选 1
+# （"命令"）以精确 margin 翻转胜出，margin < 0 在排序后结构性不可出现。
+
+
+class _FixedNeuralScores:
+    model_artifact_id = "neural:test"
+    cold_start_ms = 0.0
+
+    def __init__(self, scores):
+        self._fixed = list(scores)
+
+    def _scores(self, **kwargs):
+        return list(self._fixed)
+
+
+class _FixedNGramScores:
+    dataset_sha256 = "b" * 64
+
+    def __init__(self, scores):
+        self._fixed = list(scores)
+
+    def _candidate_score(self, context, candidate, baseline_index):
+        return self._fixed[baseline_index]
+
+
+def _hybrid_gate_engine(tmp_path, margin, *, threshold=0.3):
+    config = tmp_path / "fusion-gate.json"
+    config.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "fusion_type": "rimeai-neural-ngram-v2",
+                "artifact_id": "fusion:test-gate",
+                "neural_weight": 0.5,
+                "neural_artifact_id": "neural:test",
+                "ngram_dataset_sha256": "b" * 64,
+                "validation_dataset_sha256": "c" * 64,
+                "decision": {
+                    "margin_threshold": threshold,
+                    "target_precision": 0.9,
+                },
+                "score_normalization": {
+                    "method": GLOBAL_NORM_METHOD,
+                    "neural_mean": 0.0,
+                    "neural_std": 1.0,
+                    "ngram_mean": 0.0,
+                    "ngram_std": 1.0,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    ranker = HybridSemanticRanker(
+        _FixedNeuralScores([0.0, 0.0]),
+        _FixedNGramScores([0.0, 2.0 * margin]),
+        config,
+    )
+    engine: Any = LocalInferenceEngine.__new__(LocalInferenceEngine)
+    engine._ranker = ranker
+    engine._sentence_decoder = _SentenceDecoder()
+    engine._ranker_min_confidence = 0.55
+    engine._user_lm_path = None
+    engine._user_lm = None
+    engine._user_lm_mtime = None
+    engine._user_lm_size = None
+    engine._t2s_converter = None
+    return engine
+
+
+@pytest.mark.parametrize(
+    "ratio", [0.13, 0.5, 0.9, 0.999]
+)
+def test_engine_blocks_hybrid_flips_below_calibrated_threshold(tmp_path, ratio):
+    # margin ∈ [0.1253τ, τ)：旧公式以 0.55~0.899 放行 → ranked_candidate；
+    # 新映射 0.55·ratio < 0.55 → below_confidence。
+    threshold = 0.3
+    engine = _hybrid_gate_engine(tmp_path, ratio * threshold)
+
+    result = engine.infer(_request())
+
+    assert result["decision"] == "below_confidence"
+    assert result["ranked_candidate"] == ""
+    assert result["confidence"] == pytest.approx(0.55 * ratio)
+
+
+@pytest.mark.parametrize("excess", [0.0, 0.15])
+def test_engine_admits_hybrid_flips_at_or_above_calibrated_threshold(
+    tmp_path, excess
+):
+    # margin ≥ τ：decision=ranked_candidate 的充要条件（same-top 之外）
+    # 收窄为 margin ≥ τ，边界本身仍放行。
+    threshold = 0.3
+    engine = _hybrid_gate_engine(tmp_path, threshold + excess)
+
+    result = engine.infer(_request())
+
+    assert result["decision"] == "ranked_candidate"
+    assert result["ranked_candidate"] == "命令"
+    assert result["confidence"] >= 0.9
+
+
+def test_engine_keeps_hybrid_same_top_decision(tmp_path):
+    # 融合分持平（margin=0）→ 稳定排序回落原序 → same-top 语义不变。
+    engine = _hybrid_gate_engine(tmp_path, 0.0)
+
+    result = engine.infer(_request())
+
+    assert result["decision"] == "same_top_candidate"
+    assert result["confidence"] == 1.0
 
 
 def test_sentence_suggestion_has_an_explicit_decision():

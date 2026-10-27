@@ -330,7 +330,14 @@ class OnnxNeuralListwiseRanker:
             ) * (1.0 - math.exp(-excess))
         else:
             ratio = 0.0 if threshold <= 0 else max(0.0, margin / threshold)
-            confidence = min(0.899, 0.5 + 0.399 * ratio)
+            # reveal B-F1: the calibrated threshold is the release gate.
+            # Below-threshold flips must map strictly under the daemon's 0.55
+            # ranker_min_confidence (0.55 * ratio < 0.55 for ratio < 1), so a
+            # flip is admitted exactly when margin >= threshold — the only
+            # region whose precision was calibrated to target_precision.
+            # threshold <= 0 (uncalibrated fallback) keeps ratio at 0.0 and
+            # therefore admits no flip either.
+            confidence = 0.55 * ratio
         self.successful_samples += 1
         self.attempt_latencies_ms.append((perf_counter() - started_at) * 1000)
         return ranking, confidence

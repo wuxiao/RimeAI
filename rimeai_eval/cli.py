@@ -1,10 +1,14 @@
+"""Command-line entry points for offline evaluation and calibration."""
+
+from __future__ import annotations
+
 import argparse
-from collections import Counter
 import hashlib
 import json
+import sys
+from collections import Counter
 from math import isfinite
 from pathlib import Path
-import sys
 from typing import Any, Mapping, Optional, Sequence
 
 from .capture import CaptureError, capture_dataset
@@ -45,6 +49,9 @@ from rimeai_runtime.ngram_ranker import (
     write_ngram_model_atomic,
 )
 from rimeai_runtime.neural_ranker import (
+    FUSION_TYPE,
+    FUSION_TYPE_GLOBAL_NORM,
+    FusionConfig,
     HybridSemanticRanker,
     NeuralRankerError,
     load_neural_ranker,
@@ -297,6 +304,17 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     train_fusion_parser.add_argument("--output", required=True, type=Path)
     train_fusion_parser.add_argument("--target-precision", type=float, default=0.9)
+    train_fusion_parser.add_argument(
+        "--fusion-type",
+        choices=("global-norm", "legacy-zscore"),
+        default="global-norm",
+        help=(
+            "score fusion caliber to write: global-norm (v2 pooled affine, "
+            "the default) or legacy-zscore (v1 per-sample z-score, for "
+            "reproducing frozen baselines); the caliber of an existing "
+            "output file may not be changed in place"
+        ),
+    )
     train_fusion_parser.add_argument(
         "--device", choices=("auto", "cpu", "mps"), default="auto"
     )
@@ -1029,6 +1047,45 @@ def _train_neural_ranker(
     return 0
 
 
+def _fusion_caliber_to_type(fusion_caliber: str) -> str:
+    if fusion_caliber == "global-norm":
+        return FUSION_TYPE_GLOBAL_NORM
+    if fusion_caliber == "legacy-zscore":
+        return FUSION_TYPE
+    raise ValueError(f"unsupported fusion caliber '{fusion_caliber}'")
+
+
+def _fusion_output_guard_error(
+    output_path: Path,
+    planned_fusion_type: str,
+) -> str | None:
+    """reveal B-F4: refuse to change a fusion config's caliber in place.
+
+    The daemon loads production configs by filename; silently rewriting a
+    v1 file with v2 content (or vice versa) leaves no rollback trace. An
+    existing config may only be overwritten with the same caliber, and an
+    unreadable (corrupt) file is never overwritten either.
+    """
+    if not output_path.exists():
+        return None
+    try:
+        existing = FusionConfig.load(output_path)
+    except NeuralRankerError as error:
+        return (
+            "refusing to change fusion caliber of existing config in place; "
+            "move it aside or choose a new filename (cannot parse existing "
+            f"config '{output_path}': {error})"
+        )
+    if existing.fusion_type != planned_fusion_type:
+        return (
+            "refusing to change fusion caliber of existing config in place; "
+            "move it aside or choose a new filename "
+            f"(existing={existing.fusion_type}, "
+            f"planned={planned_fusion_type})"
+        )
+    return None
+
+
 def _train_neural_fusion(
     dataset_path: Path,
     neural_model_path: Path,
@@ -1037,7 +1094,17 @@ def _train_neural_fusion(
     output_path: Path,
     target_precision: float,
     device: str,
+    fusion_caliber: str = "global-norm",
 ) -> int:
+    try:
+        planned_fusion_type = _fusion_caliber_to_type(fusion_caliber)
+    except ValueError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    guard_error = _fusion_output_guard_error(output_path, planned_fusion_type)
+    if guard_error is not None:
+        print(f"error: {guard_error}", file=sys.stderr)
+        return 2
     try:
         dataset = load_dataset(dataset_path)
         guard = PinyinGuard.from_rime_dictionary(dictionary_path)
@@ -1053,6 +1120,7 @@ def _train_neural_fusion(
             ngram_ranker=load_ngram_model(language_model_path),
             output_path=output_path,
             target_precision=target_precision,
+            fusion_type=planned_fusion_type,
         )
     except (
         DatasetValidationError,
@@ -1446,6 +1514,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             args.output,
             args.target_precision,
             args.device,
+            args.fusion_type,
         )
     if args.command == "evaluate-sentence":
         return _evaluate_sentence(

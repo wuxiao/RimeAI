@@ -1,8 +1,8 @@
 import hashlib
 import json
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -1794,3 +1794,201 @@ def test_train_ngram_terminal_method_rejects_unknown_entry(tmp_path):
         == "error: --terminal-method entries must be 'legacy' and/or "
         "'unigram'\n"
     )
+
+
+# --- reveal B-F4: train-neural-fusion caliber opt-out + in-place guard ---
+
+_FUSION_DATASET_SHA = "d" * 64
+_FUSION_NGRAM_SHA = "b" * 64
+
+_FUSION_CLI_SAMPLES = [
+    {
+        "id": "agree",
+        "split": "validation",
+        "context": "命令",
+        "pinyin": "mingling",
+        "candidates": ["明令", "命令"],
+        "gold_text": "命令",
+    },
+    {
+        "id": "conflict",
+        "split": "validation",
+        "context": "任务",
+        "pinyin": "mingling",
+        "candidates": ["明令", "命令"],
+        "gold_text": "命令",
+    },
+    {
+        "id": "baseline_gold",
+        "split": "validation",
+        "context": "历史",
+        "pinyin": "mingling",
+        "candidates": ["明令", "命令"],
+        "gold_text": "明令",
+    },
+]
+
+
+class _FakeDataset:
+    def __init__(self, samples):
+        self.samples = samples
+        self.sha256 = _FUSION_DATASET_SHA
+
+
+class _FakeNeural:
+    model_artifact_id = "neural:test"
+
+    def __init__(self, table):
+        self._table = table
+
+    def _scores(self, **kwargs):
+        return list(self._table[kwargs["context"]])
+
+
+class _FakeNGram:
+    dataset_sha256 = _FUSION_NGRAM_SHA
+
+    def __init__(self, table):
+        self._table = table
+
+    def _candidate_score(self, context, candidate, baseline_index):
+        return self._table[context][baseline_index]
+
+
+def _fusion_tables():
+    return (
+        _FakeNeural({"命令": [1.0, 4.0], "任务": [1.0, 5.0], "历史": [3.0, 1.0]}),
+        _FakeNGram({"命令": [2.0, 1.0], "任务": [2.0, 1.0], "历史": [2.0, 1.0]}),
+    )
+
+
+def _patch_fusion_loaders(monkeypatch):
+    from rimeai_eval import cli
+
+    neural, ngram = _fusion_tables()
+    monkeypatch.setattr(
+        cli, "load_dataset", lambda path: _FakeDataset(_FUSION_CLI_SAMPLES)
+    )
+    monkeypatch.setattr(
+        cli, "load_neural_ranker", lambda path, guard, device="auto": neural
+    )
+    monkeypatch.setattr(cli, "load_ngram_model", lambda path: ngram)
+    monkeypatch.setattr(
+        cli.PinyinGuard, "from_rime_dictionary", classmethod(lambda cls, path: None)
+    )
+    return cli
+
+
+def _train_fusion_argv(output, *extra):
+    return [
+        "train-neural-fusion",
+        "dataset.jsonl",
+        "--neural-model",
+        "neural-model",
+        "--language-model",
+        "ngram-model.json.gz",
+        "--rime-dictionary",
+        "dict.yaml",
+        "--output",
+        str(output),
+        *extra,
+    ]
+
+
+def test_train_fusion_defaults_to_global_norm_caliber(tmp_path, monkeypatch, capsys):
+    cli = _patch_fusion_loaders(monkeypatch)
+    output = tmp_path / "fusion.json"
+
+    code = cli.main(_train_fusion_argv(output))
+
+    assert code == 0
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["fusion_type"] == "rimeai-neural-ngram-v2"
+    assert payload["score_normalization"]["method"] == (
+        "validation-global-affine"
+    )
+    from rimeai_runtime.neural_ranker import FusionConfig
+
+    assert FusionConfig.load(output).fusion_type == "rimeai-neural-ngram-v2"
+    assert capsys.readouterr().out.strip()  # 训练报告仍打印到 stdout
+
+
+def test_train_fusion_legacy_zscore_writes_v1_config(tmp_path, monkeypatch):
+    cli = _patch_fusion_loaders(monkeypatch)
+    output = tmp_path / "fusion-v1.json"
+
+    code = cli.main(_train_fusion_argv(output, "--fusion-type", "legacy-zscore"))
+
+    assert code == 0
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["fusion_type"] == "rimeai-neural-ngram-v1"
+    assert "score_normalization" not in payload
+    from rimeai_runtime.neural_ranker import FusionConfig
+
+    config = FusionConfig.load(output)
+    assert config.fusion_type == "rimeai-neural-ngram-v1"
+    assert config.neural_mean is None
+
+
+def test_train_fusion_same_caliber_overwrite_succeeds(
+    tmp_path, monkeypatch, capsys
+):
+    cli = _patch_fusion_loaders(monkeypatch)
+    output = tmp_path / "fusion.json"
+
+    assert cli.main(_train_fusion_argv(output, "--fusion-type", "legacy-zscore")) == 0
+    first = output.read_text(encoding="utf-8")
+    capsys.readouterr()
+
+    assert cli.main(_train_fusion_argv(output, "--fusion-type", "legacy-zscore")) == 0
+
+    assert output.read_text(encoding="utf-8") == first  # 确定性重写，同口径允许
+
+
+def test_train_fusion_refuses_to_change_caliber_in_place(
+    tmp_path, monkeypatch, capsys
+):
+    cli = _patch_fusion_loaders(monkeypatch)
+    output = tmp_path / "fusion.json"
+    assert cli.main(_train_fusion_argv(output, "--fusion-type", "legacy-zscore")) == 0
+    incumbent = output.read_text(encoding="utf-8")
+    capsys.readouterr()
+
+    code = cli.main(_train_fusion_argv(output))  # 默认 global-norm
+
+    assert code == 2
+    stderr = capsys.readouterr().err
+    assert "refusing to change fusion caliber of existing config in place; " in stderr
+    assert "move it aside or choose a new filename" in stderr
+    assert "rimeai-neural-ngram-v1" in stderr
+    assert "rimeai-neural-ngram-v2" in stderr
+    assert output.read_text(encoding="utf-8") == incumbent  # 原文件未被触碰
+
+
+def test_train_fusion_refuses_caliber_change_in_either_direction(
+    tmp_path, monkeypatch, capsys
+):
+    cli = _patch_fusion_loaders(monkeypatch)
+    output = tmp_path / "fusion.json"
+    assert cli.main(_train_fusion_argv(output)) == 0  # v2 incumbent
+    capsys.readouterr()
+
+    code = cli.main(_train_fusion_argv(output, "--fusion-type", "legacy-zscore"))
+
+    assert code == 2
+    assert "refusing to change fusion caliber" in capsys.readouterr().err
+
+
+def test_train_fusion_refuses_to_overwrite_corrupt_output(
+    tmp_path, monkeypatch, capsys
+):
+    cli = _patch_fusion_loaders(monkeypatch)
+    output = tmp_path / "fusion.json"
+    output.write_text("{not valid json", encoding="utf-8")
+
+    code = cli.main(_train_fusion_argv(output))
+
+    assert code == 2
+    stderr = capsys.readouterr().err
+    assert "refusing to change fusion caliber of existing config in place; " in stderr
+    assert output.read_text(encoding="utf-8") == "{not valid json"
