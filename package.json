@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "build": "vite build && find dist -type f -name '._*' -delete",
-    "deploy:pages": "npm run build && wrangler pages deploy dist --project-name rimeai --branch main",
+    "deploy:pages": "npm run build && wrangler pages deploy --project-name rimeai --branch main",
     "preview": "vite preview --host 0.0.0.0"
   },
   "dependencies": {

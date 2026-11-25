@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-labelledby="t d">
+  <title id="t">RimeAI · 更懂上下文的本地语义输入引擎</title>
+  <desc id="d">Rime 始终兜底，AI 始终建议。本地语义排序、约束整句、段焦点回修与无空格中英混输，面向 Apple Silicon Mac。</desc>
+  <defs>
+    <radialGradient id="glow" cx="0.81" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#b8f35c" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#b8f35c" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="1200" height="630" fill="#07110f"/>
+  <rect width="1200" height="630" fill="url(#glow)"/>
+  <g fill="none" stroke="#b8f35c" stroke-linecap="round">
+    <circle cx="970" cy="315" r="182" stroke-opacity="0.11" stroke-width="1.5"/>
+    <circle cx="970" cy="315" r="246" stroke-opacity="0.07" stroke-width="1.5"/>
+    <circle cx="970" cy="315" r="312" stroke-opacity="0.04" stroke-width="1.5"/>
+  </g>
+  <g transform="translate(838 183) scale(6.6)" fill="none" stroke="#b8f35c" stroke-width="4.4" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M8 33V7h13c7 0 11 3.8 11 10s-4.2 10-11 10H12"/>
+    <path d="m21 27 11 8M8 7l7 7"/>
+  </g>
+  <g font-family="PingFang SC, Hiragino Sans GB, Microsoft YaHei, Noto Sans SC, sans-serif">
+    <text x="96" y="150" fill="#b8f35c" font-size="34" font-weight="600" letter-spacing="6">RimeAI</text>
+    <text x="96" y="236" fill="#ffffff" font-size="54" font-weight="600" letter-spacing="-1">更懂上下文的本地语义输入引擎</text>
+    <text x="96" y="290" fill="#c5cbc8" font-size="26" font-weight="400">Rime 始终兜底，AI 始终建议。由你主动掌控。</text>
+  </g>
+  <g font-family="PingFang SC, Hiragino Sans GB, Microsoft YaHei, Noto Sans SC, sans-serif" font-size="22" font-weight="500">
+    <rect x="96" y="466" width="280" height="52" rx="10" fill="none" stroke="#b8f35c" stroke-opacity="0.55"/>
+    <text x="120" y="499" fill="#f0f3f1">Space 提交 Rime 首选</text>
+    <rect x="396" y="466" width="228" height="52" rx="10" fill="#b8f35c"/>
+    <text x="420" y="499" fill="#07110f" font-weight="600">Tab 采纳 AI 建议</text>
+  </g>
+  <g font-family="PingFang SC, Hiragino Sans GB, Microsoft YaHei, Noto Sans SC, sans-serif" font-size="20" fill="#8e9994">
+    <text x="1104" y="568" text-anchor="end">内部基线 · 尚未公开发布</text>
+    <text x="1104" y="598" text-anchor="end">rimeai.wwcn.fun</text>
+  </g>
+</svg>
