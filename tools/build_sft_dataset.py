@@ -53,7 +53,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-VERSION = 3
+VERSION = 4
 DATASET_NAME = "sft-constrained-v1"
 DEFAULT_EVAL_DATASET = (
     Path(__file__).resolve().parents[1]
@@ -65,6 +65,15 @@ DEFAULT_MIN_SAMPLES = 1_000
 # A rejected suggestion's "chosen" side comes from a history join, so
 # its evidence is weaker than an explicit adoption.
 WEIGHT_ADOPTED = 1.0
+# adopted_via_main (2026-10-26 fix): the user committed via a Rime
+# main-candidate path (Space, numeric, or segment selection) and the
+# committed text happens to equal the displayed suggestion — a same-text
+# consistency sample, NOT a causal AI adoption and NOT a correctness or
+# acceptance probability. It must not share the explicit-adoption weight,
+# or the distillation signal inflates with rows Rime already solves on its
+# own. 0.7 matches the existing non-explicit history-evidence tier
+# (WEIGHT_REJECTED_WITH_HISTORY).
+WEIGHT_ADOPTED_VIA_MAIN = 0.7
 WEIGHT_REJECTED_WITH_HISTORY = 0.7
 # The commit that answers a rejected suggestion lands within this
 # window after the decision was recorded (compositions are short).
@@ -249,14 +258,26 @@ def build_pairs(
             # Display-order artifact, not a preference signal.
             stats["superseded_skipped"] += 1
             continue
-        if outcome in ("adopted", "adopted_via_main"):
-            # adopted_via_main（2026-10-24）：首选一致合并场景下 Space
-            # 上屏与建议同文——与 Tab 采纳同权重直出（内容被采纳）。
+        if outcome == "adopted":
+            # 显式采纳（Tab/点击等语义建议路径）。
             emit(
                 pinyin=row["pinyin"],
                 chosen=row["suggestion"],
                 rejected=None,
                 weight=WEIGHT_ADOPTED,
+                source=f"daemon/{source}/{outcome}",
+                created_at_ms=row["created_at_ms"],
+            )
+            continue
+        if outcome == "adopted_via_main":
+            # 同文一致（2026-10-26 修正）：Rime 主候选路径
+            # （Space/数字/段选择）提交文本恰与展示建议相同——用户真实
+            # 提交的同文样本，非 AI 因果采纳，与显式 adopted 分档降权。
+            emit(
+                pinyin=row["pinyin"],
+                chosen=row["suggestion"],
+                rejected=None,
+                weight=WEIGHT_ADOPTED_VIA_MAIN,
                 source=f"daemon/{source}/{outcome}",
                 created_at_ms=row["created_at_ms"],
             )

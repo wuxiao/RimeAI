@@ -121,6 +121,59 @@ def test_adopted_decision_becomes_chosen_only_pair(tmp_path: Path):
     assert pair["source"] == "daemon/neural_late/adopted"
 
 
+def test_adopted_via_main_gets_own_weight_and_source(tmp_path: Path):
+    # 同文一致（rime_main 归因子集，非 AI 因果采纳）不得与显式
+    # adopted 共权重（2026-10-26 修正）：0.7 独立档 + 独立 source 桶。
+    daemon = make_daemon_db(
+        tmp_path / "decision_log.db",
+        [
+            (1_000, "neural_late", "r1", "mingling", "命令", "adopted"),
+            (2_000, "neural_late", "r2", "rizhi", "日志", "adopted_via_main"),
+        ],
+    )
+    pairs, stats = builder.build_pairs(
+        builder.load_decision_rows(daemon), [], []
+    )
+    assert stats["rows"] == 2
+    adopted = next(p for p in pairs if p["source"].endswith("/adopted"))
+    via_main = next(
+        p for p in pairs if p["source"].endswith("/adopted_via_main")
+    )
+    assert adopted["weight"] == 1.0 == builder.WEIGHT_ADOPTED
+    assert via_main["weight"] == 0.7 == builder.WEIGHT_ADOPTED_VIA_MAIN
+    assert via_main["chosen"] == "日志"
+    assert via_main["rejected"] is None
+    assert via_main["source"] == "daemon/neural_late/adopted_via_main"
+    # 统计分桶不混档：显式与同文各自独立计数。
+    assert stats["by_source"] == {
+        "daemon/neural_late/adopted": 1,
+        "daemon/neural_late/adopted_via_main": 1,
+    }
+
+
+def test_adopted_via_main_does_not_join_history(tmp_path: Path):
+    # 同文一致行已是 chosen-only；即使同拼音历史 commit 存在也
+    # 不改走 rejected/history join 路径。
+    daemon = make_daemon_db(
+        tmp_path / "decision_log.db",
+        [(1_000, "local_rank", "r1", "mingling", "命令", "adopted_via_main")],
+    )
+    history = make_history_db(
+        tmp_path / "history.sqlite3",
+        [(30_000, "mingling", "命令")],
+    )
+    pairs, stats = builder.build_pairs(
+        builder.load_decision_rows(daemon),
+        [],
+        builder.load_history_commits(history),
+    )
+    assert stats["rows"] == 1
+    assert pairs[0]["weight"] == builder.WEIGHT_ADOPTED_VIA_MAIN
+    assert pairs[0]["rejected"] is None
+    assert stats["degenerate_dropped"] == 0
+    assert stats["unresolved_rejected"] == 0
+
+
 def test_rejected_joins_history_for_the_chosen_side(tmp_path: Path):
     daemon = make_daemon_db(
         tmp_path / "decision_log.db",
