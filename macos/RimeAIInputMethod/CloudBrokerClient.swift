@@ -163,7 +163,7 @@ final class CloudBrokerClient: @unchecked Sendable {
     /// on tearDown.
     private var retiredContinuations = ContinuationRetirementLog()
 
-    private init() {
+    private convenience init() {
         let socketPath = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library", isDirectory: true)
             .appendingPathComponent("Application Support", isDirectory: true)
@@ -171,6 +171,10 @@ final class CloudBrokerClient: @unchecked Sendable {
             .appendingPathComponent("runtime", isDirectory: true)
             .appendingPathComponent("rimeai-cloud.sock")
             .path
+        self.init(socketPath: socketPath)
+    }
+
+    init(socketPath: String) {
         transport = NDJSONUDSTransport(
             configuration: NDJSONUDSTransport.Configuration(
                 socketPath: socketPath,
@@ -452,6 +456,7 @@ private extension CloudBrokerClient {
         transport.close()
         isReady = false
         availableModels = []
+        serverCapabilities = []
         retiredContinuations.reset()
         publishStatus(status)
         if failPending {
@@ -521,16 +526,18 @@ extension CloudBrokerClient {
     /// `sentence-feedback` capability 时才发送；旧 broker 静默跳过
     /// （不计数不重试，传感层永不反向影响输入路径）。
     func sendSentenceFeedback(requestID: String, outcome: String) {
-        guard serverCapabilities.contains("sentence-feedback"),
-              transport.canSendApplicationFrames,
-              let payload = encodeLine(
-                  SentenceFeedbackFrame(
-                      requestID: requestID,
-                      outcome: outcome
+        queue.async { [self] in
+            guard serverCapabilities.contains("sentence-feedback"),
+                  transport.canSendApplicationFrames,
+                  let payload = encodeLine(
+                      SentenceFeedbackFrame(
+                          requestID: requestID,
+                          outcome: outcome
+                      )
                   )
-              )
-        else { return }
-        transport.enqueueOutbound(data: payload, requestID: nil)
-        transport.flushOutbound()
+            else { return }
+            transport.enqueueOutbound(data: payload, requestID: nil)
+            transport.flushOutbound()
+        }
     }
 }
