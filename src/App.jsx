@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 
+const GITHUB_URL = 'https://github.com/wuxiao/RimeAI'
+
 const ArrowRight = ({ size = 18 }) => (
   <svg
     aria-hidden="true"
@@ -164,7 +166,7 @@ const privacyModes = [
 ]
 
 function scrollToSection(id) {
-  document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  document.querySelector(`#${id}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
 }
 
 function Header() {
@@ -178,17 +180,17 @@ function Header() {
       <nav aria-label="主导航" className="main-nav">
         <a href="#how">工作方式</a>
         <span aria-hidden="true">/</span>
-        <a href="#domain">领域能力</a>
+        <a href="#domain">产品能力</a>
         <span aria-hidden="true">/</span>
         <a href="#privacy">隐私</a>
         <span aria-hidden="true">/</span>
-        <a href="#roadmap">路线图</a>
+        <a href="#roadmap">发布路线</a>
       </nav>
 
-      <button className="header-action" onClick={() => scrollToSection('domain')} type="button">
-        查看模型与训练
+      <a className="header-action" href={GITHUB_URL} target="_blank" rel="noopener noreferrer">
+        GitHub 源码
         <ArrowRight />
-      </button>
+      </a>
     </header>
   )
 }
@@ -290,20 +292,20 @@ function Hero() {
       <Header />
       <div className="hero-content page-shell">
         <div className="hero-copy" data-reveal>
-          <h1 aria-label="让输入更懂上下文，内容仍只在本机。">
+          <h1 aria-label="让输入更懂上下文，让选择始终属于你。">
             <span aria-hidden="true" className="hero-title-desktop">
               <span>让输入更懂上下文，</span>
-              <span>内容仍只在本机。</span>
+              <span>让选择始终属于你。</span>
             </span>
             <span aria-hidden="true" className="hero-title-mobile">
               <span>让输入更懂</span>
-              <span>上下文，内容</span>
-              <span>仍只在本机。</span>
+              <span>上下文，让选择</span>
+              <span>始终属于你。</span>
             </span>
           </h1>
           <p>
-            RimeAI 在 Rime 的稳定候选之上，加入设备端专用候选排序。
-            可选整句模型只在需要时出现，最终仍由你决定是否上屏。
+            RimeAI 在 Rime 的稳定候选之上，加入本地语义排序、整句建议与中英混输。
+            AI 只在独立建议位出现，由你主动采纳，绝不自动上屏。
           </p>
           <div className="hero-actions">
             <button className="button button-primary" onClick={() => scrollToSection('how')} type="button">
@@ -318,7 +320,7 @@ function Hero() {
             <svg aria-hidden="true" fill="none" viewBox="0 0 24 24">
               <path d="M5 6.5h14v10H5zM3 19h18" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" />
             </svg>
-            <span>P0 评测工具已实现 · macOS 输入法尚未发布</span>
+            <span>Apple Silicon Mac · macOS 14+ · 内部基线，尚未公开发布</span>
           </div>
         </div>
         <div className="hero-demo" data-reveal>
@@ -333,17 +335,17 @@ const processSteps = [
   {
     number: '01',
     title: '即时候选',
-    detail: 'Rime 负责切分、词典与稳定候选。',
+    detail: 'Rime 同步负责拼音切分、词典与候选兜底，不等待 AI。',
   },
   {
     number: '02',
     title: '本地判断',
-    detail: '停顿后，专用排序器在本机对 Top-10 批量评分。',
+    detail: '24M 排序器融合 n-gram，在设备端理解上下文。',
   },
   {
     number: '03',
     title: '主动上屏',
-    detail: 'AI 建议独立显示，不换位，也不自动输入。',
+    detail: 'Space 提交 Rime 首选，Tab 采纳 AI 建议。',
   },
 ]
 
@@ -372,7 +374,7 @@ function WorkflowSection() {
               <p>{step.detail}</p>
             </article>
           ))}
-          <span className="delay-note" aria-hidden="true">80–120ms</span>
+          <span className="delay-note" aria-hidden="true">本地异步建议</span>
         </div>
 
         <div className="mixed-input" data-reveal>
@@ -417,9 +419,9 @@ function WorkflowSection() {
           <span className="strip-brand"><BrandMark size={26} /></span>
           <span>rime stable · instant candidates</span>
           <i />
-          <span>specialized reranker · target &lt; 50ms</span>
+          <span>24M ranker · on-device semantics</span>
           <i />
-          <span>user choice · on demand</span>
+          <span>space for rime · tab for ai</span>
           <Check size={16} />
         </div>
       </div>
@@ -429,59 +431,75 @@ function WorkflowSection() {
 
 const domainPaths = [
   {
-    id: 'dictionary',
-    tab: '专业词库',
-    kicker: '本地路径',
-    title: '12,480 个术语，导入后直接参与候选生成。',
-    description: '产品名、客户名、类名与固定短语进入 Rime 领域词典，不需要等待模型学习。',
-    status: '无需训练 · 立即生效',
-    privacy: '0 条语料上传',
+    id: 'sentence',
+    tab: '整句建议',
+    kicker: '本地语义路径',
+    title: '一句拼音，得到一条完整、可确认的建议。',
+    description: '本地约束解码器按拼音生成整句，可处理常见错音与中英混排；结构不合法就弃权。',
+    status: '拼音约束 · 失败回退 Rime',
+    privacy: '本地推理 · 不自动上屏',
+    note: '不展示半句话 · 低置信度或结构校验失败时保留 Rime',
     stages: [
-      { label: '来源', value: 'software_terms.yaml', note: '用户主动选择的词条文件' },
-      { label: '处理', value: 'Rime 领域词典', note: '本地校验、去重与编译' },
-      { label: '结果', value: '下一次组合生效', note: '继续保留纯 Rime 兜底' },
+      { label: '输入', value: '完整拼音与有限上下文', note: '支持标点、中英文与常见错音' },
+      { label: '处理', value: '本地拼音约束解码', note: '完整覆盖输入，不开放式续写' },
+      { label: '确认', value: 'Tab 采纳整句建议', note: 'Space 仍提交 Rime 首选' },
     ],
   },
   {
-    id: 'training',
-    tab: '授权语料',
-    kicker: '可选训练路径',
-    title: '专业句子用于训练“如何排序”，不是上传日常输入。',
-    description: '系统用固定 Rime 配置生成拼音、Top-10 候选与同音难例，再训练领域排序适配器。',
-    status: '逐批授权 · 与输入链路分离',
-    privacy: '日常按键不采集',
+    id: 'mixed',
+    tab: '中英混输',
+    kicker: '无空格输入',
+    title: 'API、timeout 与中文，不必手动切换。',
+    description: '连续大写英文作为强边界，小写技术词采用保守识别；完整可解析的拼音优先留给 Rime。',
+    status: '保守分段 · 原样保留',
+    privacy: '标识符不被擅自改写',
+    note: '英文大小写、标识符、路径与 URL 保持原样',
     stages: [
-      { label: '来源', value: '38,200 条授权句子', note: '先检查处理权与敏感信息' },
-      { label: '训练', value: '上下文 + 拼音 + 候选', note: '学习正确候选编号与置信度' },
-      { label: '制品', value: '签名领域模型', note: '合并、量化、校验后下载' },
+      { label: '输入', value: 'zhegeAPIxuyaotimeout', note: '无需用 Space 充当语言分隔符' },
+      { label: '分段', value: '中文 + API + timeout', note: '大写强边界，小写保守识别' },
+      { label: '确认', value: '这个 API 需要 timeout', note: '独立建议位展示，Tab 明确采用' },
+    ],
+  },
+  {
+    id: 'profile',
+    tab: '语言画像',
+    kicker: '个人化路径',
+    title: '越用越像你，也能看清它学到了什么。',
+    description: '成功上屏的文本可固化为短语、用户语言模型与风格画像；每层都可查看、导出与清除。',
+    status: '本机固化 · 可选云压缩',
+    privacy: '不跨用户共享画像',
+    note: '历史与画像分别管理 · 云压缩可独立关闭',
+    stages: [
+      { label: '学习', value: '你已确认的上屏文本', note: '安全输入不写入历史' },
+      { label: '固化', value: '短语 · 用户 LM · 风格', note: '空闲时提炼为三层语言画像' },
+      { label: '控制', value: '可见、可编辑、可清除', note: '支持锁定、导出与独立管理' },
     ],
   },
 ]
 
 const modelLayers = [
   {
-    label: '实时排序层',
-    model: 'GTE · 306M',
-    status: 'P0 领先基线',
-    detail: '批量评分 Rime Top-10；当前优先验证质量与原生部署。',
+    label: '候选排序',
+    model: '24M · Local',
+    status: '内部基线已验证',
+    detail: '本地神经排序器融合 n-gram，对 Rime Top-10 进行上下文评分。',
   },
   {
-    label: '生产目标层',
-    model: '80–150M',
-    status: '待蒸馏验证',
-    detail: '将教师模型的领域判断压缩到拼音感知专用排序器。',
+    label: '整句解码',
+    model: 'MLX · 8-bit',
+    status: '可选本地能力',
+    detail: '拼音约束 beam decoder 提供完整建议；失败或超时始终回退 Rime。',
   },
   {
-    label: '整句生成层',
-    model: '350–500M',
-    status: 'P1 可选能力',
-    detail: '只提供一条明确标识的整句建议，不参与同步主链路。',
+    label: '云端增强',
+    model: 'glm-5.3-flash',
+    status: '默认关闭',
+    detail: '独立 broker 仅在用户配置后启用；结果经结构校验，仍需主动确认。',
   },
 ]
 
 function DomainSection() {
-  const [pathId, setPathId] = useState('dictionary')
-  const [trainingAuthorized, setTrainingAuthorized] = useState(false)
+  const [pathId, setPathId] = useState('sentence')
   const activePath = useMemo(
     () => domainPaths.find((path) => path.id === pathId) ?? domainPaths[0],
     [pathId],
@@ -491,19 +509,19 @@ function DomainSection() {
     <section className="domain section-light" id="domain">
       <div className="page-shell">
         <header className="section-heading domain-heading" data-reveal>
-          <span className="section-kicker">领域能力</span>
-          <h2>专业能力，不等于<br className="mobile-break" />上传你的输入。</h2>
+          <span className="section-kicker">产品能力</span>
+          <h2>从候选到整句，<br className="mobile-break" />更懂你的表达。</h2>
           <p>
-            词条优先交给 Rime；只有你主动选择并授权的句子文件，
-            才能进入与输入法完全分离的训练流程。
+            为中文技术写作优化：保留 Rime 的确定性，
+            再用本地语义减少翻页、选词和中英文切换。
           </p>
         </header>
 
         <div className="domain-workbench" data-reveal>
           <div className="domain-paths" role="tablist" aria-label="领域能力路径">
             <div className="path-intro">
-              <small>选择数据类型</small>
-              <strong>不同数据，走不同路径。</strong>
+              <small>选择能力</small>
+              <strong>每种增强，都有明确边界。</strong>
             </div>
             {domainPaths.map((path) => (
               <button
@@ -525,7 +543,7 @@ function DomainSection() {
               <Spark size={18} />
               <p>
                 <strong>默认规则</strong>
-                不被动收集按键、组合串或完整文档。
+                不用日常输入做跨用户训练，个人画像由你控制。
               </p>
             </div>
           </div>
@@ -558,36 +576,17 @@ function DomainSection() {
               ))}
             </div>
 
-            {activePath.id === 'training' ? (
-              <button
-                aria-pressed={trainingAuthorized}
-                className={`training-consent ${trainingAuthorized ? 'is-authorized' : ''}`}
-                onClick={() => setTrainingAuthorized((value) => !value)}
-                type="button"
-              >
-                <span className="consent-toggle" aria-hidden="true"><i /></span>
-                <span>
-                  <strong>{trainingAuthorized ? '本批文件已授权（演示）' : '本批文件尚未授权（演示）'}</strong>
-                  <small>
-                    {trainingAuthorized
-                      ? '可以进入敏感信息检查；授权不覆盖之后新增的文件。'
-                      : '训练入口保持锁定，不影响本地词库和日常输入。'}
-                  </small>
-                </span>
-              </button>
-            ) : (
-              <div className="local-only-note">
-                <Check size={18} />
-                <span><strong>仅本地处理</strong> · 不创建训练任务，也不改变 Offline Lock。</span>
-              </div>
-            )}
+            <div className="local-only-note">
+              <Check size={18} />
+              <span>{activePath.note}</span>
+            </div>
           </div>
         </div>
 
         <div className="model-stack" data-reveal>
           <div className="model-stack-heading">
-            <small>当前模型路线</small>
-            <h3>一个实时排序器，<br />一个可选生成器。</h3>
+            <small>当前技术路径</small>
+            <h3>本地优先，<br />云增强可选。</h3>
           </div>
           {modelLayers.map((layer) => (
             <article key={layer.label}>
@@ -607,16 +606,16 @@ function DeviceEngine() {
   return (
     <div className="engine-cube" aria-label="设备内语义引擎">
       <BrandMark size={32} />
-      <strong>专用候选排序器</strong>
-      <span>GTE 306M · P0 评测候选</span>
-      <span>低置信度不展示</span>
+      <strong>本地语义引擎</strong>
+      <span>24M 排序器 · n-gram · 约束解码</span>
+      <span>不确定时保留 Rime</span>
     </div>
   )
 }
 
 function PrivacySection() {
   const [modeId, setModeId] = useState('strict')
-  const [offlineLock, setOfflineLock] = useState(true)
+  const [cloudEnabled, setCloudEnabled] = useState(false)
   const activeMode = useMemo(
     () => privacyModes.find((mode) => mode.id === modeId) ?? privacyModes[0],
     [modeId],
@@ -626,10 +625,10 @@ function PrivacySection() {
     <section className="privacy section-dark" id="privacy">
       <div className="page-shell">
         <header className="section-heading privacy-heading" data-reveal>
-          <h2>你的输入，<br className="mobile-break" />不需要离开设备。</h2>
+          <h2>本地优先，<br className="mobile-break" />云端由你决定。</h2>
           <p>
-            组合串、上下文与候选选择默认不上传，也不写入原始文本日志。
-            只有训练中心里逐批授权的文件才可能离开设备；你也可以始终只用本地词库。
+            候选、整句与混输默认在设备端完成。云增强只有在你配置并启用后才运行；
+            安全输入时，自动阻断 AI、上下文、历史与云请求。
           </p>
         </header>
 
@@ -666,9 +665,8 @@ function PrivacySection() {
 
             <span className="flow-arrow" aria-hidden="true"><ArrowRight size={26} /></span>
             <DeviceEngine />
-            <span className="flow-line blocked" aria-hidden="true">
-              <i />
-              <b>×</b>
+            <span className={`flow-line ${cloudEnabled ? 'is-open' : 'blocked'}`} aria-hidden="true">
+              {!cloudEnabled && <><i /><b>×</b></>}
             </span>
 
             <div className="network-boundary">
@@ -676,31 +674,31 @@ function PrivacySection() {
                 <path d="M17 39h32a10 10 0 0 0 1-19.9A16 16 0 0 0 19.7 15 12 12 0 0 0 17 39Z" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" />
               </svg>
               <strong>互联网</strong>
-              <span>输入内容不进入网络路径</span>
+              <span>{cloudEnabled ? '仅独立 broker 可发起已配置请求' : '默认无输入内容进入网络路径'}</span>
             </div>
           </div>
         </div>
 
-        <div className={`offline-lock ${offlineLock ? 'is-on' : ''}`} data-reveal>
+        <div className={`offline-lock ${cloudEnabled ? 'is-on' : ''}`} data-reveal>
           <div className="lock-symbol" aria-hidden="true">
             <svg fill="none" viewBox="0 0 28 28">
-              <path d="m15.5 3-7 11h6l-2 11 7-13h-6l2-9Z" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.6" />
+              <path d="M7 20h14a4 4 0 0 0 .5-8A7 7 0 0 0 8 10a5 5 0 0 0-1 10Z" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.6" />
             </svg>
           </div>
           <div className="lock-title">
-            <strong>Offline Lock</strong>
-            <p>开启后，输入法与推理服务不主动联网，模型仅从本地文件导入。</p>
+            <strong>云端增强</strong>
+            <p>默认关闭；启用后仅由独立 broker 连接你配置的固定云服务。</p>
           </div>
           <button
-            aria-label={offlineLock ? '关闭 Offline Lock 演示' : '开启 Offline Lock 演示'}
-            aria-pressed={offlineLock}
+            aria-label={cloudEnabled ? '关闭云端增强演示' : '开启云端增强演示'}
+            aria-pressed={cloudEnabled}
             className="toggle"
-            onClick={() => setOfflineLock((value) => !value)}
+            onClick={() => setCloudEnabled((value) => !value)}
             type="button"
           >
             <span />
           </button>
-          <em>{offlineLock ? '已开启' : '已关闭'}</em>
+          <em>{cloudEnabled ? '已开启' : '已关闭'}</em>
         </div>
 
         <div className="privacy-commitments">
@@ -721,14 +719,14 @@ function PrivacySection() {
           <article data-reveal>
             <CommitmentIcon type="clear" />
             <div>
-              <h3>一键清除本地数据</h3>
-              <p>短期上下文、RimeAI 数据与可选模型缓存都可独立清除。</p>
+              <h3>数据边界清晰可见</h3>
+              <p>历史与语言画像可分别查看、导出和永久清除，凭据不进入诊断。</p>
             </div>
           </article>
         </div>
 
         <p className="privacy-qualifier">
-          网络隔离、清除与安全输入均需通过自动化测试和人工验证
+          页面开关仅用于演示 · 本地 daemon 无 INET，云联网只发生在独立、显式启用的 broker
         </p>
       </div>
     </section>
@@ -737,36 +735,36 @@ function PrivacySection() {
 
 const roadmapSteps = [
   {
-    phase: 'P0',
-    title: '离线效果验证',
+    phase: '01',
+    title: '内部基线',
     status: '当前阶段',
-    detail: '比较原生 Rime、规则重排与本地模型',
+    detail: 'macOS 核心输入与本地语义链路',
   },
   {
-    phase: 'P1',
-    title: 'macOS 技术原型',
-    status: '通过质量与性能门槛后',
-    detail: '接入稳定的双通路候选',
+    phase: '02',
+    title: '发布验证',
+    status: '下一阶段',
+    detail: '签名、公证、清洁机与真实宿主',
   },
   {
-    phase: 'P2',
-    title: '开发者预览',
-    status: '通过隐私与分发门槛后',
-    detail: '提供控制中心、Offline Lock 与签名安装',
+    phase: '03',
+    title: '公开预览',
+    status: '尚未放行',
+    detail: 'Apple Silicon Mac · macOS 14+',
   },
   {
-    phase: 'P3',
-    title: '领域能力',
-    status: '通过独立数据治理后',
-    detail: '本地词库与可选授权训练',
+    phase: '04',
+    title: '持续优化',
+    status: '以证据推进',
+    detail: '冻结集、真实指标与用户反馈',
   },
 ]
 
 const targets = [
-  { value: '+ 5%', label: 'conditional Top-1 相对提升' },
-  { value: '< 50ms', label: '专用重排器 P50 目标' },
-  { value: '< 400ms', label: 'AI 建议 P95 硬上限' },
-  { value: '0 次', label: '默认输入内容外传' },
+  { value: 'Space', label: '提交 Rime 首选，基础语义不变' },
+  { value: 'Tab', label: '显式采纳当前 AI 建议' },
+  { value: '0', label: '默认云端请求与自动上屏' },
+  { value: '24M', label: '设备端专用候选排序器' },
 ]
 
 function RoadmapSection() {
@@ -774,10 +772,10 @@ function RoadmapSection() {
     <section className="roadmap section-light" id="roadmap">
       <div className="page-shell">
         <header className="section-heading roadmap-heading" data-reveal>
-          <h2>从可验证的效果<br className="mobile-break" />开始。</h2>
+          <h2>先证明可靠，<br className="mobile-break" />再交到你的键盘上。</h2>
           <p>
-            306M 是当前评测起点，不是最终答案。准确率、延迟、稳定性与隐私边界，
-            必须在同一数据集、同一 Rime 配置和同一硬件上证明。
+            当前仍是内部基线，不提供下载。公开预览前必须完成签名、公证、
+            清洁机安装、真实宿主与安全输入验证。
           </p>
         </header>
 
@@ -795,14 +793,14 @@ function RoadmapSection() {
         </div>
 
         <div className="targets-heading" data-reveal>
-          <h3>开发目标，不是宣传数字</h3>
+          <h3>写在交互里的硬约束</h3>
         </div>
         <div className="targets-grid">
           {targets.map((target) => (
             <article data-reveal key={target.label}>
               <div>
                 <strong>{target.value}</strong>
-                <em>验证目标</em>
+                <em>产品合同</em>
               </div>
               <p>{target.label}</p>
             </article>
@@ -824,15 +822,15 @@ function FinalCta() {
           <BrandMark size={42} />
         </div>
         <div className="cta-copy" data-reveal>
-          <h2>Rime 的确定性，叠加本地语义的判断力。</h2>
-          <p>词库留在 Rime，语义模型只做它擅长的判断；先验证，再交到你的键盘上。</p>
+          <h2>中文输入的确定性，加上语义理解的新可能。</h2>
+          <p>Rime 始终兜底，AI 始终建议。RimeAI 正面向 Apple Silicon Mac 进行发布前验证。</p>
           <div>
-            <button className="button button-primary" onClick={() => scrollToSection('top')} type="button">
-              回到产品演示
+            <a className="button button-primary" href={GITHUB_URL} target="_blank" rel="noopener noreferrer">
+              在 GitHub 查看源码
               <ArrowRight />
-            </button>
-            <button className="text-link" onClick={() => scrollToSection('privacy')} type="button">
-              查看隐私边界
+            </a>
+            <button className="text-link" onClick={() => scrollToSection('top')} type="button">
+              回到产品演示
               <ArrowRight />
             </button>
           </div>
@@ -855,16 +853,18 @@ function Footer() {
           <svg aria-hidden="true" fill="none" viewBox="0 0 24 24">
             <path d="M5 6.5h14v10H5zM3 19h18" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" />
           </svg>
-          P0 评测工具已实现 · 输入法尚未发布
+          Apple Silicon Mac · macOS 14+ · 尚未公开发布
         </div>
         <nav aria-label="页脚导航">
           <a href="#how">工作方式</a>
           <span>/</span>
-          <a href="#domain">领域能力</a>
+          <a href="#domain">产品能力</a>
           <span>/</span>
           <a href="#privacy">隐私</a>
           <span>/</span>
-          <a href="#roadmap">路线图</a>
+          <a href="#roadmap">发布路线</a>
+          <span>/</span>
+          <a href={GITHUB_URL} target="_blank" rel="noopener noreferrer">GitHub · wuxiao/RimeAI</a>
         </nav>
       </div>
     </footer>
