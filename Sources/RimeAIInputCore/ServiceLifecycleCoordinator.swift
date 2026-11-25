@@ -193,6 +193,7 @@ public typealias ServiceLifecycleProcessRunner = @Sendable (
 public enum ServiceLifecycleProcess {
     /// 默认执行器：stdout/stderr 接入无人读取的 Pipe，只返回退出码
     /// （与原设置窗口实现逐字一致）。
+    @Sendable
     public static func run(
         executable: String,
         arguments: [String]

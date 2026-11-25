@@ -2,10 +2,10 @@
 
 | 项目 | 当前值 |
 |---|---|
-| 版本 | 1.0 |
-| 更新日期 | 2026-10-13 |
+| 版本 | 1.3 |
+| 更新日期 | 2026-11-25 |
 | 状态 | 当前唯一总体技术设计 |
-| 当前工作树 | 内部 clean baseline 已通过；功能边界按可审查提交收口，不可发布 |
+| 当前工作树 | 内部 clean baseline 已收口键盘主线、双延迟档与语音新工作流；尚未通过公开发布门 |
 
 本文件描述现行架构、数据流、信任边界和验证事实。产品需求与交互分别见
 [PRD.md](PRD.md) 和 [PRODUCT_DESIGN.md](PRODUCT_DESIGN.md)；开发状态只在
@@ -37,6 +37,7 @@
 | macOS | 全新 DerivedData，arm64，Swift/C/C++ warnings-as-errors | 40 tests 通过（2026-10-13） |
 | iOS | 全新 DerivedData，Simulator unit + system-keyboard UI | 11 tests 通过（2026-08-24 基线） |
 | Native / shell / generation | XCFramework contract、部分候选 C++ 集成、脚本直接调用、XcodeGen 精确再生成 | 全部通过 |
+| Web（产品主页） | `npx vite build --outDir <项目外临时目录> --emptyOutDir`（不写入工作区 `dist/`） | 0 error / 0 warning（2026-11-25）；明暗双主题与静态资源（OG 卡片、触控图标）随构建产出 |
 
 SwiftPM 与 macOS 构建均显式移除 `CPATH`、`C_INCLUDE_PATH` 和
 `CPLUS_INCLUDE_PATH`；Xcode 使用全新 `/tmp` DerivedData。验证前后仓库快照
@@ -47,23 +48,30 @@ SwiftPM 与 macOS 构建均显式移除 `CPATH`、`C_INCLUDE_PATH` 和
 ```text
 目标应用
   ^
-  | insertText / marked text
+  | insertText / marked text / auto-paste (non-SEI)
 macOS InputMethodKit 输入法
   ├─ RimeEngine + controlled librime
-  │    └─ 同步候选、用户选择、部分拼音消费
-  ├─ DaemonClient ── private UDS ── rimeai-daemon
-  │                                  ├─ 24M ranker
-  │                                  ├─ char n-gram
-  │                                  └─ constrained beam decoder
-  ├─ CloudBrokerClient ── private UDS ── cloud broker ── fixed HTTPS gateway
-  │                         ^
-  │                         └─ plaintext history / FTS / vector index
-  └─ VoiceDictationRuntime
+  │    └─ 同步候选、段焦点编辑、部分选词前缀保留与回修
+  ├─ Local SQLite Stores
+  │    ├─ L1 短语库 + 领域词库 (schema v2)
+  │    └─ 语音历史与使用统计 (VoiceHistoryStore，独立于键盘历史)
+  ├─ DaemonClient ── private UDS (no-INET) ── rimeai-daemon
+  │                                  ├─ 24M ranker (FP / INT8 ONNX) ⊕ char n-gram ⊕ L2 User LM
+  │                                  ├─ constrained beam decoder + decision_log.db
+  │                                  └─ MLX 8-bit neural sentence worker (sentence_late，写序门：严格晚于同步 result 帧)
+  ├─ CloudBrokerClient ── private UDS ── cloud broker ── fixed HTTPS gateway (glm-5.3-flash)
+  │                         ^                ├─ inference: generate·abstain（≤128 字，无候选池）/ continuation
+  │                         ^                ├─ voice_transform: polish / translate（7 种目标语言 + 中英互译）
+  │                         ^                └─ embed_texts（历史向量化，当前停用）/ L3 固化
+  │                         └─ rolling 7d plaintext history / FTS / cloud-decisions.db
+  └─ VoiceDictationRuntime (+ VoiceLocalPolisher / VoiceClipboardPaster / VoiceSystemAudioMuter
+       + VoiceSoundEffectsPlayer / VoicePostCommitEditTracker / VoicePostCommitCorrectionLearner)
        ├─ Debug: private UDS
        └─ Release: authenticated NSXPC Mach service
                          └─ RimeAIVoiceHelper
+                              ├─ MLX Qwen3-ASR offline worker (no-INET, 音频仅驻内存, 双层热词)
                               ├─ Apple Speech probe
-                              └─ product-managed sherpa backend (not approved)
+                              └─ product-managed sherpa-onnx buffer fork (production catalog empty)
 ```
 
 Rime 是唯一同步主链。所有本地模型、云端和语音组件都可以失败、取消或未安装，
@@ -216,6 +224,19 @@ Release builder 全流程已用 ONNX 路径重跑通过（preview-4-segment-focu
   自动注音，产出标准 dict.yaml + manifest；示例词库
   `lexicons/it-programming`（215 词条，CC0）。
 
+### 4.5 迟到帧写序与有界关闭（2026-11-25）
+
+- `write_lock` 只保证同一连接上的帧不交错，不保证顺序：神经臂可能先于同步
+  `result` 写出 `sentence_late`，而客户端此时尚未为该请求 arm 迟到帧槽，帧被当作
+  过期修订丢弃。现每个请求持有一个 `_RequestGate`：同步 `result` 帧写出后才释放
+  神经臂；等待上限＝请求 deadline + 1 s 宽限；同步臂无论以 result / 错误 / 超时 /
+  取消何种方式结束都会释放门，没有 `result` 则神经臂弃权，不存在无限等待。
+- `close()`：先置 `_closing`，所有 handler 在下一轮读循环顶部退出，不再创建新请求
+  臂；`shutdown_unix_listener` 在 0.5 s 宽限内冲刷在途帧后中止连接，整体拆除仍受
+  `CLOSE_TEARDOWN_TIMEOUT_SECONDS = 5.0` 约束；随后关闭神经臂与决策日志、摘除
+  套接字、以 `wait=False` 关闭执行器。
+- 客户端会话登记；对端复位（`OSError`）按普通断开处理，不计入熔断。
+
 ## 5. 可选云增强
 
 ### 5.1 固定合同
@@ -224,9 +245,20 @@ Release builder 全流程已用 ONNX 路径重跑通过（preview-4-segment-focu
 - endpoint：`https://open.bigmodel.cn/api/coding/paas/v4`
 - model：`glm-5.3-flash`（单一冻结白名单）
 - embedding：`text-embedding-v4`，512 维（后台向量化当前硬停用，检索降级 FTS）
-- 请求不携带候选池；云端推理决策只有 generate/abstain，含整句生成
-  （≤128 字符）与上屏后续写联想（continuation）两条路由
-- 总 deadline：30s 墙钟（协议上限 30000ms，本地开发调试口径；正式发布口径 8s）
+- 请求不携带候选池。broker 按 capability 协商暴露四类能力：
+  - `inference`（`text-generation`）：键盘整句路由，唯一决策为 generate / abstain，
+    ≤128 字符，多段支持 `Tab` 按段写入复核；
+  - `continuation`（`continuation-generation`）：上屏后续写联想，单条 chip；
+  - `voice_transform`（`voice-transform`）：语音 4 风格深度润色（`polish`）与翻译
+    （`translate`，7 种目标语言 + 中英自动互译）。输入 ≤ 20,000 字符、输出 ≤ 30,000
+    字符、deadline 1–30,000 ms；`max_tokens` 随输入长度伸缩
+    （`min(8192, max(512, 2×输入字符数 + 256))`）；输出须为单行可打印文本。客户端
+    时限：云端润色 6 s、云端翻译 10 s，超时或未配置回退本地润色不丢字；输入 ≥ 80 字
+    而输出不足原文 60% 判为残句并回退本地；
+  - `embed_texts`：历史向量化的内部方法（`text-embedding-v4`，512 维，≤32 条、每条
+    ≤16 KiB），不是客户端路由；后台向量化当前停用，检索降级 FTS。
+- 总 deadline：键盘 30s 墙钟（协议上限 30000ms，本地开发调试口径；正式发布口径 8s）；
+  语音时限见上。
 
 broker 模块为 `rimeai_cloud_broker/cloud_model.py`（中性云增强命名，
 provider 固定为智谱 Coding Plan 直连）。
@@ -235,7 +267,8 @@ provider 固定为智谱 Coding Plan 直连）。
 
 输入法绑定 composition、revision、session、history generation 和 deadline，
 经同 UID UDS 发给 broker（不携带候选池）。broker 只能访问固定 HTTPS
-endpoint，只返回 `generate` 或 `abstain`。客户端再次验证全部绑定并过
+endpoint；键盘 `inference` 路由只返回 `generate` 或 `abstain`（`continuation` 与
+`voice_transform` 为独立路由，同样不携带候选池）。客户端再次验证全部绑定并过
 结构门后才允许展示，采纳需用户显式确认。
 
 ### 5.3 凭据与历史
@@ -255,13 +288,17 @@ endpoint，只返回 `generate` 或 `abstain`。客户端再次验证全部绑�
 
 ## 6. 设置与运行态收敛
 
-- `RimeAISettingsStore` 当前导出 schema 8；导入兼容 schema 5–8（5 为默认
-  快捷键迁移，7 为续写联想，8 为语言画像）。
-- 语音快捷键可在设置中录制、清除和恢复默认；只接受带修饰键的非系统保留组合，
-  冲突或无效输入 fail-closed，运行态变更立即重注册。
+- `RimeAISettingsStore` 当前导出 schema 8（向后兼容扩展语音润色/翻译/热词/自动粘贴/
+  提示音/媒体静音/语音历史等字段，以及默认关闭的云端热词 `voiceCloudHotwordsEnabled`
+  与 AX 回读 `voiceAXFallbackReadEnabled` 两个独立 opt-in 开关；旧版 schema 8 文件
+  仍可无损导入，缺失的两个开关按关闭解码）；导入兼容 schema 5–8。
+- 设置窗口采用六页结构（输入与 AI / 语音 / 历史与统计 / 云端与历史 / 语言画像 / 状态与数据）。
+- 语音快捷键支持在设置中录制、取消与恢复默认：接受 `⌃⇧` / `⌥⇧` 搭配字母数字标点键，
+  或一键设为单修饰键点按切换的 **右 `⌘`**（`keyCode 54`）；另支持独立录制一键语音翻译
+  快捷键（默认 `⌃⇧T`）；冲突或无效输入 fail-closed，运行态变更立即重注册。
 - 导入上限 128 KiB；固定 cloud provider/endpoint/model、Offline Lock、凭据、
   应用列表和语音/AI 依赖均 fail-closed。
-- API Key、历史、诊断、个人英文词和模型不进入普通恢复默认删除范围。
+- API Key、键盘历史、语音历史与统计、诊断、语言画像、领域词库和模型不进入普通恢复默认删除范围。
 - daemon、cloud broker、voice helper 按 stop voice/cloud -> daemon、start
   daemon -> cloud -> voice 的依赖顺序串行收敛；失败服务偏好回退为关闭。
 - 设置通知只表达期望变化；只有 lifecycle/ready 验证完成才能表达运行态成功。
@@ -270,8 +307,16 @@ endpoint，只返回 `generate` 或 `abstain`。客户端再次验证全部绑�
 
 ### 7.1 产品边界
 
-语音是默认关闭的独立模态。输入法只负责快捷键、状态机、浮层、宿主守卫和最终
-上屏；helper 持有音频权限、ASR engine 与服务端状态。语音不进入键盘历史。
+语音是默认关闭的独立模态。输入法侧负责快捷键（`VoiceHotKeyManager`，支持按住组合键、
+右 `⌘` 单键点按切换与翻译快捷键）、状态机、极简自适应浮窗（`VoiceDictationPanelController`）、
+离线确定性润色（`VoiceLocalPolisher`）、可选云端 `voice_transform` 调用、自动粘贴回退
+（`VoiceClipboardPaster`，仅非 Secure Input 时生效并恢复原剪贴板）、系统媒体自动静音
+（`VoiceSystemAudioMuter`）、交互提示音（`VoiceSoundEffectsPlayer`）、三源热词合并、
+宿主守卫与本机语音历史/统计（`VoiceHistoryStore`）；helper 持有音频权限、ASR engine
+与服务端状态。语音文本不进入键盘长期历史。上屏后纠错学习
+（`VoicePostCommitEditTracker` / `VoicePostCommitCorrectionLearner`）、启动闸门
+（`VoiceDictationStartGate`，对安全输入、语音未启用、应用禁用 AI 等逐条给出面向
+用户的原因）与时限口径（`VoiceSessionTiming`）同样位于输入法侧。
 
 ### 7.2 V2 协议
 
@@ -290,7 +335,7 @@ Debug UDS 使用 NDJSON；Release XPC 的单个 Data RPC 承载一条无换行 J
 ```text
 Debug:
   --socket <path>
-  --socket <path> --engine unavailable|apple-speech|product-managed
+  --socket <path> --engine unavailable|apple-speech|mlx-qwen3-asr|product-managed
 
 Release:
   --mach-service fun.wwcn.rimeai.voice-helper
@@ -309,25 +354,46 @@ tracer 也都是独立工具，不向 helper argv 增加策略面。
 
 详细威胁模型见 [docs/VOICE_IPC_SECURITY.md](docs/VOICE_IPC_SECURITY.md)。
 
-### 7.5 产品管理 ASR
+### 7.5 端上 ASR 引擎（MLX Qwen3-ASR 与产品管理 Sherpa）
 
-- manifest schema v2 只证明制品内容和运行时合同。
-- 来源、模型权利、再分发和质量审批只来自 code-shipped trusted catalog。
-- `VoiceASRTrustedArtifactCatalog.production` 当前 approvals 为空；Release
-  因此没有获批 product-managed ASR。
-- 当前 sherpa-onnx 1.13.6、ONNX Runtime 1.27.1 和 16-entry Safe C
-  `noexcept` wrapper 已进入工作树并通过当前严格编译/单元基线，但尚无产品模型
-  审批或发布环境证据。
+- **MLX Qwen3-ASR 离线流式引擎（Debug/开发）**：`MLXQwen3ASREngine` 通过私有
+  stdin/stdout NDJSON 管道拉起 `script/voice_mlx_qwen3_asr_service.sh` →
+  `rimeai_runtime/qwen3_asr_worker.py`（默认模型 `.rimeai/models/qwen3-asr-0.6b-8bit`）。
+  worker 在加载模型前安装进程级 `AF_INET`/`AF_INET6` 网络守卫并开启离线环境变量；
+  音频 PCM 仅驻留内存并在 stop/cancel 后清空；识别集成 Layer-1 `hotwords=` 上下文偏置与
+  Layer-2 确定性 `HotwordCorrector`（英文去空格/大小写还原 + 基于 `pypinyin` 的保守中文同音校正）
+  及静音/热词回声幻觉守卫。
+- **产品管理 Sherpa-ONNX 资产**：manifest schema v2 只证明制品内容和运行时合同。
+  来源、模型权利、再分发和质量审批只来自 code-shipped trusted catalog；
+  `VoiceASRTrustedArtifactCatalog.production` 当前 approvals 为空，Release 因此没有获批
+  product-managed ASR。
+- **同 UID pathname 窗口已消除（SECURITY-001，2026-10-26）**：采用冻结 fork
+  `sherpa-onnx` v1.13.6 + `third-party/sherpa-onnx-v1.13.6-buffer-loader.patch`
+  （`macos/Native/SherpaOnnxMacOS-fork.xcframework`），对已校验的 5 个文件
+  （含 `bpe.vocab`）通过 fd `pread` 全量读入内存经 pinned buffer 传入识别器，ORT 不再打开
+  任何模型/词表 pathname，消除前验→open TOCTOU 窗口；snapshot pathname 仅保留为回归对照。
 - evaluation sealer 与三进程 causal tracer 能固定候选并诊断冷加载；schema 2
   结果固定 `authenticated_production_driver=false`，不是 release evidence。
-- snapshot pathname 方案不声称抵御 hostile same-UID 在校验后 rename/cleanup；
-  长期需要 fd/buffer/pread API 或兼容性冻结 fork。
 
 专项合同：
 
 - [docs/VOICE_ASR_ARTIFACT.md](docs/VOICE_ASR_ARTIFACT.md)
 - [docs/VOICE_ASR_RUNTIME_INTAKE.md](docs/VOICE_ASR_RUNTIME_INTAKE.md)
 - [docs/VOICE_EVAL_FORMAT.md](docs/VOICE_EVAL_FORMAT.md)
+
+### 7.6 语音时限、文本上限与默认值
+
+| 项 | 当前值 |
+|---|---|
+| 协议 deadline 上限 | `maximumDeadlineMilliseconds = 30_000` |
+| 识别收尾 / 云端润色 / 云端翻译 | 10 s / 6 s / 10 s（`VoiceSessionTiming`） |
+| `voice_transform` 输入 / 输出 | ≤ 20,000 / ≤ 30,000 字符（客户端与 broker 双重校验） |
+| 语音总开关 | 默认关闭，依赖 AI 总开关 |
+| 默认开启（语音开启后，均可单独关闭） | 自动粘贴、交互提示音、录音时静音系统音频、本机语音历史与统计、智能润色、上屏后纠错学习 |
+| 默认关闭（独立 opt-in） | 向云端润色/翻译发送热词 `voiceCloudHotwordsEnabled`；AX 文档回读 `voiceAXFallbackReadEnabled`（另需辅助功能授权且非 Secure Input） |
+| 翻译目标 | 7 种语言（英/中/日/韩/法/德/西）+ 中英自动互译 |
+
+交互合同见 [docs/VOICE_INPUT_DESIGN.md](docs/VOICE_INPUT_DESIGN.md) §3.5、§3.9、§3.10。
 
 ## 8. iOS
 
@@ -337,6 +403,9 @@ tracer 也都是独立工具，不向 helper argv 增加策略面。
 - 当前语义层只使用紧凑 n-gram，不包含 24M 模型。
 - 部分候选选择只提交确认前缀并保留未消费拼音后缀，已进入 native、Swift 与
   fresh Simulator 回归。
+- 语音偏好类型（`VoicePolishStyle` / `VoiceTranslationLanguage`）位于 iOS 可共享的
+  `VoicePreferenceTypes.swift`，登记进三个 iOS 目标与再生成校验镜像清单；依赖
+  macOS 类型的 `VoiceFeatureTypes.swift` 不进入 iOS 键盘子集。
 - 自定义键盘控件使用稳定 accessibility identifier，避免 iOS 系统键盘 chrome
   的同名 globe/dictation 控件造成 UI selector 碰撞。
 - XCFramework headers 与 Simulator unit/UI 基线已完成；真机内存、生命周期、
@@ -360,7 +429,7 @@ tracer 也都是独立工具，不向 helper argv 增加策略面。
 | TD-001 | Rime 是同步主引擎；AI 永远是可失败的增强层 |
 | TD-002 | AI 使用单一独立建议位；有 Rime 候选时 Space=Rime、Tab=AI |
 | TD-003 | 本地推理放在独立 daemon，输入法不在按键线程运行模型 |
-| TD-004 | 云端是独立 opt-in broker；不携带候选池，只返回 generate/abstain（含续写联想）决策 |
+| TD-004 | 云端是独立 opt-in broker；所有路由不携带候选池，键盘 `inference` 路由只返回 generate/abstain；续写联想与语音 `voice_transform`（深度润色/翻译）为独立路由 |
 | TD-005 | Secure Input、composition/session/generation/deadline 全部 fail-closed |
 | TD-006 | Voice Debug 使用私有 UDS；Release 只使用双向认证 XPC，不降级 |
 | TD-007 | ASR 内容完整性与产品 Release 资格分离，production catalog 是唯一审批源 |

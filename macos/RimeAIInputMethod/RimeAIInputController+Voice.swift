@@ -6,11 +6,24 @@ import InputMethodKit
 /// 热词准入与 VoiceDictationRuntimeOwner 协议实现。
 extension RimeAIInputController {
     func isVoiceShortcut(_ event: NSEvent) -> Bool {
-        return VoiceDictationKeyRouter.isExactVoiceShortcut(
+        let modifiers = voiceKeyModifiers(event.modifierFlags)
+        if VoiceDictationKeyRouter.isExactVoiceShortcut(
             keyCode: event.keyCode,
-            modifiers: voiceKeyModifiers(event.modifierFlags),
+            modifiers: modifiers,
             shortcut: settings.voiceShortcut
-        )
+        ) {
+            return true
+        }
+        if voiceTranslateHotKeyIsRegistered,
+           VoiceDictationKeyRouter.isExactVoiceShortcut(
+               keyCode: event.keyCode,
+               modifiers: modifiers,
+               shortcut: settings.voiceTranslateShortcut
+           )
+        {
+            return true
+        }
+        return false
     }
 
     func voiceKeyModifiers(
@@ -35,45 +48,92 @@ extension RimeAIInputController {
         return result
     }
 
-    func startVoiceDictation(
+    /// 当前无法启动语音听写的原因；nil 表示可以启动。
+    func voiceStartBlocker(client: any IMKTextInput) -> VoiceDictationStartBlocker? {
+        if let runtimeBlocker = VoiceDictationRuntime.shared.startBlocker {
+            return runtimeBlocker
+        }
+        let bundleIdentifier = client.bundleIdentifier() ?? "unknown-client"
+        return VoiceDictationStartGate.blocker(
+            voiceEnabled: settings.voiceEnabled,
+            aiAllowed: settings.isAIAllowed(for: bundleIdentifier),
+            isHostActive: isHostActive,
+            hasActiveComposition: composition.hasComposition
+                || VoiceClientMarkedRangePolicy.hasMarkedText(client.markedRange()),
+            isSecureInput: composition.isSecureInput || IsSecureEventInputEnabled()
+        )
+    }
+
+    func canStartVoiceDictation(
         client: any IMKTextInput
+    ) -> Bool {
+        voiceStartBlocker(client: client) == nil
+    }
+
+    func startVoiceDictation(
+        client: any IMKTextInput,
+        intent: VoiceSessionIntent = .dictation
     ) -> Bool {
         let bundleIdentifier = client.bundleIdentifier()
             ?? "unknown-client"
-        guard canStartVoiceDictation(client: client),
-              let clientObject = activeClientObject
-        else {
+        let runtime = VoiceDictationRuntime.shared
+        // 被阻断（安全输入 / 应用已关闭 AI / 有未上屏拼音 / 服务停用 / 麦克风
+        // 权限被拒）时给出明确原因，而不是静默无反应。
+        if let blocker = voiceStartBlocker(client: client) {
+            if blocker == .secureInput {
+                settings.record(.privacyBlocked)
+            }
+            runtime.presentStartBlockedToast(
+                blocker,
+                anchorRect: fallbackVoiceAnchorRect()
+            )
             configureVoiceHotKey()
             return false
         }
+        guard let clientObject = activeClientObject else {
+            configureVoiceHotKey()
+            return false
+        }
+        VoicePostCommitEditTracker.shared.settleNowIfMatching(
+            client: clientObject,
+            reason: .nextDictation
+        )
         let selection = client.selectedRange()
-        guard selection.location != NSNotFound else {
-            settings.record(.voiceFailure)
-            return false
-        }
-        guard let anchor = voiceCaretRect(
-            client: client,
-            characterIndex: selection.location
-        ) else {
-            // 语音最终会直接上屏；拿不到由宿主返回的真实 caret 时必须
-            // fail closed，不能沿用候选窗的鼠标位置回退。
-            settings.record(.voiceFailure)
-            return false
-        }
+        let hasEditableSelection = selection.location != NSNotFound
+        let caretAnchor = hasEditableSelection
+            ? voiceCaretRect(
+                client: client,
+                characterIndex: selection.location
+            )
+            : nil
+        let hasEditableTarget = hasEditableSelection && caretAnchor != nil
+        let anchor = caretAnchor ?? fallbackVoiceAnchorRect()
         candidatePanel.hide()
-        let started = VoiceDictationRuntime.shared.start(
+        let started = runtime.start(
             owner: self,
             client: clientObject,
             context: VoiceDictationSessionContext(
                 compositionID: UUID(),
                 appSessionID: applicationSessionID(for: client),
                 bundleID: bundleIdentifier,
+                // 最终识别上限收紧为 10s（原沿用协议上限 30s）。
+                deadlineMilliseconds: VoiceSessionTiming
+                    .finalizationDeadlineMilliseconds,
+                maximumDurationMilliseconds: VoiceDictationConstants
+                    .unlimitedDurationMilliseconds,
                 hotwordSnapshot: voiceHotwordSnapshot(for: client)
             ),
             selection: selection,
-            anchorRect: anchor
+            anchorRect: anchor,
+            hasEditableTarget: hasEditableTarget,
+            intent: intent
         )
         return started
+    }
+
+    func fallbackVoiceAnchorRect() -> NSRect {
+        let mouse = NSEvent.mouseLocation
+        return NSRect(x: mouse.x, y: mouse.y, width: 1, height: 20)
     }
 
     func voiceHotwordSession(
@@ -104,12 +164,38 @@ extension RimeAIInputController {
         for client: any IMKTextInput
     ) -> VoiceHotwordSnapshot {
         let bundleIdentifier = client.bundleIdentifier() ?? "unknown-client"
+        let isSecure = composition.isSecureInput || IsSecureEventInputEnabled()
+        guard settings.voiceEnabled,
+              settings.isAIAllowed(for: bundleIdentifier),
+              !isSecure
+        else {
+            return .empty
+        }
         let session = voiceHotwordSession(for: client)
         voiceHotwordAdmission.activate(
             session: session,
             policy: voiceHotwordPolicy(for: bundleIdentifier)
         )
-        return voiceHotwordAdmission.snapshot(session: session)
+        let sessionPhrases = voiceHotwordAdmission.snapshot(
+            session: session
+        ).phrases
+        let phraseBookPhrases: [String]
+        if settings.voicePhraseBookHotwordsEnabled,
+           settings.contextPolicy(for: bundleIdentifier) != .strict
+        {
+            phraseBookPhrases = RimeAIPhraseBookService.shared
+                .voiceHotwordCandidates(
+                    forBundleIdentifier: bundleIdentifier,
+                    limit: 96
+                )
+        } else {
+            phraseBookPhrases = []
+        }
+        return VoiceHotwordMerger.merge(
+            customPhrases: settings.voiceCustomHotwords,
+            phraseBookPhrases: phraseBookPhrases,
+            sessionRimePhrases: sessionPhrases
+        )
     }
 
     func recordVoiceHotwordFromRimeCommit(
@@ -136,18 +222,45 @@ extension RimeAIInputController {
         )
     }
 
-    func canStartVoiceDictation(
+    /// 右 ⌘ 点按切换录音没有 Carbon release 边沿：控制器失活（切换输入法、
+    /// 输入会话结束）时补一次“松开”，否则录音在控制器失活后无人能停。
+    func releaseModifierTapDictationIfRecording() {
+        let runtime = VoiceDictationRuntime.shared
+        guard VoiceModifierTapPolicy.shouldReleaseOnDeactivate(
+            isModifierTap: settings.voiceShortcut.isModifierTap,
+            phase: runtime.phase
+        ) else {
+            return
+        }
+        runtime.stop(owner: self)
+    }
+
+    /// 任意非修饰键按下或状态重置时，同时撤销点按检测与指针防护。
+    func resetVoiceModifierTapDetectors() {
+        voiceModifierTapDetector.reset()
+        voiceTranslateModifierTapDetector.reset()
+        voiceModifierTapPointerGuard.reset()
+        voiceTranslateModifierTapPointerGuard.reset()
+        VoiceGlobalHotKeyService.shared.resetModifierTapDetectors()
+    }
+
+    func handleVoiceModifierFlagsChanged(
+        _ event: NSEvent,
         client: any IMKTextInput
     ) -> Bool {
-        let bundleIdentifier = client.bundleIdentifier()
-            ?? "unknown-client"
-        return settings.voiceEnabled
-            && isHostActive
-            && settings.isAIAllowed(for: bundleIdentifier)
-            && !composition.hasComposition
-            && client.markedRange().location == NSNotFound
-            && !composition.isSecureInput
-            && !IsSecureEventInputEnabled()
+        // 语音未启用时右 ⌘ 点按不构成任何语音意图：保持静默，也不弹出提示。
+        guard settings.voiceEnabled else {
+            resetVoiceModifierTapDetectors()
+            return false
+        }
+        VoiceGlobalHotKeyService.shared.handleFlagsChanged(
+            keyCode: event.keyCode,
+            modifierFlags: event.modifierFlags,
+            timestamp: event.timestamp,
+            controller: self,
+            client: client
+        )
+        return false
     }
 
     func finishVoiceDictation() {
@@ -159,68 +272,29 @@ extension RimeAIInputController {
     }
 
     func configureVoiceHotKey() {
-        let runtime = VoiceDictationRuntime.shared
         if IsSecureEventInputEnabled() {
             // 覆盖 Carbon 轮询 tick 之间刚进入 Secure Input 的窗口，并
             // 记录本 controller 的安全态，以便后续真实键事件恢复注册。
             enterSecureInputIfPossible()
             return
         }
-        let activeInputClient = activeClientObject as? any IMKTextInput
-        let bundleIdentifier = currentBundleIdentifier
-            ?? activeInputClient?.bundleIdentifier()
-            ?? "unknown-client"
-        let canRegister = isHostActive
-            && activeInputClient != nil
-            && settings.voiceEnabled
-            && settings.isAIAllowed(for: bundleIdentifier)
-            && composition.pinyin.isEmpty
-            && activeInputClient?.markedRange().location == NSNotFound
-            && !composition.isSecureInput
-            && runtime.canRegisterHotKey
-        guard canRegister else {
-            VoiceHotKeyManager.shared.deactivate(owner: self)
-            voiceHotKeyIsRegistered = false
-            return
-        }
-        do {
-            try VoiceHotKeyManager.shared.activate(
-                owner: self,
-                shortcut: settings.voiceShortcut,
-                onPressed: { [weak self] in
-                    guard let self,
-                          let client = self.activeClientObject
-                            as? any IMKTextInput
-                    else {
-                        return
-                    }
-                    if !VoiceDictationRuntime.shared.isActive(owner: self) {
-                        _ = self.startVoiceDictation(client: client)
-                    }
-                },
-                onReleased: { [weak self] in
-                    guard let self else {
-                        return
-                    }
-                    self.finishVoiceDictation()
-                },
-                onSecureInputDetected: { [weak self] in
-                    guard let self else {
-                        return
-                    }
-                    self.voiceHotKeyIsRegistered = false
-                    self.enterSecureInputIfPossible()
-                }
-            )
+        VoiceGlobalHotKeyService.shared.reconcileHotKeys()
+        if case .registered = VoiceHotKeyManager.shared.registrationStatus {
             voiceHotKeyIsRegistered = true
             voiceHotKeyRegistrationFailed = false
-        } catch {
+        } else {
             voiceHotKeyIsRegistered = false
-            if !voiceHotKeyRegistrationFailed {
-                settings.record(.voiceFailure)
-            }
-            voiceHotKeyRegistrationFailed = true
         }
+        if case .registered = VoiceHotKeyManager.shared.translateRegistrationStatus {
+            voiceTranslateHotKeyIsRegistered = true
+        } else {
+            voiceTranslateHotKeyIsRegistered = false
+        }
+    }
+
+    func clearVoiceTranslationHotKeyRegistration() {
+        VoiceGlobalHotKeyService.shared.reconcileHotKeys()
+        voiceTranslateHotKeyIsRegistered = false
     }
 }
 
@@ -239,7 +313,7 @@ extension RimeAIInputController {
               currentBundleIdentifier
                 == (inputClient.bundleIdentifier() ?? "unknown-client"),
               !composition.hasComposition,
-              inputClient.markedRange().location == NSNotFound,
+              !VoiceClientMarkedRangePolicy.hasMarkedText(inputClient.markedRange()),
               !composition.isSecureInput,
               !IsSecureEventInputEnabled(),
               inputClient.selectedRange() == selection
@@ -270,14 +344,33 @@ extension RimeAIInputController {
         ),
         let inputClient = client as? any IMKTextInput,
         !text.isEmpty,
-        text.count <= VoiceDictationConstants.maximumTextCharacters,
-        !text.contains("\n"),
-        !text.contains("\r")
+        !text.contains("\r"),
+        !text.unicodeScalars.contains(where: {
+            ($0.value < 0x20 && $0.value != 0x0A) || $0.value == 0x7F
+        })
         else {
             return false
         }
 
+        // 上屏前记下插入区段的原有内容：部分宿主（Electron/网页输入框）的
+        // insertText 会“成功返回”却什么也没写入。
+        let insertedRange = NSRange(location: selection.location, length: text.utf16.count)
+        let readback: (NSRange) -> String? = { range in
+            inputClient.attributedSubstring(from: range)?.string
+        }
+        let baseline = readback(insertedRange)
+        let caretBefore = inputClient.selectedRange()
         inputClient.insertText(text, replacementRange: notFoundRange)
+        if VoiceCommitReadback.verify(
+            committedText: text,
+            baseline: baseline,
+            readback: readback(insertedRange),
+            caretBefore: caretBefore.location == NSNotFound ? nil : caretBefore.location,
+            caretAfter: inputClient.selectedRange().location
+        ) == .missing {
+            // 文本并未真正写入：返回 false 以触发 ⌘V 回退。
+            return false
+        }
         if let currentBundleIdentifier,
            settings.isAIAllowed(for: currentBundleIdentifier),
            settings.contextPolicy(for: currentBundleIdentifier) != .strict
@@ -293,6 +386,7 @@ extension RimeAIInputController {
     func voiceRuntimeDidBecomeUnavailable() {
         VoiceHotKeyManager.shared.deactivate(owner: self)
         voiceHotKeyIsRegistered = false
+        voiceTranslateHotKeyIsRegistered = false
     }
 
     func voiceRuntimeDidBecomeAvailable() {
@@ -305,7 +399,9 @@ extension RimeAIInputController {
     }
 
     func voiceRectsMatch(_ lhs: NSRect, _ rhs: NSRect) -> Bool {
-        let tolerance: CGFloat = 1
+        // 放宽至 8pt 容差，避免 Electron / 浏览器输入框光标轻微抖动误触发取消；
+        // 真正切换输入框、切窗或大幅滚动仍会立即拦截。
+        let tolerance: CGFloat = 8
         return abs(lhs.minX - rhs.minX) <= tolerance
             && abs(lhs.minY - rhs.minY) <= tolerance
             && abs(lhs.width - rhs.width) <= tolerance

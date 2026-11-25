@@ -365,6 +365,10 @@ def test_real_artifact_golden_replay(group_name: str, case_id: str):
                 # 边界噪声可合法换人，但翻上来的必须是窗口内全长
                 # eligible（B-F6 守卫），preserved/尾巴永远不行。
                 assert result["ranked_candidate"] in _eligible_window_members(case)
+            elif result["decision"] in ("below_confidence", "same_top_candidate"):
+                # 边界翻到非建议分支时不会携带 ranked_candidate，而捕获快照可能记着
+                # ranked_candidate 分支下的词，这里显式断言为空。
+                assert result["ranked_candidate"] == ""
             else:
                 assert result["ranked_candidate"] == entry["ranked_candidate"]
         else:

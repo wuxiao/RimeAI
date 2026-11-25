@@ -1,17 +1,22 @@
 import asyncio
+import contextlib
 import json
-from pathlib import Path
 import stat
 import tempfile
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
+from rimeai_daemon import server as server_module
 from rimeai_daemon.__main__ import _probe_running_daemon
-from rimeai_daemon.server import RimeAIDaemonServer
-from rimeai_daemon.server import DaemonConfigurationError
-from rimeai_daemon.server import _validate_inference_request
+from rimeai_daemon.server import (
+    CLOSE_TEARDOWN_TIMEOUT_SECONDS,
+    DaemonConfigurationError,
+    RimeAIDaemonServer,
+    _validate_inference_request,
+)
 
 
 class FakeEngine:
@@ -132,6 +137,30 @@ async def _hello(reader, writer):
     assert "long-input-reasons" in response["capabilities"]
 
 
+@contextlib.asynccontextmanager
+async def _client(socket_path: Path):
+    """A connected, greeted client whose socket is always closed.
+
+    The ``finally`` matters as much as the handshake: a client leaked by
+    a failed assertion keeps its handler parked on ``readline()``, and
+    on Python 3.12+ that parks ``server.close()`` too — every assertion
+    failure would turn into a hung test.
+    """
+    reader, writer = await asyncio.open_unix_connection(socket_path)
+    try:
+        hello = await _hello(reader, writer)
+        yield reader, writer, hello
+    finally:
+        writer.close()
+        with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+            await writer.wait_closed()
+
+
+def _run_scenario(scenario) -> None:
+    with tempfile.TemporaryDirectory(prefix="rai-", dir="/tmp") as directory:
+        asyncio.run(scenario(Path(directory)))
+
+
 def test_daemon_socket_permissions_handshake_and_inference():
     async def scenario(runtime_root: Path):
         socket_path = runtime_root / "runtime" / "rimeai.sock"
@@ -140,39 +169,129 @@ def test_daemon_socket_permissions_handshake_and_inference():
         try:
             assert stat.S_IMODE(socket_path.parent.stat().st_mode) == 0o700
             assert stat.S_IMODE(socket_path.stat().st_mode) == 0o600
-            reader, writer = await asyncio.open_unix_connection(socket_path)
-            await _hello(reader, writer)
-            await _write_json(
-                writer,
-                {
-                    "schema_version": 1,
-                    "type": "infer",
-                    "request_id": "request-1",
-                    "composition_id": "composition-1",
-                    "revision": 1,
-                    "app_session_id": "app-1",
-                    "context_policy": "standard",
-                    "context": "请执行这条",
-                    "pinyin": "mingling",
-                    "candidates": ["明令", "命令"],
-                    "deadline_ms": 400,
-                    "allow_sentence": True,
-                    "sensitive": False,
-                },
-            )
-            response = await _read_json(reader)
-            assert response["request_id"] == "request-1"
-            assert response["status"] == "ok"
-            assert response["ranked_candidate"] == "命令"
-            assert response["decision"] == "ranked_candidate"
-            assert response["model_artifact_id"] == "fixture-engine-v1"
-            writer.close()
-            await writer.wait_closed()
+            async with _client(socket_path) as (reader, writer, _hello):
+                await _write_json(
+                    writer,
+                    {
+                        "schema_version": 1,
+                        "type": "infer",
+                        "request_id": "request-1",
+                        "composition_id": "composition-1",
+                        "revision": 1,
+                        "app_session_id": "app-1",
+                        "context_policy": "standard",
+                        "context": "请执行这条",
+                        "pinyin": "mingling",
+                        "candidates": ["明令", "命令"],
+                        "deadline_ms": 400,
+                        "allow_sentence": True,
+                        "sensitive": False,
+                    },
+                )
+                response = await _read_json(reader)
+                assert response["request_id"] == "request-1"
+                assert response["status"] == "ok"
+                assert response["ranked_candidate"] == "命令"
+                assert response["decision"] == "ranked_candidate"
+                assert response["model_artifact_id"] == "fixture-engine-v1"
         finally:
             await server.close()
 
-    with tempfile.TemporaryDirectory(prefix="rai-", dir="/tmp") as directory:
-        asyncio.run(scenario(Path(directory)))
+    _run_scenario(scenario)
+
+
+def test_close_returns_promptly_while_an_idle_client_stays_connected():
+    # Python 3.12+ 的 Server.wait_closed() 会等所有客户端 handler 返回：
+    # 一条空闲连接停在 readline() 上时，旧实现的 close() 永不返回——
+    # 本地 daemon 关不掉，测试里任何断言失败也都会变成挂死。
+    async def scenario(runtime_root: Path):
+        socket_path = runtime_root / "runtime" / "rimeai.sock"
+        server = RimeAIDaemonServer(socket_path, FakeEngine())
+        await server.start()
+        reader, writer = await asyncio.open_unix_connection(socket_path)
+        await _hello(reader, writer)
+        try:
+            started = time.monotonic()
+            await asyncio.wait_for(server.close(), timeout=3.0)
+            assert time.monotonic() - started < 2.0
+            assert not socket_path.exists()
+            # 服务端主动断开：客户端读到 EOF，而不是被挂着。
+            assert await asyncio.wait_for(reader.read(), timeout=1.0) == b""
+            # 关闭后再次 close() 幂等、不挂。
+            await asyncio.wait_for(server.close(), timeout=1.0)
+        finally:
+            writer.close()
+            with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+                await writer.wait_closed()
+            await asyncio.wait_for(server.close(), timeout=5.0)
+
+    _run_scenario(scenario)
+
+
+def test_close_aborts_a_client_that_stopped_reading(monkeypatch):
+    # 对端停止读取时，优雅关闭的 flush 永远等不到：宽限期后必须 abort
+    # 掉仍持有未发字节的连接，close() 才能确定返回。
+    async def scenario(runtime_root: Path):
+        socket_path = runtime_root / "runtime" / "rimeai.sock"
+        monkeypatch.setattr(server_module, "CLOSE_CLIENT_GRACE_SECONDS", 0.2)
+        server = RimeAIDaemonServer(socket_path, FakeEngine())
+        await server.start()
+        reader, writer = await asyncio.open_unix_connection(socket_path)
+        await _hello(reader, writer)
+        try:
+            # 持续灌入请求且一个响应都不读，直到服务端写缓冲非空（内核
+            # socket 缓冲会先吞下约 100KB，之后才轮到 asyncio 的发送缓冲）。
+            for round_index in range(12):
+                flood = "".join(
+                    json.dumps(
+                        {
+                            "schema_version": 1,
+                            "type": "infer",
+                            "request_id": f"flood-{round_index}-{index}",
+                            "composition_id": f"composition-{round_index}-{index}",
+                            "revision": 1,
+                            "app_session_id": "app-1",
+                            "context_policy": "strict",
+                            "context": "",
+                            "pinyin": "mingling",
+                            "candidates": ["明令", "命令"],
+                            "deadline_ms": 400,
+                            "allow_sentence": False,
+                            "sensitive": False,
+                        }
+                    )
+                    + "\n"
+                    for index in range(500)
+                )
+                writer.write(flood.encode())
+                await asyncio.wait_for(writer.drain(), timeout=3.0)
+                await asyncio.sleep(0.3)
+                backlogged = [
+                    session
+                    for session in server._clients
+                    if session.writer.transport.get_write_buffer_size() > 0
+                ]
+                if backlogged:
+                    break
+            else:
+                pytest.skip(
+                    "socket buffers absorbed the flood; the abort path is "
+                    "not reachable on this host"
+                )
+            started = time.monotonic()
+            await asyncio.wait_for(server.close(), timeout=6.0)
+            elapsed = time.monotonic() - started
+            # 宽限期（0.2s）后由 abort 收口，而不是拖到兜底超时（5s）。
+            assert elapsed < CLOSE_TEARDOWN_TIMEOUT_SECONDS / 2, elapsed
+            assert server._clients == set()
+            assert not socket_path.exists()
+        finally:
+            writer.close()
+            with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+                await writer.wait_closed()
+            await asyncio.wait_for(server.close(), timeout=6.0)
+
+    _run_scenario(scenario)
 
 
 def test_release_health_probe_validates_artifact_and_offline_lock():
@@ -212,47 +331,43 @@ def test_daemon_emits_long_input_abstentions_without_partial_text():
         )
         await server.start()
         try:
-            reader, writer = await asyncio.open_unix_connection(socket_path)
-            await _hello(reader, writer)
-            for revision, decision in enumerate(
-                (
-                    "sentence_too_long",
-                    "sentence_incomplete",
-                    "insufficient_candidates",
-                ),
-                start=1,
-            ):
-                await _write_json(
-                    writer,
-                    {
-                        "schema_version": 1,
-                        "type": "infer",
-                        "request_id": f"long-input-{revision}",
-                        "composition_id": f"composition-{revision}",
-                        "revision": revision,
-                        "app_session_id": "app-1",
-                        "context_policy": "standard",
-                        "context": decision,
-                        "pinyin": "shifou",
-                        "candidates": ["是否", "是", "时"],
-                        "deadline_ms": 400,
-                        "allow_sentence": True,
-                        "sensitive": False,
-                    },
-                )
-                response = await _read_json(reader)
-                assert response["status"] == "ok"
-                assert response["decision"] == decision
-                assert response["ranked_candidate"] == ""
-                assert response["sentence_suggestion"] == ""
-                assert response["confidence"] == 0.0
-            writer.close()
-            await writer.wait_closed()
+            async with _client(socket_path) as (reader, writer, _hello):
+                for revision, decision in enumerate(
+                    (
+                        "sentence_too_long",
+                        "sentence_incomplete",
+                        "insufficient_candidates",
+                    ),
+                    start=1,
+                ):
+                    await _write_json(
+                        writer,
+                        {
+                            "schema_version": 1,
+                            "type": "infer",
+                            "request_id": f"long-input-{revision}",
+                            "composition_id": f"composition-{revision}",
+                            "revision": revision,
+                            "app_session_id": "app-1",
+                            "context_policy": "standard",
+                            "context": decision,
+                            "pinyin": "shifou",
+                            "candidates": ["是否", "是", "时"],
+                            "deadline_ms": 400,
+                            "allow_sentence": True,
+                            "sensitive": False,
+                        },
+                    )
+                    response = await _read_json(reader)
+                    assert response["status"] == "ok"
+                    assert response["decision"] == decision
+                    assert response["ranked_candidate"] == ""
+                    assert response["sentence_suggestion"] == ""
+                    assert response["confidence"] == 0.0
         finally:
             await server.close()
 
-    with tempfile.TemporaryDirectory(prefix="rai-", dir="/tmp") as directory:
-        asyncio.run(scenario(Path(directory)))
+    _run_scenario(scenario)
 
 
 def test_latest_request_wins_and_old_result_is_never_emitted():
@@ -261,56 +376,52 @@ def test_latest_request_wins_and_old_result_is_never_emitted():
         server = RimeAIDaemonServer(socket_path, FakeEngine())
         await server.start()
         try:
-            reader, writer = await asyncio.open_unix_connection(socket_path)
-            await _hello(reader, writer)
-            base = {
-                "schema_version": 1,
-                "type": "infer",
-                "composition_id": "composition-1",
-                "app_session_id": "app-1",
-                "context_policy": "standard",
-                "context": "上下文",
-                "candidates": ["第一", "第二"],
-                "deadline_ms": 400,
-                "allow_sentence": False,
-                "sensitive": False,
-            }
-            await _write_json(
-                writer,
-                {
-                    **base,
-                    "request_id": "old",
-                    "revision": 1,
-                    "pinyin": "slow",
-                },
-            )
-            await asyncio.sleep(0.01)
-            await _write_json(
-                writer,
-                {
-                    **base,
-                    "request_id": "new",
-                    "revision": 2,
-                    "pinyin": "fast",
-                },
-            )
+            async with _client(socket_path) as (reader, writer, _hello):
+                base = {
+                    "schema_version": 1,
+                    "type": "infer",
+                    "composition_id": "composition-1",
+                    "app_session_id": "app-1",
+                    "context_policy": "standard",
+                    "context": "上下文",
+                    "candidates": ["第一", "第二"],
+                    "deadline_ms": 400,
+                    "allow_sentence": False,
+                    "sensitive": False,
+                }
+                await _write_json(
+                    writer,
+                    {
+                        **base,
+                        "request_id": "old",
+                        "revision": 1,
+                        "pinyin": "slow",
+                    },
+                )
+                await asyncio.sleep(0.01)
+                await _write_json(
+                    writer,
+                    {
+                        **base,
+                        "request_id": "new",
+                        "revision": 2,
+                        "pinyin": "fast",
+                    },
+                )
 
-            response = await asyncio.wait_for(_read_json(reader), 0.3)
-            assert response["request_id"] == "new"
-            assert response["status"] == "ok"
-            try:
-                await asyncio.wait_for(reader.readline(), 0.15)
-            except asyncio.TimeoutError:
-                pass
-            else:
-                raise AssertionError("the stale request emitted a response")
-            writer.close()
-            await writer.wait_closed()
+                response = await asyncio.wait_for(_read_json(reader), 0.3)
+                assert response["request_id"] == "new"
+                assert response["status"] == "ok"
+                try:
+                    await asyncio.wait_for(reader.readline(), 0.15)
+                except asyncio.TimeoutError:
+                    pass
+                else:
+                    raise AssertionError("the stale request emitted a response")
         finally:
             await server.close()
 
-    with tempfile.TemporaryDirectory(prefix="rai-", dir="/tmp") as directory:
-        asyncio.run(scenario(Path(directory)))
+    _run_scenario(scenario)
 
 
 def test_deadline_and_sensitive_policy_fail_closed():
@@ -319,46 +430,42 @@ def test_deadline_and_sensitive_policy_fail_closed():
         server = RimeAIDaemonServer(socket_path, FakeEngine())
         await server.start()
         try:
-            reader, writer = await asyncio.open_unix_connection(socket_path)
-            await _hello(reader, writer)
-            request = {
-                "schema_version": 1,
-                "type": "infer",
-                "composition_id": "composition-1",
-                "revision": 1,
-                "app_session_id": "app-1",
-                "context_policy": "strict",
-                "context": "",
-                "pinyin": "slow",
-                "candidates": ["第一", "第二"],
-                "deadline_ms": 10,
-                "allow_sentence": False,
-                "sensitive": False,
-            }
-            await _write_json(
-                writer, {**request, "request_id": "deadline"}
-            )
-            timeout_response = await _read_json(reader)
-            assert timeout_response["status"] == "timeout"
+            async with _client(socket_path) as (reader, writer, _hello):
+                request = {
+                    "schema_version": 1,
+                    "type": "infer",
+                    "composition_id": "composition-1",
+                    "revision": 1,
+                    "app_session_id": "app-1",
+                    "context_policy": "strict",
+                    "context": "",
+                    "pinyin": "slow",
+                    "candidates": ["第一", "第二"],
+                    "deadline_ms": 10,
+                    "allow_sentence": False,
+                    "sensitive": False,
+                }
+                await _write_json(
+                    writer, {**request, "request_id": "deadline"}
+                )
+                timeout_response = await _read_json(reader)
+                assert timeout_response["status"] == "timeout"
 
-            await _write_json(
-                writer,
-                {
-                    **request,
-                    "request_id": "sensitive",
-                    "pinyin": "fast",
-                    "sensitive": True,
-                },
-            )
-            privacy_response = await _read_json(reader)
-            assert privacy_response["status"] == "privacy_blocked"
-            writer.close()
-            await writer.wait_closed()
+                await _write_json(
+                    writer,
+                    {
+                        **request,
+                        "request_id": "sensitive",
+                        "pinyin": "fast",
+                        "sensitive": True,
+                    },
+                )
+                privacy_response = await _read_json(reader)
+                assert privacy_response["status"] == "privacy_blocked"
         finally:
             await server.close()
 
-    with tempfile.TemporaryDirectory(prefix="rai-", dir="/tmp") as directory:
-        asyncio.run(scenario(Path(directory)))
+    _run_scenario(scenario)
 
 
 def test_native_inference_remains_serial_after_a_request_times_out():
@@ -368,48 +475,44 @@ def test_native_inference_remains_serial_after_a_request_times_out():
         server = RimeAIDaemonServer(socket_path, engine)
         await server.start()
         try:
-            reader, writer = await asyncio.open_unix_connection(socket_path)
-            await _hello(reader, writer)
-            base = {
-                "schema_version": 1,
-                "type": "infer",
-                "revision": 1,
-                "app_session_id": "app-serial",
-                "context_policy": "strict",
-                "context": "",
-                "pinyin": "mingling",
-                "candidates": ["明令", "命令"],
-                "allow_sentence": False,
-                "sensitive": False,
-            }
-            await _write_json(
-                writer,
-                {
-                    **base,
-                    "request_id": "times-out",
-                    "composition_id": "composition-timeout",
-                    "deadline_ms": 10,
-                },
-            )
-            assert (await _read_json(reader))["status"] == "timeout"
-            await _write_json(
-                writer,
-                {
-                    **base,
-                    "request_id": "after-timeout",
-                    "composition_id": "composition-after",
-                    "deadline_ms": 400,
-                },
-            )
-            assert (await _read_json(reader))["status"] == "ok"
-            assert engine.maximum_active == 1
-            writer.close()
-            await writer.wait_closed()
+            async with _client(socket_path) as (reader, writer, _hello):
+                base = {
+                    "schema_version": 1,
+                    "type": "infer",
+                    "revision": 1,
+                    "app_session_id": "app-serial",
+                    "context_policy": "strict",
+                    "context": "",
+                    "pinyin": "mingling",
+                    "candidates": ["明令", "命令"],
+                    "allow_sentence": False,
+                    "sensitive": False,
+                }
+                await _write_json(
+                    writer,
+                    {
+                        **base,
+                        "request_id": "times-out",
+                        "composition_id": "composition-timeout",
+                        "deadline_ms": 10,
+                    },
+                )
+                assert (await _read_json(reader))["status"] == "timeout"
+                await _write_json(
+                    writer,
+                    {
+                        **base,
+                        "request_id": "after-timeout",
+                        "composition_id": "composition-after",
+                        "deadline_ms": 400,
+                    },
+                )
+                assert (await _read_json(reader))["status"] == "ok"
+                assert engine.maximum_active == 1
         finally:
             await server.close()
 
-    with tempfile.TemporaryDirectory(prefix="rai-", dir="/tmp") as directory:
-        asyncio.run(scenario(Path(directory)))
+    _run_scenario(scenario)
 
 
 def test_daemon_refuses_to_replace_an_active_socket():
@@ -503,48 +606,44 @@ def test_segmented_infer_request_passes_validation_and_returns_joined_sentence()
         server = RimeAIDaemonServer(socket_path, engine)
         await server.start()
         try:
-            reader, writer = await asyncio.open_unix_connection(socket_path)
-            await _hello(reader, writer)
-            await _write_json(
-                writer,
-                {
-                    "schema_version": 1,
-                    "type": "infer",
-                    "request_id": "segment-1",
-                    "composition_id": "composition-1",
-                    "revision": 1,
-                    "app_session_id": "app-1",
-                    "context_policy": "standard",
-                    "context": "请执行这条",
-                    "pinyin": "shi",
-                    "candidates": ["是", "时"],
-                    "deadline_ms": 400,
-                    "allow_sentence": True,
-                    "sensitive": False,
-                    "segments": [
-                        {
-                            "pinyin": "mingling",
-                            "separator": "，",
-                            "committed_text": "明令",
-                        },
-                        {"pinyin": "shi", "separator": ""},
-                    ],
-                },
-            )
-            response = await _read_json(reader)
-            writer.close()
-            await writer.wait_closed()
-            assert response["status"] == "ok"
-            assert response["decision"] == "sentence_suggestion"
-            assert response["sentence_suggestion"] == "明令，时"
-            assert engine.last_segments is not None
-            assert engine.last_segments[0]["committed_text"] == "明令"
-            assert engine.last_segments[1].get("committed_text") is None
+            async with _client(socket_path) as (reader, writer, _hello):
+                await _write_json(
+                    writer,
+                    {
+                        "schema_version": 1,
+                        "type": "infer",
+                        "request_id": "segment-1",
+                        "composition_id": "composition-1",
+                        "revision": 1,
+                        "app_session_id": "app-1",
+                        "context_policy": "standard",
+                        "context": "请执行这条",
+                        "pinyin": "shi",
+                        "candidates": ["是", "时"],
+                        "deadline_ms": 400,
+                        "allow_sentence": True,
+                        "sensitive": False,
+                        "segments": [
+                            {
+                                "pinyin": "mingling",
+                                "separator": "，",
+                                "committed_text": "明令",
+                            },
+                            {"pinyin": "shi", "separator": ""},
+                        ],
+                    },
+                )
+                response = await _read_json(reader)
+                assert response["status"] == "ok"
+                assert response["decision"] == "sentence_suggestion"
+                assert response["sentence_suggestion"] == "明令，时"
+                assert engine.last_segments is not None
+                assert engine.last_segments[0]["committed_text"] == "明令"
+                assert engine.last_segments[1].get("committed_text") is None
         finally:
             await server.close()
 
-    with tempfile.TemporaryDirectory(prefix="rai-", dir="/tmp") as directory:
-        asyncio.run(scenario(Path(directory)))
+    _run_scenario(scenario)
 
 
 def test_segmented_request_with_mismatched_active_pinyin_rejected():
@@ -607,51 +706,47 @@ def test_invalid_engine_output_opens_the_circuit():
         server = RimeAIDaemonServer(socket_path, InvalidEngine())
         await server.start()
         try:
-            reader, writer = await asyncio.open_unix_connection(socket_path)
-            await _hello(reader, writer)
-            base = {
-                "schema_version": 1,
-                "type": "infer",
-                "app_session_id": "app-1",
-                "context_policy": "strict",
-                "context": "",
-                "pinyin": "mingling",
-                "candidates": ["明令", "命令"],
-                "deadline_ms": 400,
-                "allow_sentence": True,
-                "sensitive": False,
-            }
-            for revision in range(1, 4):
+            async with _client(socket_path) as (reader, writer, _hello):
+                base = {
+                    "schema_version": 1,
+                    "type": "infer",
+                    "app_session_id": "app-1",
+                    "context_policy": "strict",
+                    "context": "",
+                    "pinyin": "mingling",
+                    "candidates": ["明令", "命令"],
+                    "deadline_ms": 400,
+                    "allow_sentence": True,
+                    "sensitive": False,
+                }
+                for revision in range(1, 4):
+                    await _write_json(
+                        writer,
+                        {
+                            **base,
+                            "request_id": f"bad-{revision}",
+                            "composition_id": f"composition-{revision}",
+                            "revision": revision,
+                        },
+                    )
+                    response = await _read_json(reader)
+                    assert response["status"] == "engine_error"
+
                 await _write_json(
                     writer,
                     {
                         **base,
-                        "request_id": f"bad-{revision}",
-                        "composition_id": f"composition-{revision}",
-                        "revision": revision,
+                        "request_id": "circuit",
+                        "composition_id": "composition-4",
+                        "revision": 4,
                     },
                 )
                 response = await _read_json(reader)
-                assert response["status"] == "engine_error"
-
-            await _write_json(
-                writer,
-                {
-                    **base,
-                    "request_id": "circuit",
-                    "composition_id": "composition-4",
-                    "revision": 4,
-                },
-            )
-            response = await _read_json(reader)
-            assert response["status"] == "circuit_open"
-            writer.close()
-            await writer.wait_closed()
+                assert response["status"] == "circuit_open"
         finally:
             await server.close()
 
-    with tempfile.TemporaryDirectory(prefix="rai-", dir="/tmp") as directory:
-        asyncio.run(scenario(Path(directory)))
+    _run_scenario(scenario)
 
 
 def test_explicit_cancel_acknowledges_and_never_emits_a_result():
@@ -660,54 +755,50 @@ def test_explicit_cancel_acknowledges_and_never_emits_a_result():
         server = RimeAIDaemonServer(socket_path, FakeEngine())
         await server.start()
         try:
-            reader, writer = await asyncio.open_unix_connection(socket_path)
-            await _hello(reader, writer)
-            await _write_json(
-                writer,
-                {
-                    "schema_version": 1,
-                    "type": "infer",
+            async with _client(socket_path) as (reader, writer, _hello):
+                await _write_json(
+                    writer,
+                    {
+                        "schema_version": 1,
+                        "type": "infer",
+                        "request_id": "cancel-me",
+                        "composition_id": "composition-1",
+                        "revision": 1,
+                        "app_session_id": "app-1",
+                        "context_policy": "strict",
+                        "context": "",
+                        "pinyin": "slow",
+                        "candidates": ["第一", "第二"],
+                        "deadline_ms": 400,
+                        "allow_sentence": False,
+                        "sensitive": False,
+                    },
+                )
+                await _write_json(
+                    writer,
+                    {
+                        "schema_version": 1,
+                        "type": "cancel",
+                        "request_id": "cancel-me",
+                    },
+                )
+                response = await _read_json(reader)
+                assert response == {
                     "request_id": "cancel-me",
-                    "composition_id": "composition-1",
-                    "revision": 1,
-                    "app_session_id": "app-1",
-                    "context_policy": "strict",
-                    "context": "",
-                    "pinyin": "slow",
-                    "candidates": ["第一", "第二"],
-                    "deadline_ms": 400,
-                    "allow_sentence": False,
-                    "sensitive": False,
-                },
-            )
-            await _write_json(
-                writer,
-                {
                     "schema_version": 1,
-                    "type": "cancel",
-                    "request_id": "cancel-me",
-                },
-            )
-            response = await _read_json(reader)
-            assert response == {
-                "request_id": "cancel-me",
-                "schema_version": 1,
-                "status": "ok",
-                "type": "cancelled",
-            }
-            try:
-                await asyncio.wait_for(reader.readline(), 0.15)
-            except asyncio.TimeoutError:
-                pass
-            else:
-                raise AssertionError("cancelled inference emitted a result")
-            writer.close()
-            await writer.wait_closed()
+                    "status": "ok",
+                    "type": "cancelled",
+                }
+                try:
+                    await asyncio.wait_for(reader.readline(), 0.15)
+                except asyncio.TimeoutError:
+                    pass
+                else:
+                    raise AssertionError("cancelled inference emitted a result")
         finally:
             await server.close()
 
-    with tempfile.TemporaryDirectory(prefix="rai-", dir="/tmp") as directory:
-        asyncio.run(scenario(Path(directory)))
+    _run_scenario(scenario)
 
 
 def test_latest_revision_map_is_bounded():
@@ -718,46 +809,41 @@ def test_latest_revision_map_is_bounded():
         server = RimeAIDaemonServer(socket_path, FakeEngine())
         await server.start()
         try:
-            reader, writer = await asyncio.open_unix_connection(socket_path)
-            await _hello(reader, writer)
+            async with _client(socket_path) as (reader, writer, _hello):
 
-            def infer_message(index: int, revision: int = 1):
-                return {
-                    "schema_version": 1,
-                    "type": "infer",
-                    "request_id": f"request-{index}",
-                    "composition_id": f"composition-{index}",
-                    "revision": revision,
-                    "app_session_id": "app-1",
-                    "context_policy": "strict",
-                    "context": "",
-                    "pinyin": "m",
-                    "candidates": ["命令"],
-                    "deadline_ms": 500,
-                    "allow_sentence": False,
-                    "sensitive": False,
-                }
+                def infer_message(index: int, revision: int = 1):
+                    return {
+                        "schema_version": 1,
+                        "type": "infer",
+                        "request_id": f"request-{index}",
+                        "composition_id": f"composition-{index}",
+                        "revision": revision,
+                        "app_session_id": "app-1",
+                        "context_policy": "strict",
+                        "context": "",
+                        "pinyin": "m",
+                        "candidates": ["命令"],
+                        "deadline_ms": 500,
+                        "allow_sentence": False,
+                        "sensitive": False,
+                    }
 
-            for index in range(1_100):
-                await _write_json(writer, infer_message(index))
-            for _ in range(1_100):
+                for index in range(1_100):
+                    await _write_json(writer, infer_message(index))
+                for _ in range(1_100):
+                    response = await _read_json(reader)
+                    assert response["status"] == "ok"
+
+                # Key 0 fell out of the bounded map: its revision is unknown
+                # again, so the same revision is accepted rather than stale.
+                await _write_json(writer, infer_message(0))
+                assert (await _read_json(reader))["status"] == "ok"
+
+                # Keys still in the map keep rejecting stale revisions.
+                await _write_json(writer, infer_message(1_099))
                 response = await _read_json(reader)
-                assert response["status"] == "ok"
-
-            # Key 0 fell out of the bounded map: its revision is unknown
-            # again, so the same revision is accepted rather than stale.
-            await _write_json(writer, infer_message(0))
-            assert (await _read_json(reader))["status"] == "ok"
-
-            # Keys still in the map keep rejecting stale revisions.
-            await _write_json(writer, infer_message(1_099))
-            response = await _read_json(reader)
-            assert response["status"] == "stale"
-
-            writer.close()
-            await writer.wait_closed()
+                assert response["status"] == "stale"
         finally:
             await server.close()
 
-    with tempfile.TemporaryDirectory(prefix="rai-", dir="/tmp") as directory:
-        asyncio.run(scenario(Path(directory)))
+    _run_scenario(scenario)

@@ -46,22 +46,48 @@ final class SettingsActionStatusCenter {
 
 @MainActor
 final class SettingsShortcutCaptureButton: NSButton {
+    /// 固定宽度的键帽样式：显示快捷键、等待录制与出错提示时宽度都不变，
+    /// 相邻控件不会跳动。
+    static let keycapWidth: CGFloat = 184
+    static let keycapHeight: CGFloat = 24
+    static let capturingTitle = "请按下新组合…（Esc 取消）"
+    static let invalidTitle = "组合不可用，请重试…（Esc 取消）"
+
     var onKeyEvent: ((UInt16, NSEvent.ModifierFlags) -> Void)?
     var onCancel: (() -> Void)?
     var onCaptureStateChanged: ((Bool) -> Void)?
 
     private(set) var isCapturing = false
     private var currentDisplayName = ""
+    private var eventMonitor: Any?
+    private var showsValidationError = false
+    private var errorResetWorkItem: DispatchWorkItem?
 
     override var acceptsFirstResponder: Bool { true }
 
     init() {
-        super.init(frame: .zero)
-        bezelStyle = .rounded
+        super.init(
+            frame: NSRect(x: 0, y: 0, width: Self.keycapWidth, height: Self.keycapHeight)
+        )
         target = self
         action = #selector(toggleCapture(_:))
+        isBordered = false
+        wantsLayer = true
+        lineBreakMode = .byTruncatingTail
+        font = .systemFont(ofSize: 12.5, weight: .regular)
+        widthAnchor.constraint(equalToConstant: Self.keycapWidth).isActive = true
+        heightAnchor.constraint(equalToConstant: Self.keycapHeight).isActive = true
         setAccessibilityLabel("编辑语音快捷键")
-        setAccessibilityHelp("点击后按下新的快捷键；按 Esc 取消。")
+        setAccessibilityHelp("点击后按下新的快捷键或右侧 Command 键；按 Esc 取消。")
+        refreshKeycapColors()
+    }
+
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: Self.keycapWidth, height: Self.keycapHeight)
+    }
+
+    isolated deinit {
+        removeEventMonitor()
     }
 
     @available(*, unavailable)
@@ -83,23 +109,30 @@ final class SettingsShortcutCaptureButton: NSButton {
             return
         }
         isCapturing = true
-        title = "请按下新快捷键…（Esc 取消）"
+        showsValidationError = false
+        title = Self.capturingTitle
         setAccessibilityValue("正在等待新快捷键")
         onCaptureStateChanged?(true)
         window?.makeFirstResponder(self)
+        installEventMonitor()
+        refreshKeycapColors()
     }
 
+    /// 无效或冲突的组合：红色描边 + 抖动，录制继续等待下一次按键。
     func showValidationFailure() {
         guard isCapturing else {
             return
         }
-        title = "组合不可用，请重试…（Esc 取消）"
+        title = Self.invalidTitle
         setAccessibilityValue("快捷键组合不可用，正在等待重试")
         NSAccessibility.post(element: self, notification: .valueChanged)
+        flashValidationError()
     }
 
     func finishCapture(displayName: String) {
+        removeEventMonitor()
         isCapturing = false
+        clearValidationError()
         showShortcut(displayName)
         onCaptureStateChanged?(false)
         NSAccessibility.post(element: self, notification: .valueChanged)
@@ -109,11 +142,115 @@ final class SettingsShortcutCaptureButton: NSButton {
         guard isCapturing else {
             return
         }
+        removeEventMonitor()
         isCapturing = false
+        clearValidationError()
         showShortcut(currentDisplayName)
         onCaptureStateChanged?(false)
         onCancel?()
         NSAccessibility.post(element: self, notification: .valueChanged)
+    }
+
+    // MARK: - 键帽外观
+
+    private func flashValidationError() {
+        showsValidationError = true
+        refreshKeycapColors()
+        if let layer {
+            let shake = CAKeyframeAnimation(keyPath: "transform.translation.x")
+            shake.values = [-5, 5, -4, 4, -2, 2, 0]
+            shake.duration = 0.36
+            shake.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            layer.add(shake, forKey: "validationShake")
+            CATransaction.commit()
+        }
+        errorResetWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated {
+                self?.clearValidationError()
+            }
+        }
+        errorResetWorkItem = work
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + 1.2,
+            execute: work
+        )
+    }
+
+    private func clearValidationError() {
+        errorResetWorkItem?.cancel()
+        errorResetWorkItem = nil
+        guard showsValidationError else {
+            return
+        }
+        showsValidationError = false
+        refreshKeycapColors()
+    }
+
+    private func refreshKeycapColors() {
+        layer?.cornerRadius = 6
+        layer?.masksToBounds = true
+        layer?.borderWidth = 1
+        if showsValidationError {
+            layer?.borderColor = NSColor.systemRed.cgColor
+            layer?.backgroundColor = NSColor.systemRed
+                .withAlphaComponent(0.12).cgColor
+            contentTintColor = .systemRed
+        } else if isCapturing {
+            layer?.borderColor = NSColor.controlAccentColor.cgColor
+            layer?.backgroundColor = NSColor.controlAccentColor
+                .withAlphaComponent(0.08).cgColor
+            contentTintColor = .controlAccentColor
+        } else {
+            layer?.borderColor = NSColor.separatorColor.cgColor
+            layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
+            contentTintColor = .labelColor
+        }
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        refreshKeycapColors()
+    }
+
+    // MARK: - 录制
+
+    private func installEventMonitor() {
+        removeEventMonitor()
+        eventMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.keyDown, .flagsChanged]
+        ) { [weak self] event in
+            guard let self, self.isCapturing else {
+                return event
+            }
+            if event.type == .flagsChanged {
+                let semantic = event.modifierFlags.intersection(
+                    .deviceIndependentFlagsMask
+                )
+                if event.keyCode == VoiceDictationShortcut.rightCommandKeyCode,
+                   semantic == [.command]
+                {
+                    self.onKeyEvent?(event.keyCode, event.modifierFlags)
+                    return nil
+                }
+                return event
+            }
+            if event.keyCode == 53 {
+                self.cancelCapture()
+                return nil
+            }
+            self.onKeyEvent?(event.keyCode, event.modifierFlags)
+            return nil
+        }
+    }
+
+    private func removeEventMonitor() {
+        if let monitor = eventMonitor {
+            NSEvent.removeMonitor(monitor)
+            eventMonitor = nil
+        }
     }
 
     override func keyDown(with event: NSEvent) {
@@ -126,6 +263,23 @@ final class SettingsShortcutCaptureButton: NSButton {
             return
         }
         onKeyEvent?(event.keyCode, event.modifierFlags)
+    }
+
+    override func flagsChanged(with event: NSEvent) {
+        guard isCapturing else {
+            super.flagsChanged(with: event)
+            return
+        }
+        let semantic = event.modifierFlags.intersection(
+            .deviceIndependentFlagsMask
+        )
+        if event.keyCode == VoiceDictationShortcut.rightCommandKeyCode,
+           semantic == [.command]
+        {
+            onKeyEvent?(event.keyCode, event.modifierFlags)
+            return
+        }
+        super.flagsChanged(with: event)
     }
 
     override func resignFirstResponder() -> Bool {

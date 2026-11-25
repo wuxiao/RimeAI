@@ -69,6 +69,10 @@ public enum RimeAIDiagnosticEvent: String, CaseIterable, Codable, Sendable {
     case voiceMicrophoneDenied = "voice_microphone_denied"
     case voiceFailure = "voice_failure"
     case voiceDisabled = "voice_disabled"
+    case voicePolished = "voice_polished"
+    case voiceTranslated = "voice_translated"
+    case voiceAutoPasted = "voice_auto_pasted"
+    case voiceCorrectionLearned = "voice_correction_learned"
     case continuationRequested = "continuation_requested"
     case continuationShown = "continuation_shown"
     case continuationAccepted = "continuation_accepted"
@@ -102,6 +106,21 @@ public struct RimeAISettingsExport: Codable, Equatable, Sendable {
         case voiceEnabled
         case voiceShortcut
         case voiceRimeHotwordsEnabled
+        case voicePhraseBookHotwordsEnabled
+        case voiceCustomHotwords
+        case voiceAutoLearnCorrectionsEnabled
+        case voiceLearnedCorrections
+        case voiceLearnedCorrectionsOrder
+        case voiceHistoryEnabled
+        case voiceSmartPolishEnabled
+        case voicePolishStyle
+        case voiceTranslateShortcut
+        case voiceTranslateTargetLanguage
+        case voiceAutoPasteEnabled
+        case voiceSoundEffectsEnabled
+        case voiceMuteSystemAudioEnabled
+        case voiceCloudHotwordsEnabled
+        case voiceAXFallbackReadEnabled
         case continuationSuggestionEnabled
         case contextPolicy
         case disabledAIApplications
@@ -120,6 +139,27 @@ public struct RimeAISettingsExport: Codable, Equatable, Sendable {
     public let voiceEnabled: Bool
     public let voiceShortcut: VoiceDictationShortcut
     public let voiceRimeHotwordsEnabled: Bool
+    public let voicePhraseBookHotwordsEnabled: Bool
+    public let voiceCustomHotwords: [String]
+    public let voiceAutoLearnCorrectionsEnabled: Bool
+    /// 错词 → 正词映射（无序）；`voiceLearnedCorrectionsOrder` 保存其最近使用顺序。
+    public let voiceLearnedCorrections: [String: String]
+    /// 学习到的纠错词条的最近使用顺序（旧 → 新）。128 条上限淘汰的是最旧条目，
+    /// 因此必须与映射一起导出 / 导入，否则导入后新学词条会被字母序淘汰。
+    public let voiceLearnedCorrectionsOrder: [String]
+    public let voiceHistoryEnabled: Bool
+    public let voiceSmartPolishEnabled: Bool
+    public let voicePolishStyle: VoicePolishStyle
+    public let voiceTranslateShortcut: VoiceDictationShortcut
+    public let voiceTranslateTargetLanguage: VoiceTranslationLanguage
+    public let voiceAutoPasteEnabled: Bool
+    public let voiceSoundEffectsEnabled: Bool
+    public let voiceMuteSystemAudioEnabled: Bool
+    /// 允许云端润色 / 翻译请求携带热词上下文（独立 opt-in，默认关闭）。
+    public let voiceCloudHotwordsEnabled: Bool
+    /// 允许在无法直接读取编辑结果时使用只读辅助功能（AX）回退回读
+    /// （独立 opt-in，默认关闭）。
+    public let voiceAXFallbackReadEnabled: Bool
     public let continuationSuggestionEnabled: Bool
     public let contextPolicy: ContextPolicy
     public let disabledAIApplications: [String]
@@ -138,6 +178,21 @@ public struct RimeAISettingsExport: Codable, Equatable, Sendable {
         voiceEnabled: Bool = false,
         voiceShortcut: VoiceDictationShortcut = .default,
         voiceRimeHotwordsEnabled: Bool = false,
+        voicePhraseBookHotwordsEnabled: Bool = true,
+        voiceCustomHotwords: [String] = [],
+        voiceAutoLearnCorrectionsEnabled: Bool = true,
+        voiceLearnedCorrections: [String: String] = [:],
+        voiceLearnedCorrectionsOrder: [String] = [],
+        voiceHistoryEnabled: Bool = true,
+        voiceSmartPolishEnabled: Bool = true,
+        voicePolishStyle: VoicePolishStyle = .concise,
+        voiceTranslateShortcut: VoiceDictationShortcut = .defaultTranslate,
+        voiceTranslateTargetLanguage: VoiceTranslationLanguage = .autoEnZh,
+        voiceAutoPasteEnabled: Bool = true,
+        voiceSoundEffectsEnabled: Bool = true,
+        voiceMuteSystemAudioEnabled: Bool = true,
+        voiceCloudHotwordsEnabled: Bool = false,
+        voiceAXFallbackReadEnabled: Bool = false,
         continuationSuggestionEnabled: Bool = false,
         contextPolicy: ContextPolicy,
         disabledAIApplications: [String],
@@ -155,6 +210,21 @@ public struct RimeAISettingsExport: Codable, Equatable, Sendable {
         self.voiceEnabled = voiceEnabled
         self.voiceShortcut = voiceShortcut
         self.voiceRimeHotwordsEnabled = voiceRimeHotwordsEnabled
+        self.voicePhraseBookHotwordsEnabled = voicePhraseBookHotwordsEnabled
+        self.voiceCustomHotwords = voiceCustomHotwords
+        self.voiceAutoLearnCorrectionsEnabled = voiceAutoLearnCorrectionsEnabled
+        self.voiceLearnedCorrections = voiceLearnedCorrections
+        self.voiceLearnedCorrectionsOrder = voiceLearnedCorrectionsOrder
+        self.voiceHistoryEnabled = voiceHistoryEnabled
+        self.voiceSmartPolishEnabled = voiceSmartPolishEnabled
+        self.voicePolishStyle = voicePolishStyle
+        self.voiceTranslateShortcut = voiceTranslateShortcut
+        self.voiceTranslateTargetLanguage = voiceTranslateTargetLanguage
+        self.voiceAutoPasteEnabled = voiceAutoPasteEnabled
+        self.voiceSoundEffectsEnabled = voiceSoundEffectsEnabled
+        self.voiceMuteSystemAudioEnabled = voiceMuteSystemAudioEnabled
+        self.voiceCloudHotwordsEnabled = voiceCloudHotwordsEnabled
+        self.voiceAXFallbackReadEnabled = voiceAXFallbackReadEnabled
         self.continuationSuggestionEnabled = continuationSuggestionEnabled
         self.contextPolicy = contextPolicy
         self.disabledAIApplications = disabledAIApplications
@@ -210,6 +280,68 @@ public struct RimeAISettingsExport: Codable, Equatable, Sendable {
             Bool.self,
             forKey: .voiceRimeHotwordsEnabled
         )
+        voicePhraseBookHotwordsEnabled = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .voicePhraseBookHotwordsEnabled
+        ) ?? true
+        voiceCustomHotwords = try container.decodeIfPresent(
+            [String].self,
+            forKey: .voiceCustomHotwords
+        ) ?? []
+        voiceAutoLearnCorrectionsEnabled = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .voiceAutoLearnCorrectionsEnabled
+        ) ?? true
+        voiceLearnedCorrections = try container.decodeIfPresent(
+            [String: String].self,
+            forKey: .voiceLearnedCorrections
+        ) ?? [:]
+        voiceLearnedCorrectionsOrder = try container.decodeIfPresent(
+            [String].self,
+            forKey: .voiceLearnedCorrectionsOrder
+        ) ?? []
+        voiceHistoryEnabled = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .voiceHistoryEnabled
+        ) ?? true
+        voiceSmartPolishEnabled = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .voiceSmartPolishEnabled
+        ) ?? true
+        voicePolishStyle = try container.decodeIfPresent(
+            VoicePolishStyle.self,
+            forKey: .voicePolishStyle
+        ) ?? .concise
+        voiceTranslateShortcut = try container.decodeIfPresent(
+            VoiceDictationShortcut.self,
+            forKey: .voiceTranslateShortcut
+        ) ?? .defaultTranslate
+        voiceTranslateTargetLanguage = try container.decodeIfPresent(
+            VoiceTranslationLanguage.self,
+            forKey: .voiceTranslateTargetLanguage
+        ) ?? .autoEnZh
+        voiceAutoPasteEnabled = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .voiceAutoPasteEnabled
+        ) ?? true
+        voiceSoundEffectsEnabled = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .voiceSoundEffectsEnabled
+        ) ?? true
+        voiceMuteSystemAudioEnabled = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .voiceMuteSystemAudioEnabled
+        ) ?? true
+        // Schema-8 documents written before these opt-ins existed import as
+        // disabled: absence never grants consent.
+        voiceCloudHotwordsEnabled = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .voiceCloudHotwordsEnabled
+        ) ?? false
+        voiceAXFallbackReadEnabled = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .voiceAXFallbackReadEnabled
+        ) ?? false
         if schemaVersion >= 7 {
             continuationSuggestionEnabled = try container.decode(
                 Bool.self,
@@ -302,6 +434,32 @@ public final class RimeAISettingsStore: @unchecked Sendable {
         public static let voiceShortcut = "RimeAIVoiceShortcut"
         public static let voiceRimeHotwordsEnabled =
             "RimeAIVoiceRimeHotwordsEnabled"
+        public static let voicePhraseBookHotwordsEnabled =
+            "RimeAIVoicePhraseBookHotwordsEnabled"
+        public static let voiceCustomHotwords = "RimeAIVoiceCustomHotwords"
+        public static let voiceAutoLearnCorrectionsEnabled =
+            "RimeAIVoiceAutoLearnCorrectionsEnabled"
+        public static let voiceLearnedCorrections =
+            "RimeAIVoiceLearnedCorrections"
+        public static let voiceLearnedCorrectionsOrder =
+            "RimeAIVoiceLearnedCorrectionsOrder"
+        public static let voiceHistoryEnabled = "RimeAIVoiceHistoryEnabled"
+        public static let voiceSmartPolishEnabled =
+            "RimeAIVoiceSmartPolishEnabled"
+        public static let voicePolishStyle = "RimeAIVoicePolishStyle"
+        public static let voiceTranslateShortcut =
+            "RimeAIVoiceTranslateShortcut"
+        public static let voiceTranslateTargetLanguage =
+            "RimeAIVoiceTranslateTargetLanguage"
+        public static let voiceAutoPasteEnabled = "RimeAIVoiceAutoPasteEnabled"
+        public static let voiceSoundEffectsEnabled =
+            "RimeAIVoiceSoundEffectsEnabled"
+        public static let voiceMuteSystemAudioEnabled =
+            "RimeAIVoiceMuteSystemAudioEnabled"
+        public static let voiceCloudHotwordsEnabled =
+            "RimeAIVoiceCloudHotwordsEnabled"
+        public static let voiceAXFallbackReadEnabled =
+            "RimeAIVoiceAXFallbackReadEnabled"
         public static let contextPolicy = "RimeAIContextPolicy"
         public static let disabledAIApplications =
             "RimeAIDisabledAIApplications"
@@ -398,6 +556,8 @@ public final class RimeAISettingsStore: @unchecked Sendable {
             // The local daemon's process-wide INET guard is an invariant, not
             // a user-facing switch. Keep the legacy key pinned to true so an
             // older build cannot accidentally present a disabled lock.
+            // The requested value is deliberately ignored.
+            _ = newValue
             defaults.set(true, forKey: Keys.offlineLockEnabled)
             notifySettingsChanged()
         }
@@ -500,6 +660,466 @@ public final class RimeAISettingsStore: @unchecked Sendable {
             defaults.set(newValue, forKey: Keys.voiceRimeHotwordsEnabled)
             notifySettingsChanged()
         }
+    }
+
+    /// 允许自动把语言画像 L1 常用语库与当前域的领域词库作为语音热词上下文。
+    /// 默认开启；在 strict 上下文策略或安全输入下自动关闭。
+    public var voicePhraseBookHotwordsEnabled: Bool {
+        get {
+            guard defaults.object(
+                forKey: Keys.voicePhraseBookHotwordsEnabled
+            ) != nil else {
+                return true
+            }
+            return defaults.bool(forKey: Keys.voicePhraseBookHotwordsEnabled)
+        }
+        set {
+            defaults.set(newValue, forKey: Keys.voicePhraseBookHotwordsEnabled)
+            notifySettingsChanged()
+        }
+    }
+
+    /// 用户显式维护的语音热词 / 常用语列表（支持中英混合与专有名词，
+    /// 最多 128 条）。用于引导本地 ASR 偏置与同音词校正。
+    public var voiceCustomHotwords: [String] {
+        get {
+            Self.normalizedVoiceCustomHotwords(
+                defaults.stringArray(forKey: Keys.voiceCustomHotwords) ?? []
+            )
+        }
+        set {
+            defaults.set(
+                Self.normalizedVoiceCustomHotwords(newValue),
+                forKey: Keys.voiceCustomHotwords
+            )
+            notifySettingsChanged()
+        }
+    }
+
+    /// 语音上屏后，在短窗口内监听用户对错字的手动修正并自动收录进热词与纠错词典。
+    /// 默认开启；在 strict 上下文策略或安全输入下自动 fail-closed。
+    public var voiceAutoLearnCorrectionsEnabled: Bool {
+        get {
+            guard defaults.object(
+                forKey: Keys.voiceAutoLearnCorrectionsEnabled
+            ) != nil else {
+                return true
+            }
+            return defaults.bool(forKey: Keys.voiceAutoLearnCorrectionsEnabled)
+        }
+        set {
+            defaults.set(newValue, forKey: Keys.voiceAutoLearnCorrectionsEnabled)
+            notifySettingsChanged()
+        }
+    }
+
+    /// 从用户上屏后修改中自动学到的确定性纠错映射（错词 → 正词，最多 128 条）。
+    /// 超出上限时淘汰最近最少使用的词条，而不是按字母序淘汰。
+    public var voiceLearnedCorrections: [String: String] {
+        get {
+            Self.normalizedVoiceLearnedCorrections(
+                storedVoiceLearnedCorrections,
+                order: storedVoiceLearnedCorrectionsOrder
+            )
+        }
+        set {
+            writeVoiceLearnedCorrections(
+                newValue,
+                baseOrder: storedVoiceLearnedCorrectionsOrder
+            )
+            notifySettingsChanged()
+        }
+    }
+
+    /// 已学习纠错词条的最近使用顺序（错词，旧 → 新），与
+    /// `voiceLearnedCorrections` 的键一一对应。
+    public var voiceLearnedCorrectionsOrder: [String] {
+        Self.normalizedVoiceLearnedCorrectionsWithOrder(
+            storedVoiceLearnedCorrections,
+            order: storedVoiceLearnedCorrectionsOrder
+        ).order
+    }
+
+    private var storedVoiceLearnedCorrections: [String: String] {
+        defaults.dictionary(forKey: Keys.voiceLearnedCorrections) as? [String: String]
+            ?? [:]
+    }
+
+    private var storedVoiceLearnedCorrectionsOrder: [String] {
+        defaults.stringArray(forKey: Keys.voiceLearnedCorrectionsOrder) ?? []
+    }
+
+    /// 写入纠错映射并持久化最近使用顺序：已知词条保持原有先后，
+    /// 不在 `baseOrder` 里的词条排在已知词条之后，`promotingKey` 被提升为最新。
+    private func writeVoiceLearnedCorrections(
+        _ input: [String: String],
+        baseOrder: [String],
+        promoting promotingKey: String? = nil
+    ) {
+        var order: [String] = []
+        var seen = Set<String>()
+        let inputKeys = Set(input.keys.map(Self.normalizedVoiceCorrectionKey))
+        for key in baseOrder
+        where inputKeys.contains(key) && seen.insert(key).inserted {
+            order.append(key)
+        }
+        // 没有顺序信息的词条（旧版本只存了字典）按字母序倒序补在后面：
+        // 字母序靠后的被视为更旧、超限时先淘汰，与旧实现保持一致。
+        for key in inputKeys.sorted().reversed() where seen.insert(key).inserted {
+            order.append(key)
+        }
+        if let promotingKey {
+            order.removeAll { $0 == promotingKey }
+            order.append(promotingKey)
+        }
+
+        let normalized = Self.normalizedVoiceLearnedCorrectionsWithOrder(
+            input,
+            order: order
+        )
+        defaults.set(
+            normalized.corrections,
+            forKey: Keys.voiceLearnedCorrections
+        )
+        defaults.set(
+            normalized.order,
+            forKey: Keys.voiceLearnedCorrectionsOrder
+        )
+    }
+
+    /// 记录一条用户上屏后修正学到的词条：
+    /// 1. 写入 `wrong -> corrected` 确定性纠错映射（同时清理可能冲突的反向旧映射）；
+    /// 2. 将 `hotword` 置顶收录进 `voiceCustomHotwords`（上限 128 条）。
+    /// 返回 true 表示有新增或更新。
+    @discardableResult
+    public func recordVoiceLearnedCorrection(
+        wrong: String,
+        corrected: String,
+        hotword: String
+    ) -> Bool {
+        guard let normalizedHotword = Self.normalizedVoiceCustomHotwords([hotword]).first,
+              let normalizedCorrected = Self.normalizedVoiceCustomHotwords([corrected]).first
+        else {
+            return false
+        }
+        let normalizedWrong = wrong
+            .precomposedStringWithCompatibilityMapping
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard Self.isValidVoiceCorrectionKey(normalizedWrong),
+              normalizedWrong != normalizedCorrected
+        else {
+            return false
+        }
+
+        var corrections = voiceLearnedCorrections
+        let hadExactMapping = corrections[normalizedWrong] == normalizedCorrected
+        // Remove stale reverse mapping if user corrected back the other way.
+        if corrections[normalizedCorrected] == normalizedWrong {
+            corrections.removeValue(forKey: normalizedCorrected)
+        }
+        corrections[normalizedWrong] = normalizedCorrected
+
+        var hotwords = voiceCustomHotwords
+        let hadHotword = hotwords.contains(normalizedHotword)
+        hotwords.removeAll { $0 == normalizedHotword }
+        hotwords.insert(normalizedHotword, at: 0)
+        hotwords = Self.normalizedVoiceCustomHotwords(hotwords)
+
+        // 新学到的词条标记为最新：超出 128 条时淘汰的是最旧的词条，
+        // 这条新修正一定保留。
+        writeVoiceLearnedCorrections(
+            corrections,
+            baseOrder: storedVoiceLearnedCorrectionsOrder,
+            promoting: normalizedWrong
+        )
+        defaults.set(hotwords, forKey: Keys.voiceCustomHotwords)
+        notifySettingsChanged()
+        return !hadExactMapping || !hadHotword
+    }
+
+    /// 语音纠错词典上限：超出时淘汰最近最少使用的词条。
+    public static let maximumVoiceLearnedCorrections = 128
+
+    /// 归一化纠错映射并截断到 128 条。
+    ///
+    /// `order` 是词条的最近使用顺序（旧 → 新）。超出上限时淘汰 `order`
+    /// 中最靠前（最旧）的词条；没有顺序信息的旧数据按字母序排在最后，
+    /// 保证结果确定。
+    public static func normalizedVoiceLearnedCorrections(
+        _ raw: [String: String],
+        order: [String] = []
+    ) -> [String: String] {
+        normalizedVoiceLearnedCorrectionsWithOrder(raw, order: order).corrections
+    }
+
+    /// 与 `normalizedVoiceLearnedCorrections` 相同，同时返回保留下来的
+    /// 词条顺序（旧 → 新），供调用方持久化为 companion order 数组。
+    public static func normalizedVoiceLearnedCorrectionsWithOrder(
+        _ raw: [String: String],
+        order: [String]
+    ) -> (corrections: [String: String], order: [String]) {
+        // 归一化键 → 原值。重复键按字母序后者覆盖，与旧实现一致。
+        var rawValues: [String: String] = [:]
+        for key in raw.keys.sorted() {
+            rawValues[normalizedVoiceCorrectionKey(key)] = raw[key]
+        }
+
+        // 候选序列按“最旧 → 最新”排列，超限时从头部淘汰：
+        // 1) 没有顺序信息的词条（旧版本只保存了字典）视为最旧，按字母序倒序排在
+        //    最前：超限时先淘汰，结果与旧实现“保留字母序靠前的 128 条”一致；
+        // 2) 随后是 `order` 给出的最近使用顺序（旧 → 新）。
+        var seen = Set<String>()
+        var recentKeys: [String] = []
+        for rawOrderEntry in order {
+            let key = normalizedVoiceCorrectionKey(rawOrderEntry)
+            guard rawValues[key] != nil, seen.insert(key).inserted else {
+                continue
+            }
+            recentKeys.append(key)
+        }
+        var candidateKeys = rawValues.keys
+            .sorted()
+            .reversed()
+            .filter { !seen.contains($0) }
+        candidateKeys.append(contentsOf: recentKeys)
+
+        var retained: [(key: String, value: String)] = []
+        for key in candidateKeys {
+            guard isValidVoiceCorrectionKey(key),
+                  let normalizedValue = normalizedVoiceCustomHotwords(
+                      [rawValues[key] ?? ""]
+                  ).first,
+                  key != normalizedValue
+            else {
+                continue
+            }
+            retained.append((key, normalizedValue))
+        }
+        if retained.count > maximumVoiceLearnedCorrections {
+            // 淘汰最旧的词条；最新学到的修正总是保留。
+            retained.removeFirst(
+                retained.count - maximumVoiceLearnedCorrections
+            )
+        }
+
+        var corrections: [String: String] = [:]
+        var retainedKeys: [String] = []
+        corrections.reserveCapacity(retained.count)
+        retainedKeys.reserveCapacity(retained.count)
+        for entry in retained {
+            corrections[entry.key] = entry.value
+            retainedKeys.append(entry.key)
+        }
+        return (corrections, retainedKeys)
+    }
+
+    private static func normalizedVoiceCorrectionKey(_ key: String) -> String {
+        key.precomposedStringWithCompatibilityMapping
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func isValidVoiceCorrectionKey(_ key: String) -> Bool {
+        (2 ... 32).contains(key.count)
+            && key.utf8.count <= 128
+            && !key.unicodeScalars.contains(where: {
+                $0.value < 0x20 || (0x7f ... 0x9f).contains($0.value)
+            })
+            && !key.contains("/")
+            && !key.contains(":")
+            && !key.contains("#")
+            && !key.contains("@")
+    }
+
+    /// 本地语音历史记录开关（默认开启，仅保存在本机 SQLite，不上传）。
+    public var voiceHistoryEnabled: Bool {
+        get {
+            guard defaults.object(forKey: Keys.voiceHistoryEnabled) != nil else {
+                return true
+            }
+            return defaults.bool(forKey: Keys.voiceHistoryEnabled)
+        }
+        set {
+            defaults.set(newValue, forKey: Keys.voiceHistoryEnabled)
+            notifySettingsChanged()
+        }
+    }
+
+    /// 智能润色开关：去除口语填充词、修正重复与标点（离线使用本地确定性
+    /// 润色，配置云增强后自动升级为大模型润色并保留本地降级）。
+    public var voiceSmartPolishEnabled: Bool {
+        get {
+            guard defaults.object(forKey: Keys.voiceSmartPolishEnabled) != nil else {
+                return true
+            }
+            return defaults.bool(forKey: Keys.voiceSmartPolishEnabled)
+        }
+        set {
+            defaults.set(newValue, forKey: Keys.voiceSmartPolishEnabled)
+            notifySettingsChanged()
+        }
+    }
+
+    public var voicePolishStyle: VoicePolishStyle {
+        get {
+            guard let raw = defaults.string(forKey: Keys.voicePolishStyle),
+                  let style = VoicePolishStyle(rawValue: raw)
+            else {
+                return .concise
+            }
+            return style
+        }
+        set {
+            defaults.set(newValue.rawValue, forKey: Keys.voicePolishStyle)
+            notifySettingsChanged()
+        }
+    }
+
+    /// 一键语音翻译快捷键（默认 ⌃⇧T）。
+    public var voiceTranslateShortcut: VoiceDictationShortcut {
+        get {
+            guard let data = defaults.data(forKey: Keys.voiceTranslateShortcut),
+                  let shortcut = try? JSONDecoder().decode(
+                      VoiceDictationShortcut.self,
+                      from: data
+                  )
+            else {
+                return .defaultTranslate
+            }
+            return shortcut
+        }
+        set {
+            guard let data = try? JSONEncoder().encode(newValue) else {
+                assertionFailure("Voice translate shortcut encoding must not fail.")
+                return
+            }
+            defaults.set(data, forKey: Keys.voiceTranslateShortcut)
+            notifySettingsChanged()
+        }
+    }
+
+    /// 一键语音翻译目标语言（默认中英互译自动识别）。
+    public var voiceTranslateTargetLanguage: VoiceTranslationLanguage {
+        get {
+            guard let raw = defaults.string(
+                forKey: Keys.voiceTranslateTargetLanguage
+            ),
+            let language = VoiceTranslationLanguage(rawValue: raw)
+            else {
+                return .autoEnZh
+            }
+            return language
+        }
+        set {
+            defaults.set(
+                newValue.rawValue,
+                forKey: Keys.voiceTranslateTargetLanguage
+            )
+            notifySettingsChanged()
+        }
+    }
+
+    /// 听写/翻译完成后自动上屏（支持 IMK 直插，必要时回退剪贴板自动粘贴）。
+    public var voiceAutoPasteEnabled: Bool {
+        get {
+            guard defaults.object(forKey: Keys.voiceAutoPasteEnabled) != nil else {
+                return true
+            }
+            return defaults.bool(forKey: Keys.voiceAutoPasteEnabled)
+        }
+        set {
+            defaults.set(newValue, forKey: Keys.voiceAutoPasteEnabled)
+            notifySettingsChanged()
+        }
+    }
+
+    /// 语音交互提示音（开始、停止、完成、取消）。
+    public var voiceSoundEffectsEnabled: Bool {
+        get {
+            guard defaults.object(forKey: Keys.voiceSoundEffectsEnabled) != nil else {
+                return true
+            }
+            return defaults.bool(forKey: Keys.voiceSoundEffectsEnabled)
+        }
+        set {
+            defaults.set(newValue, forKey: Keys.voiceSoundEffectsEnabled)
+            notifySettingsChanged()
+        }
+    }
+
+    /// 语音输入期间自动静音系统输出音频，结束后自动恢复原音量/静音状态。
+    public var voiceMuteSystemAudioEnabled: Bool {
+        get {
+            guard defaults.object(
+                forKey: Keys.voiceMuteSystemAudioEnabled
+            ) != nil else {
+                return true
+            }
+            return defaults.bool(forKey: Keys.voiceMuteSystemAudioEnabled)
+        }
+        set {
+            defaults.set(newValue, forKey: Keys.voiceMuteSystemAudioEnabled)
+            notifySettingsChanged()
+        }
+    }
+
+    /// 允许云端润色 / 翻译请求携带语音热词上下文。独立 opt-in，默认关闭：
+    /// 开启语音或本地热词并不等于同意把热词发送到云端。
+    public var voiceCloudHotwordsEnabled: Bool {
+        get { defaults.bool(forKey: Keys.voiceCloudHotwordsEnabled) }
+        set {
+            defaults.set(newValue, forKey: Keys.voiceCloudHotwordsEnabled)
+            notifySettingsChanged()
+        }
+    }
+
+    public func setVoiceCloudHotwordsEnabled(_ enabled: Bool) {
+        voiceCloudHotwordsEnabled = enabled
+    }
+
+    /// 允许在无法直接读取编辑结果时使用只读辅助功能（AX）回退回读。
+    /// 独立 opt-in，默认关闭；仅影响回读路径，密码框 / 安全输入永不回读。
+    public var voiceAXFallbackReadEnabled: Bool {
+        get { defaults.bool(forKey: Keys.voiceAXFallbackReadEnabled) }
+        set {
+            defaults.set(newValue, forKey: Keys.voiceAXFallbackReadEnabled)
+            notifySettingsChanged()
+        }
+    }
+
+    public func setVoiceAXFallbackReadEnabled(_ enabled: Bool) {
+        voiceAXFallbackReadEnabled = enabled
+    }
+
+    public static func normalizedVoiceCustomHotwords(
+        _ rawPhrases: [String]
+    ) -> [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+        result.reserveCapacity(min(rawPhrases.count, 128))
+        for raw in rawPhrases {
+            guard result.count < 128 else {
+                break
+            }
+            let normalized = raw
+                .precomposedStringWithCompatibilityMapping
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard (2 ... 32).contains(normalized.count),
+                  normalized.utf8.count <= 128,
+                  !normalized.unicodeScalars.contains(where: {
+                      $0.value < 0x20 || (0x7f ... 0x9f).contains($0.value)
+                  }),
+                  !normalized.contains("/"),
+                  !normalized.contains(":"),
+                  !normalized.contains("#"),
+                  !normalized.contains("@")
+            else {
+                continue
+            }
+            if seen.insert(normalized).inserted {
+                result.append(normalized)
+            }
+        }
+        return result
     }
 
     /// 上屏后续写联想是独立 opt-in 的实验能力，默认关闭；只有用户显式
@@ -735,6 +1355,21 @@ extension RimeAISettingsStore {
             Keys.voiceEnabled,
             Keys.voiceShortcut,
             Keys.voiceRimeHotwordsEnabled,
+            Keys.voicePhraseBookHotwordsEnabled,
+            Keys.voiceCustomHotwords,
+            Keys.voiceAutoLearnCorrectionsEnabled,
+            Keys.voiceLearnedCorrections,
+            Keys.voiceLearnedCorrectionsOrder,
+            Keys.voiceHistoryEnabled,
+            Keys.voiceSmartPolishEnabled,
+            Keys.voicePolishStyle,
+            Keys.voiceTranslateShortcut,
+            Keys.voiceTranslateTargetLanguage,
+            Keys.voiceAutoPasteEnabled,
+            Keys.voiceSoundEffectsEnabled,
+            Keys.voiceMuteSystemAudioEnabled,
+            Keys.voiceCloudHotwordsEnabled,
+            Keys.voiceAXFallbackReadEnabled,
             Keys.contextPolicy,
             Keys.disabledAIApplications,
             Keys.disabledContextApplications,
@@ -761,6 +1396,18 @@ extension RimeAISettingsStore {
             Keys.voiceEnabled,
             Keys.voiceShortcut,
             Keys.voiceRimeHotwordsEnabled,
+            Keys.voicePhraseBookHotwordsEnabled,
+            Keys.voiceAutoLearnCorrectionsEnabled,
+            Keys.voiceHistoryEnabled,
+            Keys.voiceSmartPolishEnabled,
+            Keys.voicePolishStyle,
+            Keys.voiceTranslateShortcut,
+            Keys.voiceTranslateTargetLanguage,
+            Keys.voiceAutoPasteEnabled,
+            Keys.voiceSoundEffectsEnabled,
+            Keys.voiceMuteSystemAudioEnabled,
+            Keys.voiceCloudHotwordsEnabled,
+            Keys.voiceAXFallbackReadEnabled,
             Keys.contextPolicy,
             Keys.disabledAIApplications,
             Keys.disabledContextApplications,
@@ -781,6 +1428,21 @@ extension RimeAISettingsStore {
             voiceEnabled: voiceEnabled,
             voiceShortcut: voiceShortcut,
             voiceRimeHotwordsEnabled: voiceRimeHotwordsEnabled,
+            voicePhraseBookHotwordsEnabled: voicePhraseBookHotwordsEnabled,
+            voiceCustomHotwords: voiceCustomHotwords,
+            voiceAutoLearnCorrectionsEnabled: voiceAutoLearnCorrectionsEnabled,
+            voiceLearnedCorrections: voiceLearnedCorrections,
+            voiceLearnedCorrectionsOrder: voiceLearnedCorrectionsOrder,
+            voiceHistoryEnabled: voiceHistoryEnabled,
+            voiceSmartPolishEnabled: voiceSmartPolishEnabled,
+            voicePolishStyle: voicePolishStyle,
+            voiceTranslateShortcut: voiceTranslateShortcut,
+            voiceTranslateTargetLanguage: voiceTranslateTargetLanguage,
+            voiceAutoPasteEnabled: voiceAutoPasteEnabled,
+            voiceSoundEffectsEnabled: voiceSoundEffectsEnabled,
+            voiceMuteSystemAudioEnabled: voiceMuteSystemAudioEnabled,
+            voiceCloudHotwordsEnabled: voiceCloudHotwordsEnabled,
+            voiceAXFallbackReadEnabled: voiceAXFallbackReadEnabled,
             continuationSuggestionEnabled: continuationSuggestionEnabled,
             contextPolicy: contextPolicy,
             disabledAIApplications: disabledAIApplications,
@@ -856,6 +1518,9 @@ extension RimeAISettingsStore {
             throw RimeAISettingsImportError.applicationPolicyLimitExceeded
         }
         let encodedShortcut = try JSONEncoder().encode(snapshot.voiceShortcut)
+        let encodedTranslateShortcut = try JSONEncoder().encode(
+            snapshot.voiceTranslateShortcut
+        )
 
         defaults.set(
             snapshot.inputPreferences.characterSet.rawValue,
@@ -881,6 +1546,62 @@ extension RimeAISettingsStore {
         defaults.set(
             snapshot.voiceRimeHotwordsEnabled,
             forKey: Keys.voiceRimeHotwordsEnabled
+        )
+        defaults.set(
+            snapshot.voicePhraseBookHotwordsEnabled,
+            forKey: Keys.voicePhraseBookHotwordsEnabled
+        )
+        defaults.set(
+            Self.normalizedVoiceCustomHotwords(snapshot.voiceCustomHotwords),
+            forKey: Keys.voiceCustomHotwords
+        )
+        defaults.set(
+            snapshot.voiceAutoLearnCorrectionsEnabled,
+            forKey: Keys.voiceAutoLearnCorrectionsEnabled
+        )
+        writeVoiceLearnedCorrections(
+            snapshot.voiceLearnedCorrections,
+            baseOrder: snapshot.voiceLearnedCorrectionsOrder
+        )
+        defaults.set(
+            snapshot.voiceHistoryEnabled,
+            forKey: Keys.voiceHistoryEnabled
+        )
+        defaults.set(
+            snapshot.voiceSmartPolishEnabled,
+            forKey: Keys.voiceSmartPolishEnabled
+        )
+        defaults.set(
+            snapshot.voicePolishStyle.rawValue,
+            forKey: Keys.voicePolishStyle
+        )
+        defaults.set(
+            encodedTranslateShortcut,
+            forKey: Keys.voiceTranslateShortcut
+        )
+        defaults.set(
+            snapshot.voiceTranslateTargetLanguage.rawValue,
+            forKey: Keys.voiceTranslateTargetLanguage
+        )
+        defaults.set(
+            snapshot.voiceAutoPasteEnabled,
+            forKey: Keys.voiceAutoPasteEnabled
+        )
+        defaults.set(
+            snapshot.voiceSoundEffectsEnabled,
+            forKey: Keys.voiceSoundEffectsEnabled
+        )
+        defaults.set(
+            snapshot.voiceMuteSystemAudioEnabled,
+            forKey: Keys.voiceMuteSystemAudioEnabled
+        )
+        defaults.set(
+            snapshot.voiceCloudHotwordsEnabled,
+            forKey: Keys.voiceCloudHotwordsEnabled
+        )
+        defaults.set(
+            snapshot.voiceAXFallbackReadEnabled,
+            forKey: Keys.voiceAXFallbackReadEnabled
         )
         defaults.set(
             snapshot.continuationSuggestionEnabled,

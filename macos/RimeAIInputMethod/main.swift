@@ -56,6 +56,9 @@ private final class RimeAIApplicationDelegate: NSObject, NSApplicationDelegate {
         voiceRuntime = MainActor.assumeIsolated {
             VoiceDictationRuntime.shared
         }
+        MainActor.assumeIsolated {
+            VoiceGlobalHotKeyService.shared.start()
+        }
         reconcileVoiceHelperDesiredState()
         RimeEngine.shared.warm()
         if CommandLine.arguments.contains("--settings") {
@@ -65,6 +68,7 @@ private final class RimeAIApplicationDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         MainActor.assumeIsolated {
+            VoiceGlobalHotKeyService.shared.shutdown()
             voiceRuntime?.shutdown()
             voiceRuntime = nil
         }

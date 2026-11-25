@@ -212,6 +212,8 @@ extension PrivacyCenterWindowController {
                 try self.credentialStore.deleteAPIKey()
                 _ = try self.historyService.clearAll()
                 self.historyService.discardOpenStore()
+                // 语音历史同样先清空再关闭：之后的页面刷新不会悄悄重建一个空库。
+                try self.voiceHistoryService.clearAll()
                 try VoiceHelperLifecycleCoordinator.shared
                     .suspendSynchronously(layout: layout)
                 try ServiceLifecycleCoordinator
@@ -279,7 +281,7 @@ extension PrivacyCenterWindowController {
 
         SettingsDaemonActivationFailurePolicy.apply(to: settings)
         DaemonClient.shared.disconnect()
-        DispatchQueue.global(qos: .userInitiated).async {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let result = Result {
                 try ServiceLifecycleCoordinator
                     .suspendManagedDaemon(layout: layout)
@@ -312,7 +314,7 @@ extension PrivacyCenterWindowController {
         layout: RimeAIProductDataLayout,
         completion: @escaping SettingsRuntimeCompletion
     ) {
-        DispatchQueue.global(qos: .userInitiated).async {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let result = Result {
                 try ServiceLifecycleCoordinator
                     .startManagedDaemon(layout: layout)
@@ -365,7 +367,7 @@ extension PrivacyCenterWindowController {
         SettingsDaemonActivationFailurePolicy.apply(to: settings)
         DaemonClient.shared.disconnect()
         daemonStatusLabel.stringValue = "Daemon：握手失败，正在回滚"
-        DispatchQueue.global(qos: .userInitiated).async {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let completionError =
                 SettingsDaemonActivationFailurePolicy.rollbackError(
                     readinessError: readinessError,
@@ -399,7 +401,7 @@ extension PrivacyCenterWindowController {
         cloudStatusLabel.stringValue = enabled
             ? "云增强：正在启动"
             : "云增强：正在停止"
-        DispatchQueue.global(qos: .userInitiated).async {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let result = Result {
                 if enabled {
                     try ServiceLifecycleCoordinator
@@ -471,33 +473,61 @@ extension PrivacyCenterWindowController {
                 self.refreshVoiceStatus()
                 completion(.failure(error))
             }
+            // helper 启用/停用完成：服务状态徽标实时刷新。
+            VoiceServiceStateNotifier.postServiceStateDidChange()
         }
     }
 
+    /// 语音服务状态：彩色状态点 + 文字 +（语音组件未安装时的）安装指引，
+    /// 以及按需出现、带徽标的权限按钮。
     func refreshVoiceStatus() {
-        guard settings.aiEnabled else {
-            voiceStatusLabel.stringValue = "语音：已随 AI 总开关停用"
-            return
-        }
         let layout = RimeAIProductDataLayout(
             homeDirectory: FileManager.default.homeDirectoryForCurrentUser
         )
-        switch VoiceHelperLifecycle.installationStatus(layout: layout) {
-        case .notInstalled:
-            voiceStatusLabel.stringValue =
-                "语音：helper 未安装 · 键盘输入不受影响"
-        case .disabled:
-            voiceStatusLabel.stringValue = settings.voiceEnabled
-                ? "语音：等待启动"
-                : "语音：已关闭"
-        case .starting:
-            voiceStatusLabel.stringValue = "语音：helper 正在启动"
-        case .running:
-            voiceStatusLabel.stringValue =
-                "语音：helper 已运行 · 首次按住快捷键时完成认证与权限确认"
-        }
+        let presentation = VoiceServiceStatusPresentation.make(
+            aiEnabled: settings.aiEnabled,
+            voiceEnabled: settings.voiceEnabled,
+            installationStatus: VoiceHelperLifecycle.installationStatus(layout: layout)
+        )
+        applyVoiceServiceStatus(presentation)
+        refreshVoicePermissionButtons()
     }
 
+    func applyVoiceServiceStatus(_ presentation: VoiceServiceStatusPresentation) {
+        voiceStatusLabel.stringValue = presentation.message
+        voiceStatusLabel.setAccessibilityValue(presentation.message)
+        voiceServiceStatusDot.layer?.backgroundColor = presentation.dotColor.cgColor
+        voiceServiceStatusDot.setAccessibilityValue(presentation.message)
+        voiceInstallHintLabel.stringValue = presentation.installHint ?? ""
+        voiceInstallHintLabel.isHidden = presentation.installHint == nil
+    }
+
+    /// 麦克风/语音识别授权属于 Voice Helper 进程，输入法无法预读：仅在
+    /// helper 明确拒绝后才加 ⚠︎ 徽标。辅助功能按钮只在有功能依赖它时出现。
+    func refreshVoicePermissionButtons() {
+        let permissionBlocked = VoiceDictationRuntime.shared.isPermissionBlocked
+        voiceMicrophonePermissionButton.title = VoicePermissionPresentation.badge(
+            "打开麦克风权限…",
+            needsAttention: VoicePermissionPresentation.microphoneNeedsAttention(
+                permissionBlocked: permissionBlocked
+            )
+        )
+        voiceSpeechPermissionButton.title = VoicePermissionPresentation.badge(
+            "打开语音识别权限…",
+            needsAttention: VoicePermissionPresentation.microphoneNeedsAttention(
+                permissionBlocked: permissionBlocked
+            )
+        )
+        let showsAccessibility = VoicePermissionPresentation.showsAccessibilityButton(
+            autoPasteEnabled: settings.voiceAutoPasteEnabled,
+            axFallbackReadEnabled: settings.voiceAXFallbackReadEnabled
+        )
+        voiceAccessibilityPermissionButton.isHidden = !showsAccessibility
+        voiceAccessibilityPermissionButton.title = VoicePermissionPresentation.badge(
+            "打开辅助功能权限…",
+            needsAttention: !VoiceAccessibilityAuthorization.isTrusted
+        )
+    }
 
     nonisolated static func trashManagedData(
         layout: RimeAIProductDataLayout

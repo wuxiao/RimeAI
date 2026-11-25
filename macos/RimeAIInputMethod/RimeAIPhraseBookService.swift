@@ -120,6 +120,64 @@ final class RimeAIPhraseBookService: @unchecked Sendable {
         currentSnapshot().domainMappings[bundleIdentifier]
     }
 
+    /// Returns prioritized hotword candidates from the in-memory L1 phrasebook
+    /// and enabled domain lexicons without touching SQLite on the UI/hot path.
+    /// Ordering: current-domain user/protected > global user/protected >
+    /// current-domain frequent/lexicon > global frequent/lexicon.
+    func voiceHotwordCandidates(
+        forBundleIdentifier bundleIdentifier: String,
+        limit: Int = 96
+    ) -> [String] {
+        guard limit > 0 else {
+            return []
+        }
+        let snap = currentSnapshot()
+        let activeDomain = snap.domainMappings[bundleIdentifier]
+            ?? PhraseBookDomain.global
+        let relevantEntries = snap.entries.filter { entry in
+            (entry.domain == activeDomain
+                || entry.domain == PhraseBookDomain.global)
+                && (entry.isProtected
+                    || entry.source == .user
+                    || entry.count >= 2)
+        }
+        let relevantLexicons = snap.lexiconEntries.filter { entry in
+            entry.domain == activeDomain
+                || entry.domain == PhraseBookDomain.global
+        }
+        func priorityKey(_ entry: PhraseBookEntry) -> (Int, Int, Int, Int) {
+            let isPinned = (entry.isProtected || entry.source == .user) ? 1 : 0
+            let isActiveDomain = (activeDomain != PhraseBookDomain.global
+                && entry.domain == activeDomain) ? 1 : 0
+            let isLearned = entry.source != .lexicon ? 1 : 0
+            return (isPinned, isActiveDomain, isLearned, entry.count)
+        }
+        let combined = (relevantEntries + relevantLexicons).sorted { lhs, rhs in
+            let lKey = priorityKey(lhs)
+            let rKey = priorityKey(rhs)
+            if lKey != rKey {
+                return lKey > rKey
+            }
+            return lhs.lastUsedAt > rhs.lastUsedAt
+        }
+        var seen = Set<String>()
+        var result: [String] = []
+        result.reserveCapacity(min(limit, combined.count))
+        for entry in combined {
+            guard result.count < limit else {
+                break
+            }
+            let text = entry.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard text.count >= 2, text.count <= 32 else {
+                continue
+            }
+            if seen.insert(text).inserted {
+                result.append(text)
+            }
+        }
+        return result
+    }
+
     func entries(
         domain: String? = nil,
         limit: Int = 500
@@ -181,6 +239,40 @@ final class RimeAIPhraseBookService: @unchecked Sendable {
         )
         refreshSnapshotAsync()
         return entry
+    }
+
+    /// Background write path for vocabulary auto-learned from post-commit
+    /// voice corrections: records into the L1 phrasebook (under the active
+    /// app's domain or `global`) without touching SQLite on the main thread.
+    func recordVoiceLearnedPhraseAsync(
+        text: String,
+        pinyinKeys: String,
+        bundleIdentifier: String
+    ) {
+        let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedPinyin = pinyinKeys
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard trimmedText.count >= 2,
+              trimmedText.count <= 32,
+              trimmedPinyin.count >= 2,
+              trimmedPinyin.count <= 64
+        else {
+            return
+        }
+        let targetDomain = domain(forBundleIdentifier: bundleIdentifier)
+            ?? PhraseBookDomain.global
+        refreshQueue.async { [weak self] in
+            guard let self, let store = self.activeStore() else {
+                return
+            }
+            _ = try? store.addUserPhrase(
+                text: trimmedText,
+                pinyinKeys: trimmedPinyin,
+                domain: targetDomain
+            )
+            self.refreshSnapshotNow()
+        }
     }
 
     /// Settings-page domain mapping editor (LP-007).

@@ -38,6 +38,8 @@ public struct VoiceDictationSessionContext: Equatable, Sendable {
     public let bundleID: String
     public let mode: VoiceDictationMode
     public let deadlineMilliseconds: Int
+    /// `0` 表示不限制单次听写时长；正数表示显式毫秒上限。
+    public let maximumDurationMilliseconds: Int
     public let hotwordSnapshot: VoiceHotwordSnapshot
 
     public init(
@@ -46,6 +48,8 @@ public struct VoiceDictationSessionContext: Equatable, Sendable {
         bundleID: String,
         mode: VoiceDictationMode = .direct,
         deadlineMilliseconds: Int = 1_500,
+        maximumDurationMilliseconds: Int = VoiceDictationConstants
+            .unlimitedDurationMilliseconds,
         hotwordSnapshot: VoiceHotwordSnapshot = .empty
     ) {
         self.compositionID = compositionID
@@ -53,6 +57,7 @@ public struct VoiceDictationSessionContext: Equatable, Sendable {
         self.bundleID = bundleID
         self.mode = mode
         self.deadlineMilliseconds = deadlineMilliseconds
+        self.maximumDurationMilliseconds = maximumDurationMilliseconds
         self.hotwordSnapshot = hotwordSnapshot
     }
 }
@@ -137,6 +142,7 @@ public struct VoiceDictationClientMachine: Sendable {
             bundleID: context.bundleID,
             mode: context.mode,
             deadlineMilliseconds: context.deadlineMilliseconds,
+            maximumDurationMilliseconds: context.maximumDurationMilliseconds,
             hotwordSnapshot: negotiatedHotwords
         )
         guard start.isValid else {

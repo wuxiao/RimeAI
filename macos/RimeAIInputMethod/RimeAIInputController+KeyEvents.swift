@@ -8,11 +8,23 @@ extension RimeAIInputController {
         _ event: NSEvent!,
         client sender: Any!
     ) -> Bool {
-        guard event?.type == .keyDown,
+        guard let event,
               let client = sender as? any IMKTextInput
         else {
             return false
         }
+        if event.type == .flagsChanged {
+            return handleVoiceModifierFlagsChanged(event, client: client)
+        }
+        guard event.type == .keyDown else {
+            return false
+        }
+        voiceModifierTapDetector.handleOtherKeyDown()
+        voiceTranslateModifierTapDetector.handleOtherKeyDown()
+        // 任意非修饰键都会让“⌘+按键”式的右 ⌘ 组合失去点按资格。
+        voiceModifierTapPointerGuard.reset()
+        voiceTranslateModifierTapPointerGuard.reset()
+        VoiceGlobalHotKeyService.shared.noteNonModifierKeyDown()
         // Tab 接受续写 chip 必须先于 prelude：上屏后宿主可能已结束旧
         // 输入会话，prelude 的会话重建会先 cancel(.sessionSwitched)
         // 把 chip 撤掉，导致 Tab 永远无法接受。仅裸 Tab 接受——
@@ -78,13 +90,14 @@ extension RimeAIInputController {
         }
         activateSession(for: client)
         if IsSecureEventInputEnabled() {
+            noteVoiceShortcutAttemptBlockedBySecureInput(event)
             enterSecureInput(client: client)
             return false
         }
         if composition.isSecureInput {
             recoverFromSecureInputSession(client: client)
         }
-        if let consumed = resolveVoiceKeyRouting(event) {
+        if let consumed = resolveVoiceKeyRouting(event, client: client) {
             return consumed
         }
         VoiceDictationRuntime.shared.dismissTransientPanel(owner: self)
@@ -93,6 +106,10 @@ extension RimeAIInputController {
         )
         if !modifiers.isEmpty {
             invalidateCurrentResult()
+            VoicePostCommitEditTracker.shared.noteDocumentActivity(
+                client: client as AnyObject,
+                invalidatesTailTracking: true
+            )
             return false
         }
         return nil
@@ -114,15 +131,49 @@ extension RimeAIInputController {
         configureVoiceHotKey()
     }
 
+    /// 安全输入下按下语音快捷键：给出原因提示并记录一次隐私拦截，
+    /// 而不是让按键石沉大海。其余按键不计入 privacyBlocked。
+    private func noteVoiceShortcutAttemptBlockedBySecureInput(
+        _ event: NSEvent
+    ) {
+        guard settings.voiceEnabled, isVoiceShortcut(event) else {
+            return
+        }
+        settings.record(.privacyBlocked)
+        VoiceDictationRuntime.shared.presentStartBlockedToast(
+            .secureInput,
+            anchorRect: fallbackVoiceAnchorRect()
+        )
+    }
+
     /// 语音键路由。返回 nil 表示语音层不消费该事件。
-    private func resolveVoiceKeyRouting(_ event: NSEvent) -> Bool? {
+    private func resolveVoiceKeyRouting(
+        _ event: NSEvent,
+        client: any IMKTextInput
+    ) -> Bool? {
         let voiceRuntime = VoiceDictationRuntime.shared
+        if voiceRuntime.isShowingPersistentCopy {
+            let modifiers = voiceKeyModifiers(event.modifierFlags)
+            if event.keyCode == 53, modifiers.isEmpty {
+                voiceRuntime.dismissPersistentCopyPanel()
+                return true
+            }
+            if event.keyCode == 8,
+               modifiers == [.command],
+               client.selectedRange().length == 0,
+               voiceRuntime.copyPersistentPanelToPasteboard()
+            {
+                return true
+            }
+        }
         let voiceDecision = VoiceDictationKeyRouter.decision(
             keyCode: event.keyCode,
             isExactVoiceShortcut: isVoiceShortcut(event),
-            shortcutRegistered: voiceHotKeyIsRegistered,
+            shortcutRegistered: voiceHotKeyIsRegistered
+                || voiceTranslateHotKeyIsRegistered,
             hasActiveSession: voiceRuntime.isActive(owner: self),
             pendingConfirmation: voiceRuntime.isPendingConfirmation(owner: self),
+            isTransforming: voiceRuntime.isTransforming,
             isPlainConfirmationKey: VoiceDictationKeyRouter
                 .isPlainConfirmation(
                     modifiers: voiceKeyModifiers(event.modifierFlags)
@@ -134,12 +185,21 @@ extension RimeAIInputController {
         case .confirm:
             voiceRuntime.confirm(owner: self)
             return true
+        case .commitRawDuringTransform:
+            // 润色/翻译进行中按空格或回车：放弃在途转换，直接把已识别的
+            // 原文上屏。此前这条路径会取消整个会话并把听写内容丢掉。
+            voiceRuntime.commitRawDuringTransform(owner: self)
+            return true
         case .cancelAndConsume:
             cancelVoiceDictation()
             return true
         case .cancelAndContinue:
-            // 先使语音目标永久失效，再继续原有键盘路径。
-            cancelVoiceDictation()
+            // 先使语音目标永久失效，再继续原有键盘路径；若正处于润色在途，
+            // 把本地润色稿存入本机语音历史，避免误按字母键把整段口述直接丢掉。
+            VoiceDictationRuntime.shared.cancel(
+                owner: self,
+                preserveTransformingDraftInHistory: true
+            )
         case .passThrough:
             break
         }
@@ -156,6 +216,10 @@ extension RimeAIInputController {
 
     private func handleReturnKey(client: any IMKTextInput) -> Bool {
         guard composition.hasComposition else {
+            VoicePostCommitEditTracker.shared.settleNowIfMatching(
+                client: client as AnyObject,
+                reason: .returnKey
+            )
             return false
         }
         commitText(
@@ -287,6 +351,10 @@ extension RimeAIInputController {
             return true
         }
         clearContextForCurrentApplication()
+        VoicePostCommitEditTracker.shared.noteDocumentActivity(
+            client: client as AnyObject,
+            invalidatesTailTracking: true
+        )
         return false
     }
 
@@ -307,6 +375,10 @@ extension RimeAIInputController {
         if event.modifierFlags.contains(.shift),
            !composition.hasComposition
         {
+            VoicePostCommitEditTracker.shared.noteDocumentActivity(
+                client: client as AnyObject,
+                invalidatesTailTracking: true
+            )
             return false
         }
         if let character = acceptedCompositionCharacter(
@@ -448,6 +520,9 @@ extension RimeAIInputController {
             compositionInput(composition.pinyin, client: client)
             return true
         }
+        VoicePostCommitEditTracker.shared.noteUncomposedBackspace(
+            client: client as AnyObject
+        )
         return false
     }
 

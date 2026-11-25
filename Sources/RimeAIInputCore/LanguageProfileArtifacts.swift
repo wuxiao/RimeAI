@@ -54,7 +54,6 @@ public enum LanguageProfileArtifacts {
         try updateUserLM(in: directory) { domains in
             domains.removeValue(forKey: domain)
         }
-        let manager = FileManager.default
         // Missing artifacts are fine (the layer may never have learned
         // this domain); other errors still surface.
         try removeIfPresent(profileURL(domain, in: directory))

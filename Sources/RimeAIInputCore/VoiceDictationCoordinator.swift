@@ -47,7 +47,8 @@ public final class VoiceDictationCoordinator: @unchecked Sendable {
         public var connectTimeout: TimeInterval
         /// socket 已连接并发送 hello 后，等待合法 voice_ready 的上限。
         public var helloResponseTimeout: TimeInterval
-        public var deltaTimeout: TimeInterval
+        /// `nil` 表示录音期间不设 delta 超时（允许任意长度的思考停顿与不限时听写）。
+        public var deltaTimeout: TimeInterval?
         /// `nil` 时沿用本次 start 的 deadline；测试可注入更短超时。
         public var finalTimeout: TimeInterval?
         /// UI 回调的派发队列；产品代码用主队列，测试可注入并发队列。
@@ -59,7 +60,7 @@ public final class VoiceDictationCoordinator: @unchecked Sendable {
                 .currentBuildConfiguration,
             connectTimeout: TimeInterval = 3,
             helloResponseTimeout: TimeInterval = 3,
-            deltaTimeout: TimeInterval = TimeInterval(
+            deltaTimeout: TimeInterval? = TimeInterval(
                 VoiceDictationConstants.deltaTimeoutMilliseconds
             ) / 1_000,
             finalTimeout: TimeInterval? = nil,
@@ -737,6 +738,11 @@ public final class VoiceDictationCoordinator: @unchecked Sendable {
 
     private func armDeltaTimeout(expectedEpoch: UInt64? = nil) {
         cancelDeltaTimeout(expectedEpoch: expectedEpoch)
+        guard let deltaTimeout = configuration.deltaTimeout,
+              deltaTimeout > 0
+        else {
+            return
+        }
         lock.lock()
         guard expectedEpoch == nil || effectEpoch == expectedEpoch,
               case .listening = machine.phase
@@ -770,7 +776,7 @@ public final class VoiceDictationCoordinator: @unchecked Sendable {
         deltaTimeoutWork = work
         lock.unlock()
         DispatchQueue.global().asyncAfter(
-            deadline: .now() + configuration.deltaTimeout,
+            deadline: .now() + deltaTimeout,
             execute: work
         )
     }

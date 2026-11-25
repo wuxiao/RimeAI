@@ -9,7 +9,7 @@ set -euo pipefail
 
 usage() {
   print -u2 -- \
-    "usage: $0 [--engine unavailable|apple-speech (ad-hoc Debug only)] "\
+    "usage: $0 [--engine unavailable|apple-speech|mlx-qwen3-asr (ad-hoc Debug only)] "\
 "[--signing-identity -|<codesign identity>] [--enable] "\
 "[--marketing-version X.Y.Z] [--build-number N] "\
 "[--build-only] [--uninstall] (default engine: apple-speech)"
@@ -81,7 +81,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ "${engine}" != "unavailable" && "${engine}" != "apple-speech" ]]; then
+if [[ "${engine}" != "unavailable" && "${engine}" != "apple-speech" && "${engine}" != "mlx-qwen3-asr" ]]; then
   print -u2 "error: unknown engine ${engine}"
   exit 2
 fi
@@ -267,13 +267,18 @@ validate_ready_capabilities() {
   local capability capability_count index
   local local_asr_count=0
   local streaming_count=0
+  local hotword_count=0
+  local expected_count=2
+  if [[ "${engine}" == "mlx-qwen3-asr" ]]; then
+    expected_count=3
+  fi
 
   capability_count=$(
     print -r -- "${response}" \
       | plutil -extract capabilities raw -expect array -o - -- - \
         2>/dev/null
   ) || return 1
-  [[ "${capability_count}" == <-> && "${capability_count}" -eq 2 ]] \
+  [[ "${capability_count}" == <-> && "${capability_count}" -eq ${expected_count} ]] \
     || return 1
 
   for (( index = 0; index < capability_count; index++ )); do
@@ -292,19 +297,30 @@ validate_ready_capabilities() {
       streaming)
         streaming_count=$(( streaming_count + 1 ))
         ;;
+      hotword_snapshot)
+        if [[ "${engine}" == "mlx-qwen3-asr" ]]; then
+          hotword_count=$(( hotword_count + 1 ))
+        else
+          return 1
+        fi
+        ;;
       *)
         return 1
         ;;
     esac
   done
 
-  [[ ${local_asr_count} -eq 1 && ${streaming_count} -eq 1 ]]
+  if [[ "${engine}" == "mlx-qwen3-asr" ]]; then
+    [[ ${local_asr_count} -eq 1 && ${streaming_count} -eq 1 && ${hotword_count} -eq 1 ]]
+  else
+    [[ ${local_asr_count} -eq 1 && ${streaming_count} -eq 1 ]]
+  fi
 }
 
 validate_ready_response() {
   local ready_protocol ready_type ready_server ready_network ready_engine
   local ready_maximum_hotwords
-  local expected_engine
+  local expected_engine expected_hotwords
   # unavailable 只用于构建/故障探针；它没有 ASR 能力，绝不能被 --enable
   # 健康检查当作可用服务。真实空能力与伪造 local_asr 都必须 fail closed。
   if [[ "${engine}" == unavailable ]]; then
@@ -319,12 +335,18 @@ validate_ready_response() {
     extract_ready_integer_field maximum_hotwords
   ) || return 1
   validate_ready_capabilities || return 1
-  expected_engine=apple-speech-ondevice
+  if [[ "${engine}" == "mlx-qwen3-asr" ]]; then
+    expected_engine=mlx-qwen3-asr
+    expected_hotwords=128
+  else
+    expected_engine=apple-speech-ondevice
+    expected_hotwords=0
+  fi
   [[ "${ready_protocol}" == 2 \
     && "${ready_type}" == voice_ready \
     && "${ready_server}" == "${label}" \
     && "${ready_network}" == offline \
-    && "${ready_maximum_hotwords}" == 0 \
+    && "${ready_maximum_hotwords}" == "${expected_hotwords}" \
     && "${ready_engine}" == "${expected_engine}" ]]
 }
 

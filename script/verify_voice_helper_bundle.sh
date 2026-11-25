@@ -185,6 +185,7 @@ if [[ ${argument_count} -eq 5 ]]; then
   fi
   if [[ "${launch_arguments[4]}" != --engine \
     || ( "${launch_arguments[5]}" != apple-speech \
+      && "${launch_arguments[5]}" != mlx-qwen3-asr \
       && "${launch_arguments[5]}" != unavailable ) ]]; then
     print -u2 "error: LaunchAgent engine arguments are invalid"
     exit 1

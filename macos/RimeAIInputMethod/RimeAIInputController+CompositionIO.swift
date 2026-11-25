@@ -311,6 +311,11 @@ extension RimeAIInputController {
             enterSecureInput(client: client)
             return false
         }
+        VoicePostCommitEditTracker.shared.noteKeyboardCommit(
+            text: text,
+            pinyin: pinyin,
+            client: client as AnyObject
+        )
         recordCommitSideEffects(
             text: text,
             pinyin: pinyin,

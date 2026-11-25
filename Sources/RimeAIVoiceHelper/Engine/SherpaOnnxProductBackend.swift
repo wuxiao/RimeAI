@@ -1810,8 +1810,7 @@ private struct SystemSherpaOnnxRuntime:
             guard RimeAISherpaOnnxCreateOnlineRecognizer(
                       &config,
                       &recognizer
-                  ) == RimeAISherpaOnnxStatusSuccess,
-                  let recognizer
+                  ) == RimeAISherpaOnnxStatusSuccess
             else {
                 throw SherpaOnnxProductBackendError
                     .recognizerInitializationFailed

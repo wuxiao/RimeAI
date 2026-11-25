@@ -1,5 +1,57 @@
 import AppKit
 
+/// 候选按钮：无边框以保持轻量外观，但保留悬停与按压反馈（原生 bordered
+/// 按钮无法同时做到轻量与反馈）。跟踪区域用 activeAlways：候选面板从不
+/// 抢占 key window，鼠标悬停也必须生效。
+private final class CandidateHoverButton: NSButton {
+    private var isHovering = false
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        for area in trackingAreas {
+            removeTrackingArea(area)
+        }
+        addTrackingArea(NSTrackingArea(
+            rect: .zero,
+            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        ))
+    }
+
+    override var isHighlighted: Bool {
+        didSet {
+            updateHighlight()
+        }
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        super.mouseEntered(with: event)
+        isHovering = true
+        updateHighlight()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        super.mouseExited(with: event)
+        isHovering = false
+        updateHighlight()
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateHighlight()
+    }
+
+    private func updateHighlight() {
+        wantsLayer = true
+        layer?.cornerRadius = 6
+        let fill: NSColor = isHighlighted
+            ? .unemphasizedSelectedContentBackgroundColor
+            : isHovering ? .quaternaryLabelColor : .clear
+        layer?.backgroundColor = fill.cgColor
+    }
+}
+
 @MainActor
 final class CandidatePanelController: NSObject {
     /// 一次面板刷新所需的完整内容模型。
@@ -51,13 +103,16 @@ final class CandidatePanelController: NSObject {
             frame: NSRect(x: 0, y: 0, width: 420, height: 66)
         )
         mainCandidatesStack = NSStackView()
-        semanticButton = NSButton()
-        comparisonButton = NSButton()
+        semanticButton = CandidateHoverButton()
+        comparisonButton = CandidateHoverButton()
         pageIndicator = NSTextField(labelWithString: "")
         super.init()
 
-        panel.level = .popUpMenu
+        panel.title = "RimeAI 候选"
+        panel.setAccessibilityLabel("候选词面板")
         panel.isFloatingPanel = true
+        // isFloatingPanel 会重置窗口层级：level 必须在其后设置才能保持置顶。
+        panel.level = .popUpMenu
         panel.becomesKeyOnlyIfNeeded = true
         panel.hidesOnDeactivate = false
         panel.hasShadow = true
@@ -138,7 +193,7 @@ final class CandidatePanelController: NSObject {
             view.removeFromSuperview()
         }
         for (index, candidate) in visibleCandidates.enumerated() {
-            let button = NSButton(
+            let button = CandidateHoverButton(
                 title: "\(index + 1) \(candidate)",
                 target: self,
                 action: #selector(acceptMainCandidate(_:))
@@ -148,6 +203,9 @@ final class CandidatePanelController: NSObject {
             button.font = .systemFont(ofSize: 14, weight: .regular)
             button.contentTintColor = .labelColor
             button.setButtonType(.momentaryChange)
+            // 数字编号只是选择提示；读屏时按“候选 N”播报。
+            button.setAccessibilityLabel("候选 \(index + 1)：\(candidate)")
+            button.setAccessibilityHelp("点击上屏该候选")
             mainCandidatesStack.addArrangedSubview(button)
         }
 

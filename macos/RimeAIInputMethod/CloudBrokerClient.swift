@@ -42,6 +42,8 @@ final class CloudBrokerClient: @unchecked Sendable {
     typealias Completion = @Sendable (CloudInferenceResponse?) -> Void
     typealias ContinuationCompletion =
         @Sendable (CloudContinuationResponse?) -> Void
+    typealias VoiceTransformCompletion =
+        @Sendable (CloudVoiceTransformResponse?) -> Void
 
     static let shared = CloudBrokerClient()
 
@@ -53,6 +55,10 @@ final class CloudBrokerClient: @unchecked Sendable {
         let completion: ContinuationCompletion
     }
 
+    private struct PendingVoiceTransform {
+        let completion: VoiceTransformCompletion
+    }
+
     private struct HelloRequest: Encodable {
         let schemaVersion = 1
         let type = "hello"
@@ -62,7 +68,12 @@ final class CloudBrokerClient: @unchecked Sendable {
         /// this client keeps working with brokers that never send it.
         /// `continuation-generation` advertises the post-commit
         /// continuation round-trip (request type `continuation`).
-        let capabilities = ["text-generation", "continuation-generation"]
+        /// `voice-transform` advertises voice smart-polish & translation.
+        let capabilities = [
+            "text-generation",
+            "continuation-generation",
+            "voice-transform",
+        ]
 
         enum CodingKeys: String, CodingKey {
             case schemaVersion = "schema_version"
@@ -156,12 +167,14 @@ final class CloudBrokerClient: @unchecked Sendable {
     private var availableModels: Set<String> = []
     private var pending: [String: PendingRequest] = [:]
     private var pendingContinuations: [String: PendingContinuation] = [:]
+    private var pendingVoiceTransforms: [String: PendingVoiceTransform] = [:]
     /// Tombstones for continuation requests we cancelled or expired
     /// locally: the broker may still deliver their result frame, and such
     /// a late frame must be dropped quietly instead of falling into the
     /// inference decoder and tearing down the whole connection. Cleared
     /// on tearDown.
     private var retiredContinuations = ContinuationRetirementLog()
+    private var retiredVoiceTransforms = ContinuationRetirementLog()
 
     private convenience init() {
         let socketPath = FileManager.default.homeDirectoryForCurrentUser
@@ -268,6 +281,55 @@ final class CloudBrokerClient: @unchecked Sendable {
         }
     }
 
+    /// 语音后处理（智能润色 / 语音翻译）请求：复用云端 broker UDS 连接。
+    /// 若已握手且服务端未声明 `voice-transform` 能力（例如旧版 broker），
+    /// 立即 fail-fast 返回 nil，让客户端 0ms 回退本地润色，绝不干等超时。
+    func transformVoiceText(
+        _ request: CloudVoiceTransformRequest,
+        apiKey: String,
+        completion: @escaping VoiceTransformCompletion
+    ) {
+        queue.async { [self] in
+            guard VoiceTransformTextPolicy.isValid(request: request),
+                  !apiKey.isEmpty,
+                  apiKey.utf8.count <= 512,
+                  let payload = encodeLine(request, apiKey: apiKey)
+            else {
+                DispatchQueue.main.async { completion(nil) }
+                return
+            }
+            if isReady, !serverCapabilities.contains("voice-transform") {
+                DispatchQueue.main.async { completion(nil) }
+                return
+            }
+            pendingVoiceTransforms[request.requestID] = PendingVoiceTransform(
+                completion: completion
+            )
+            transport.enqueueOutbound(
+                data: payload,
+                requestID: request.requestID
+            )
+            ensureConnection()
+            transport.flushOutbound()
+            transport.scheduleTimeout(
+                afterMilliseconds: request.deadlineMilliseconds + 100
+            ) { [weak self] in
+                self?.expireVoiceTransform(requestID: request.requestID)
+            }
+        }
+    }
+
+    func cancelVoiceTransform(requestID: String) {
+        queue.async { [self] in
+            guard pendingVoiceTransforms.removeValue(forKey: requestID) != nil
+            else {
+                return
+            }
+            retiredVoiceTransforms.retire(requestID)
+            sendWireCancel(requestID: requestID)
+        }
+    }
+
     /// Model negotiation for mixed-version deployments: when the broker
     /// (e.g. an un-upgraded one) does not offer the preferred model, fall
     /// back to the first client-known model it does offer, so the cloud
@@ -364,6 +426,17 @@ private extension CloudBrokerClient {
             availableModels = Set(hello.models)
             serverCapabilities = Set(hello.capabilities)
             transport.markProtocolReady()
+            if !serverCapabilities.contains("voice-transform"),
+               !pendingVoiceTransforms.isEmpty
+            {
+                let unsupported = pendingVoiceTransforms
+                pendingVoiceTransforms.removeAll(keepingCapacity: false)
+                for (requestID, pendingRequest) in unsupported {
+                    transport.removeOutboundFrames(requestID: requestID)
+                    retiredVoiceTransforms.retire(requestID)
+                    DispatchQueue.main.async { pendingRequest.completion(nil) }
+                }
+            }
             publishStatus("就绪")
             return
         }
@@ -392,6 +465,24 @@ private extension CloudBrokerClient {
             if retiredContinuations.consume(envelope.requestID) {
                 // Late result for a continuation we already cancelled or
                 // expired: drop it quietly.
+                return
+            }
+            if pendingVoiceTransforms[envelope.requestID] != nil {
+                guard let result = try? decoder.decode(
+                    CloudVoiceTransformResponse.self,
+                    from: line
+                ) else {
+                    tearDown(failPending: true, status: "响应格式错误")
+                    return
+                }
+                publishStatus("就绪")
+                finishVoiceTransform(
+                    requestID: envelope.requestID,
+                    result: result
+                )
+                return
+            }
+            if retiredVoiceTransforms.consume(envelope.requestID) {
                 return
             }
         }
@@ -452,12 +543,36 @@ private extension CloudBrokerClient {
         DispatchQueue.main.async { request.completion(result) }
     }
 
+    func expireVoiceTransform(requestID: String) {
+        guard let request = pendingVoiceTransforms.removeValue(
+            forKey: requestID
+        ) else {
+            return
+        }
+        retiredVoiceTransforms.retire(requestID)
+        sendWireCancel(requestID: requestID)
+        DispatchQueue.main.async { request.completion(nil) }
+    }
+
+    func finishVoiceTransform(
+        requestID: String,
+        result: CloudVoiceTransformResponse?
+    ) {
+        guard let request = pendingVoiceTransforms.removeValue(
+            forKey: requestID
+        ) else {
+            return
+        }
+        DispatchQueue.main.async { request.completion(result) }
+    }
+
     func tearDown(failPending: Bool, status: String) {
         transport.close()
         isReady = false
         availableModels = []
         serverCapabilities = []
         retiredContinuations.reset()
+        retiredVoiceTransforms.reset()
         publishStatus(status)
         if failPending {
             let values = pending.values
@@ -468,6 +583,11 @@ private extension CloudBrokerClient {
             let continuations = pendingContinuations.values
             pendingContinuations.removeAll(keepingCapacity: false)
             for value in continuations {
+                DispatchQueue.main.async { value.completion(nil) }
+            }
+            let transforms = pendingVoiceTransforms.values
+            pendingVoiceTransforms.removeAll(keepingCapacity: false)
+            for value in transforms {
                 DispatchQueue.main.async { value.completion(nil) }
             }
         }

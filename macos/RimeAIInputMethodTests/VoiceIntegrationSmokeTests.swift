@@ -205,6 +205,72 @@ final class VoiceIntegrationSmokeTests: XCTestCase {
         XCTAssertEqual(releaseCount, 1)
     }
 
+    func testTranslationHotKeyRegistersWithDistinctSignatureAndRoutesIndependently()
+        throws
+    {
+        let dictationRef = try XCTUnwrap(EventHotKeyRef(bitPattern: 11))
+        let translateRef = try XCTUnwrap(EventHotKeyRef(bitPattern: 22))
+        var requests: [VoiceHotKeyRegistrar.Request] = []
+        var unregistered: [EventHotKeyRef] = []
+        let registrar = VoiceHotKeyRegistrar(
+            register: { request in
+                requests.append(request)
+                let ref = request.identifier.signature
+                    == VoiceHotKeyManager.translateEventSignature
+                    ? translateRef
+                    : dictationRef
+                return .init(status: noErr, reference: ref)
+            },
+            unregister: { ref in
+                unregistered.append(ref)
+                return noErr
+            }
+        )
+        let manager = VoiceHotKeyManager(testingRegistrar: registrar)
+        let owner = NSObject()
+        var dictationPressed = 0
+        var translatePressed = 0
+        var translateReleased = 0
+
+        try manager.activate(
+            owner: owner,
+            shortcut: .default,
+            onPressed: { dictationPressed += 1 },
+            onReleased: {},
+            onSecureInputDetected: {}
+        )
+        try manager.activateTranslation(
+            owner: owner,
+            shortcut: .defaultTranslate,
+            onPressed: { translatePressed += 1 },
+            onReleased: { translateReleased += 1 }
+        )
+
+        XCTAssertEqual(requests.count, 2)
+        XCTAssertEqual(
+            manager.translateRegistrationStatus,
+            .registered(.defaultTranslate)
+        )
+        let translateID = try XCTUnwrap(requests.last).identifier.id
+        manager.handleTranslateFromCarbon(
+            eventKind: UInt32(kEventHotKeyPressed),
+            registrationID: translateID
+        )
+        manager.handleTranslateFromCarbon(
+            eventKind: UInt32(kEventHotKeyReleased),
+            registrationID: translateID
+        )
+
+        XCTAssertEqual(dictationPressed, 0)
+        XCTAssertEqual(translatePressed, 1)
+        XCTAssertEqual(translateReleased, 1)
+
+        manager.deactivate(owner: owner)
+        XCTAssertTrue(unregistered.contains(dictationRef))
+        XCTAssertTrue(unregistered.contains(translateRef))
+        XCTAssertEqual(manager.translateRegistrationStatus, .inactive)
+    }
+
 #if DEBUG && canImport(RimeAIVoicePerformanceHelperBridge)
     func testDebugBuildIncludesEvaluationArtifactAdmissionBoundary() {
         XCTAssertTrue(
@@ -226,9 +292,79 @@ final class VoiceIntegrationSmokeTests: XCTestCase {
         XCTAssertEqual(snapshot.transcript, "")
         XCTAssertNil(snapshot.accessibilityLabel)
         XCTAssertTrue(snapshot.confirmIsHidden)
+        XCTAssertTrue(snapshot.copyIsHidden)
         XCTAssertTrue(snapshot.cancelIsHidden)
         XCTAssertFalse(snapshot.hasConfirmHandler)
+        XCTAssertFalse(snapshot.hasCopyHandler)
         XCTAssertFalse(snapshot.hasCancelHandler)
+        XCTAssertFalse(snapshot.isPersistentCopy)
+    }
+
+    func testVoicePanelListeningIsMinimalAndWrapsDynamically() {
+        let panel = VoiceDictationPanelController()
+        let anchor = NSRect(x: 300, y: 400, width: 2, height: 20)
+
+        panel.showListening(anchorRect: anchor, onCancel: {})
+        let listeningSnapshot = panel.testingSnapshot
+        XCTAssertEqual(listeningSnapshot.status, "")
+        XCTAssertTrue(listeningSnapshot.confirmIsHidden)
+        XCTAssertTrue(listeningSnapshot.copyIsHidden)
+        XCTAssertTrue(listeningSnapshot.cancelIsHidden)
+
+        panel.updatePreview(
+            stable: "你好",
+            partial: "",
+            pendingConfirm: false,
+            polishApplied: false,
+            anchorRect: anchor,
+            onConfirm: {},
+            onCancel: {}
+        )
+        let shortSize = panel.testingSnapshot.panelSize
+
+        let longText = String(repeating: "这是一段需要自动换行并动态调整弹窗高度的语音转写测试内容。", count: 4)
+        panel.updatePreview(
+            stable: longText,
+            partial: "",
+            pendingConfirm: false,
+            polishApplied: false,
+            anchorRect: anchor,
+            onConfirm: {},
+            onCancel: {}
+        )
+        let longSnapshot = panel.testingSnapshot
+        XCTAssertLessThanOrEqual(longSnapshot.panelSize.width, 380)
+        XCTAssertGreaterThan(longSnapshot.panelSize.height, shortSize.height + 24)
+        XCTAssertTrue(longSnapshot.cancelIsHidden)
+        panel.hide()
+    }
+
+    func testVoicePanelPersistentCopyModeRetainsCopyActionUntilDismissed() {
+        let panel = VoiceDictationPanelController()
+        let anchor = NSRect(x: 300, y: 400, width: 2, height: 20)
+        var copied = false
+
+        panel.showPersistentCopy(
+            text: "没有光标焦点时应持续悬浮并支持手动复制。",
+            anchorRect: anchor,
+            onCopied: { copied = true },
+            onClose: {}
+        )
+        let snapshot = panel.testingSnapshot
+        XCTAssertTrue(snapshot.isPersistentCopy)
+        XCTAssertTrue(snapshot.confirmIsHidden)
+        XCTAssertFalse(snapshot.copyIsHidden)
+        XCTAssertFalse(snapshot.cancelIsHidden)
+        XCTAssertTrue(snapshot.hasCopyHandler)
+
+        XCTAssertTrue(panel.triggerCopyFromShortcut())
+        XCTAssertTrue(copied)
+        XCTAssertEqual(
+            NSPasteboard.general.string(forType: .string),
+            "没有光标焦点时应持续悬浮并支持手动复制。"
+        )
+        panel.hide()
+        XCTAssertFalse(panel.testingSnapshot.isPersistentCopy)
     }
 #endif
 

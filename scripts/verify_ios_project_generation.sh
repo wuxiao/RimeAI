@@ -74,6 +74,7 @@ portable_core_sources=(
   RimeAISettingsStore.swift
   SessionContextStore.swift
   VoiceDictationKeyRouter.swift
+  VoicePreferenceTypes.swift
 )
 for source_file in "${portable_core_sources[@]}"; do
   cp \

@@ -55,19 +55,32 @@ public struct VoiceDictationShortcut: Codable, Equatable, Sendable {
         123, 124, 125, 126, // arrows
     ]
 
+    public static let rightCommandKeyCode: UInt16 = 54
+
     public let keyCode: UInt16
     public let modifiers: VoiceDictationKeyModifiers
     public static let validationFailureDescription =
-        "语音快捷键仅支持 Control-Shift 或 Option-Shift 搭配字母、数字或标点键；"
-        + "其他组合可能占用 VoiceOver、macOS 系统或编辑命令。"
+        "语音快捷键仅支持 Control-Shift 或 Option-Shift 搭配字母、数字或标点键，"
+        + "或单独点按右侧 Command（右 ⌘）；其他组合可能占用 VoiceOver、macOS 系统或编辑命令。"
 
-    /// 快捷键修饰键只接受精确的 Control-Shift 或 Option-Shift。
-    /// Command、VoiceOver Control-Option、单修饰键与三修饰键空间整体保留，
+    /// 是否为单修饰键点按切换模式（如右侧 Command：按一下开始、再按一下结束）。
+    public var isModifierTap: Bool {
+        keyCode == Self.rightCommandKeyCode && modifiers == [.command]
+    }
+
+    /// 快捷键修饰键接受精确的 Control-Shift / Option-Shift + 普通键，
+    /// 或单独点按右侧 Command（keyCode 54，切换开始/结束）。
+    /// 左侧 Command、VoiceOver Control-Option、单修饰键组合与三修饰键空间整体保留，
     /// 避免依赖会随系统版本扩张的 Apple 快捷键枚举。
     public init?(
         keyCode: UInt16,
         modifiers: VoiceDictationKeyModifiers
     ) {
+        if keyCode == Self.rightCommandKeyCode && modifiers == [.command] {
+            self.keyCode = keyCode
+            self.modifiers = modifiers
+            return
+        }
         guard Self.allowedModifierShapes.contains(modifiers),
               !Self.unsafeKeyCodes.contains(keyCode),
               Self.keyNames[keyCode] != nil
@@ -81,6 +94,17 @@ public struct VoiceDictationShortcut: Codable, Equatable, Sendable {
     public static let `default` = Self(
         keyCode: 9,
         modifiers: [.control, .shift]
+    )!
+
+    /// 一键语音翻译默认快捷键：Control-Shift-T（T = Translate）。
+    public static let defaultTranslate = Self(
+        keyCode: 17,
+        modifiers: [.control, .shift]
+    )!
+
+    public static let rightCommand = Self(
+        keyCode: rightCommandKeyCode,
+        modifiers: [.command]
     )!
 
     public init(from decoder: any Decoder) throws {
@@ -107,6 +131,9 @@ public struct VoiceDictationShortcut: Codable, Equatable, Sendable {
     }
 
     public var displayName: String {
+        if isModifierTap {
+            return "右 ⌘"
+        }
         var result = ""
         if modifiers.contains(.control) {
             result += "⌃"
@@ -252,12 +279,18 @@ struct VoiceHotKeyRegistrationPolicy {
 public enum VoiceDictationKeyDecision: Equatable, Sendable {
     case consumeShortcut
     case confirm
+    /// 云端润色 / 翻译仍在进行时按下了确认键：放弃等待云端结果，
+    /// 立即用本地已识别的原始文本上屏（调用方负责取消进行中的变换）。
+    case commitRawDuringTransform
     case cancelAndConsume
     case cancelAndContinue
     case passThrough
 }
 
 public enum VoiceDictationKeyRouter {
+    /// Space / Return / Keypad Enter：既有的三个确认键位。
+    private static let confirmationKeyCodes: Set<UInt16> = [49, 36, 76]
+
     public static func isExactVoiceShortcut(
         keyCode: UInt16,
         modifiers: VoiceDictationKeyModifiers,
@@ -280,6 +313,7 @@ public enum VoiceDictationKeyRouter {
         shortcutRegistered: Bool,
         hasActiveSession: Bool,
         pendingConfirmation: Bool,
+        isTransforming: Bool = false,
         isPlainConfirmationKey: Bool
     ) -> VoiceDictationKeyDecision {
         if isExactVoiceShortcut {
@@ -295,12 +329,72 @@ public enum VoiceDictationKeyRouter {
         if keyCode == 53 { // Escape
             return .cancelAndConsume
         }
-        if pendingConfirmation,
-           isPlainConfirmationKey,
-           keyCode == 49 || keyCode == 36 || keyCode == 76
-        {
+        let isConfirmationKey = isPlainConfirmationKey
+            && confirmationKeyCodes.contains(keyCode)
+        if isTransforming, isConfirmationKey {
+            // 变换（润色 / 翻译）尚未返回：确认键不再等待云端，
+            // 直接提交本地原始识别文本。
+            return .commitRawDuringTransform
+        }
+        if pendingConfirmation, isConfirmationKey {
             return .confirm
         }
         return .cancelAndContinue
+    }
+}
+
+/// 纯逻辑状态机：识别“单独点按右侧 Command 键（按一下松开，期间未按其他键或修饰键）”。
+/// 用于切换式语音听写（按一下启动，再按一下结束），不干扰 `右⌘+C/V` 等组合快捷键。
+public struct VoiceModifierTapDetector: Equatable, Sendable {
+    public static let maximumTapDurationSeconds: TimeInterval = 0.65
+
+    private var armedTimestamp: TimeInterval?
+
+    public init() {}
+
+    public mutating func reset() {
+        armedTimestamp = nil
+    }
+
+    /// 处理任意非修饰键按下（如 `右⌘+C`），立即取消待触发态。
+    public mutating func handleOtherKeyDown() {
+        armedTimestamp = nil
+    }
+
+    /// 处理 `flagsChanged` 事件；返回 `true` 表示完成一次干净的右 Command 点按。
+    public mutating func handleFlagsChanged(
+        keyCode: UInt16,
+        modifiers: VoiceDictationKeyModifiers,
+        timestamp: TimeInterval,
+        shortcut: VoiceDictationShortcut
+    ) -> Bool {
+        guard shortcut.isModifierTap else {
+            armedTimestamp = nil
+            return false
+        }
+        var semantic = modifiers
+        semantic.remove([.capsLock, .numericPad])
+
+        guard keyCode == shortcut.keyCode else {
+            // 其他修饰键按下或释放（如 Shift / Option / Control / Left Command）
+            armedTimestamp = nil
+            return false
+        }
+
+        if semantic == [.command] {
+            // 右 Command 单独按下，进入待确认点按态
+            armedTimestamp = timestamp
+            return false
+        }
+
+        if semantic.isEmpty, let start = armedTimestamp {
+            armedTimestamp = nil
+            let elapsed = timestamp - start
+            return elapsed >= 0 && elapsed <= Self.maximumTapDurationSeconds
+        }
+
+        // 组合了其他修饰键（如 右⌘+⇧）
+        armedTimestamp = nil
+        return false
     }
 }

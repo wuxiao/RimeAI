@@ -46,6 +46,15 @@ engine=apple-speech
 response='{"protocol_version":2,"type":"voice_ready","server_id":"fun.wwcn.rimeai.voice-helper","capabilities":["streaming","local_asr"],"network_policy":"offline","asr_engine_id":"apple-speech-ondevice","maximum_hotwords":0}'
 validate_ready_response || fail "exact Array<String> capabilities should pass"
 
+engine=mlx-qwen3-asr
+response='{"protocol_version":2,"type":"voice_ready","server_id":"fun.wwcn.rimeai.voice-helper","capabilities":["hotword_snapshot","local_asr","streaming"],"network_policy":"offline","asr_engine_id":"mlx-qwen3-asr","maximum_hotwords":128}'
+validate_ready_response || fail "mlx-qwen3-asr ready response with 128 hotwords should pass"
+expect_ready_rejected "mlx-qwen3-asr missing hotword_snapshot" \
+  '{"protocol_version":2,"type":"voice_ready","server_id":"fun.wwcn.rimeai.voice-helper","capabilities":["local_asr","streaming"],"network_policy":"offline","asr_engine_id":"mlx-qwen3-asr","maximum_hotwords":128}'
+expect_ready_rejected "mlx-qwen3-asr zero maximum_hotwords" \
+  '{"protocol_version":2,"type":"voice_ready","server_id":"fun.wwcn.rimeai.voice-helper","capabilities":["hotword_snapshot","local_asr","streaming"],"network_policy":"offline","asr_engine_id":"mlx-qwen3-asr","maximum_hotwords":0}'
+engine=apple-speech
+
 version_plist="${test_root}/helper-info.plist"
 cp "${info_plist}" "${version_plist}"
 marketing_version=2.3.4

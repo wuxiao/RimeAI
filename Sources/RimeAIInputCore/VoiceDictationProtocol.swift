@@ -9,7 +9,9 @@ public enum VoiceDictationConstants {
     public static let maximumTextCharacters = 200
     public static let maximumContextCharacters = 600
     public static let minimumDeadlineMilliseconds = 1
-    public static let maximumDeadlineMilliseconds = 5_000
+    public static let maximumDeadlineMilliseconds = 30_000
+    /// `0` 表示不限制单次听写时长；正数表示显式上限（供测试或有限会话使用）。
+    public static let unlimitedDurationMilliseconds = 0
     public static let maximumDurationMilliseconds = 60_000
     public static let deltaTimeoutMilliseconds = 2_000
     public static let circuitBreakerLimit = 3
@@ -68,17 +70,6 @@ enum VoiceTextValidation {
     /// 听写文本必须单行；换行在 delta、final 中都按协议错误处理。
     static func isValidSingleLine(_ text: String) -> Bool {
         !text.contains("\n") && !text.contains("\r")
-    }
-
-    /// 协议长度以 Swift `Character`（扩展字素簇）计数；`prefix` 不会
-    /// 把 emoji 或组合字符截成无效的 Unicode 片段。
-    static func truncatedToMaximumCharacters(_ text: String) -> String {
-        guard text.count > VoiceDictationConstants.maximumTextCharacters else {
-            return text
-        }
-        return String(text.prefix(
-            VoiceDictationConstants.maximumTextCharacters
-        ))
     }
 }
 
@@ -269,7 +260,7 @@ public struct VoiceDictationStart: Codable, Equatable, Sendable {
         mode: VoiceDictationMode,
         deadlineMilliseconds: Int,
         maximumDurationMilliseconds: Int = VoiceDictationConstants
-            .maximumDurationMilliseconds,
+            .unlimitedDurationMilliseconds,
         hotwordSnapshot: VoiceHotwordSnapshot? = .empty
     ) {
         self.protocolVersion = protocolVersion
@@ -297,9 +288,7 @@ public struct VoiceDictationStart: Codable, Equatable, Sendable {
             && (VoiceDictationConstants.minimumDeadlineMilliseconds
                 ... VoiceDictationConstants.maximumDeadlineMilliseconds)
                 .contains(deadlineMilliseconds)
-            && maximumDurationMilliseconds > 0
-            && maximumDurationMilliseconds
-                <= VoiceDictationConstants.maximumDurationMilliseconds
+            && maximumDurationMilliseconds >= 0
             && (hotwordSnapshot?.isValid ?? true)
     }
 
@@ -568,8 +557,6 @@ public struct VoiceDictationDelta: Codable, Equatable, Sendable {
             && VoiceTextValidation.isValidSingleLine(stableText)
             && VoiceTextValidation.isValidSingleLine(partialText)
             && (!stableText.isEmpty || !partialText.isEmpty)
-            && (stableText.count + partialText.count)
-                <= VoiceDictationConstants.maximumTextCharacters
     }
 
     enum CodingKeys: String, CodingKey {
@@ -619,8 +606,6 @@ public struct VoiceDictationFinal: Codable, Equatable, Sendable {
             && !requestID.isEmpty
             && requestID.utf8.count <= 128
             && !finalText.isEmpty
-            && finalText.count
-                <= VoiceDictationConstants.maximumTextCharacters
             && VoiceTextValidation.isValidSingleLine(finalText)
             && confidence.isFinite
             && (0 ... 1).contains(confidence)

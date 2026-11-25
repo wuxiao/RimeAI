@@ -19,6 +19,7 @@ public struct RimeAIProductDataLayout: Equatable, Sendable {
     public let languageProfileDirectory: URL
     public let phraseBookDatabase: URL
     public let voiceDirectory: URL
+    public let voiceHistoryDatabase: URL
     public let voiceHelperApplication: URL
     public let voiceSocket: URL
     public let rimeUserDataDirectory: URL
@@ -74,6 +75,8 @@ public struct RimeAIProductDataLayout: Equatable, Sendable {
             )
         voiceDirectory = supportDirectory
             .appendingPathComponent("voice", isDirectory: true)
+        voiceHistoryDatabase = voiceDirectory
+            .appendingPathComponent("voice-history.sqlite3", isDirectory: false)
         voiceHelperApplication = voiceDirectory
             .appendingPathComponent("RimeAIVoiceHelper.app", isDirectory: true)
         voiceSocket = runtimeDirectory

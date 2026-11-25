@@ -23,6 +23,7 @@ from rimeai_daemon.segment_policy import (
 )
 from rimeai_runtime.localipc import (
     AlreadyListeningError,
+    ClientSession,
     ExistingSocketUnverifiableError,
     NotASocketPathError,
     PeerIdentityError,
@@ -30,6 +31,7 @@ from rimeai_runtime.localipc import (
     SocketPathTooLongError,
     peer_uid,
     prepare_unix_listener_socket,
+    shutdown_unix_listener,
 )
 
 from .cloud_model import (
@@ -38,6 +40,10 @@ from .cloud_model import (
     ENDPOINT,
     GENERATE_MAXIMUM_CHARACTERS,
     PROVIDER,
+    VOICE_TRANSFORM_ALLOWED_MODELS,
+    VOICE_TRANSFORM_MAX_INPUT_CHARS,
+    VOICE_TRANSFORM_POLISH_STYLES,
+    VOICE_TRANSFORM_TARGET_LANGUAGES,
     _han_count,
 )
 from .decision_journal import (
@@ -62,8 +68,30 @@ class CloudBrokerConfigurationError(ValueError):
     pass
 
 
+# Broker shutdown is bounded, like the daemon's: a wedged client handler
+# (e.g. a peer that vanishes mid-teardown) must never block close()
+# forever. On Python 3.12+ Server.wait_closed() also waits for every
+# client handler, so an idle client would do exactly that without the
+# bounded client teardown in close().
+CLOSE_TEARDOWN_TIMEOUT_SECONDS = 5.0
+# Graceful phase of the client teardown: pending frames are flushed
+# before the socket closes; whatever is still open after this is aborted.
+CLOSE_CLIENT_GRACE_SECONDS = 0.5
+
+
 def _bounded_string(value: Any, maximum: int) -> bool:
     return isinstance(value, str) and 0 < len(value.encode()) <= maximum
+
+
+async def _close_writer(writer: asyncio.StreamWriter) -> None:
+    """Close a client socket and wait for the close to complete.
+
+    Transport errors are the peer's doing (it may already be gone); the
+    connection is over either way.
+    """
+    writer.close()
+    with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+        await writer.wait_closed()
 
 
 def validate_request(message: Any) -> dict[str, Any]:
@@ -208,6 +236,64 @@ def validate_continuation_request(message: Any) -> dict[str, Any]:
     return message
 
 
+def validate_voice_transform_request(message: Any) -> dict[str, Any]:
+    if not isinstance(message, dict):
+        raise ValueError("request must be an object")
+    if message.get("type") != "voice_transform":
+        raise ValueError("request type is invalid")
+    if not _bounded_string(message.get("api_key"), 512):
+        raise ValueError("cloud credential is invalid")
+    for field, maximum in {
+        "request_id": 256,
+        "client_session_id": 256,
+        "bundle_id": 512,
+        "model_id": 128,
+    }.items():
+        if not _bounded_string(message.get(field), maximum):
+            raise ValueError(f"{field} is invalid")
+    if message.get("model_id") not in VOICE_TRANSFORM_ALLOWED_MODELS:
+        raise ValueError("model is not allowed")
+    deadline = message.get("deadline_ms")
+    if (
+        not isinstance(deadline, int)
+        or isinstance(deadline, bool)
+        or not 1 <= deadline <= 30000
+    ):
+        raise ValueError("deadline must be from 1 to 30000 ms")
+    task = message.get("task")
+    if task not in {"polish", "translate"}:
+        raise ValueError("voice transform task is invalid")
+    text = message.get("text")
+    if (
+        not isinstance(text, str)
+        or not text.strip()
+        or len(text) > VOICE_TRANSFORM_MAX_INPUT_CHARS
+        or "\x00" in text
+    ):
+        raise ValueError("voice transform text is invalid")
+    if task == "polish":
+        if message.get("style") not in VOICE_TRANSFORM_POLISH_STYLES:
+            raise ValueError("polish style is invalid")
+    else:
+        if message.get("target_language") not in VOICE_TRANSFORM_TARGET_LANGUAGES:
+            raise ValueError("target language is invalid")
+    hotwords = message.get("hotwords")
+    if hotwords is not None:
+        if (
+            not isinstance(hotwords, list)
+            or len(hotwords) > 32
+            or any(
+                not isinstance(item, str)
+                or not item.strip()
+                or len(item) > 64
+                or "\x00" in item
+                for item in hotwords
+            )
+        ):
+            raise ValueError("hotwords are invalid")
+    return message
+
+
 def validate_decision(
     decision: Any,
     cloud_request: dict[str, Any],
@@ -281,6 +367,10 @@ class CloudBrokerServer:
         self._activity_notifier = activity_notifier
         self._server: asyncio.AbstractServer | None = None
         self._tasks: set[asyncio.Task[Any]] = set()
+        self._clients: set[ClientSession] = set()
+        # Flipped by close(): handlers leave their read loop at the top of
+        # their next iteration instead of starting more request tasks.
+        self._closing = False
         self._index_task: asyncio.Task[Any] | None = None
         # Cancellation cannot interrupt a blocking urllib call already in a
         # thread. A single worker ensures obsolete calls cannot fan out into
@@ -291,6 +381,7 @@ class CloudBrokerServer:
         )
 
     async def start(self) -> None:
+        self._closing = False
         try:
             self._server = await prepare_unix_listener_socket(
                 self.socket_path,
@@ -320,14 +411,31 @@ class CloudBrokerServer:
             self._index_task.cancel()
             await asyncio.gather(self._index_task, return_exceptions=True)
             self._index_task = None
-        if self._server is not None:
-            self._server.close()
-            await self._server.wait_closed()
-            self._server = None
+        # Refuse new work first: every handler leaves its read loop at the
+        # top of its next iteration, so no request task is created after
+        # this point.
+        self._closing = True
+        server, self._server = self._server, None
+        # In-flight request tasks go first: once a client writer is
+        # closed, a late write would only hit a dead transport.
         for task in tuple(self._tasks):
             task.cancel()
+        if server is not None:
+            # Closes the listener and brings every client handler down
+            # within a bounded budget (idle clients included), then
+            # waits — bounded as well — for the server itself.
+            await shutdown_unix_listener(
+                server,
+                self._clients,
+                grace_seconds=CLOSE_CLIENT_GRACE_SECONDS,
+                timeout_seconds=CLOSE_TEARDOWN_TIMEOUT_SECONDS,
+            )
         if self._tasks:
-            await asyncio.gather(*self._tasks, return_exceptions=True)
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(
+                    asyncio.gather(*self._tasks, return_exceptions=True),
+                    timeout=CLOSE_TEARDOWN_TIMEOUT_SECONDS,
+                )
         if self.decision_journal is not None:
             self.decision_journal.close()
         if self.socket_path.exists() and stat.S_ISSOCK(
@@ -381,17 +489,24 @@ class CloudBrokerServer:
         peer = writer.get_extra_info("socket")
         try:
             if peer is None or peer_uid(peer.fileno()) != os.geteuid():
+                # A refused peer still owns an open socket: close it here
+                # instead of leaving it to garbage collection.
+                await _close_writer(writer)
                 return
         except (OSError, PeerIdentityError):
+            await _close_writer(writer)
             return
         lock = asyncio.Lock()
+        session = ClientSession(writer, asyncio.current_task())
+        self._clients.add(session)
         hello = False
         client_capabilities: set[str] = set()
         pending: dict[str, asyncio.Task[Any]] = {}
         pending_continuations: dict[str, asyncio.Task[Any]] = {}
+        pending_voice_transforms: dict[str, asyncio.Task[Any]] = {}
         latest: dict[tuple[str, str], int] = {}
         try:
-            while not reader.at_eof():
+            while not reader.at_eof() and not self._closing:
                 try:
                     line = await reader.readline()
                 except (ValueError, asyncio.LimitOverrunError):
@@ -427,6 +542,7 @@ class CloudBrokerServer:
                         "history-generation",
                         "text-generation",
                         "continuation-generation",
+                        "voice-transform",
                     ]
                     if self.decision_journal is not None:
                         capabilities.append("sentence-feedback")
@@ -451,6 +567,8 @@ class CloudBrokerServer:
                         task = pending.get(request_id)
                         if task is None:
                             task = pending_continuations.get(request_id)
+                        if task is None:
+                            task = pending_voice_transforms.get(request_id)
                         if task is not None:
                             task.cancel()
                     continue
@@ -498,6 +616,28 @@ class CloudBrokerServer:
                     self._tasks.add(task)
                     task.add_done_callback(self._tasks.discard)
                     continue
+                if message_type == "voice_transform":
+                    try:
+                        transform_request = validate_voice_transform_request(message)
+                    except ValueError:
+                        continue
+                    if self._activity_notifier is not None:
+                        self._activity_notifier()
+                    for old_id, old_task in tuple(pending_voice_transforms.items()):
+                        if not old_task.done():
+                            old_task.cancel()
+                        pending_voice_transforms.pop(old_id, None)
+                    task = asyncio.create_task(
+                        self._run_voice_transform(
+                            transform_request,
+                            writer,
+                            lock,
+                        )
+                    )
+                    pending_voice_transforms[transform_request["request_id"]] = task
+                    self._tasks.add(task)
+                    task.add_done_callback(self._tasks.discard)
+                    continue
                 if message_type != "inference":
                     continue
                 try:
@@ -537,9 +677,10 @@ class CloudBrokerServer:
                 task.cancel()
             for task in pending_continuations.values():
                 task.cancel()
-            writer.close()
-            with contextlib.suppress(BrokenPipeError, ConnectionResetError):
-                await writer.wait_closed()
+            for task in pending_voice_transforms.values():
+                task.cancel()
+            await _close_writer(writer)
+            self._clients.discard(session)
 
     async def _run(
         self,
@@ -748,6 +889,94 @@ class CloudBrokerServer:
             decision.get("generated_text"),
             decision.get("confidence"),
             decision.get("reason"),
+        )
+
+    async def _run_voice_transform(
+        self,
+        cloud_request: dict[str, Any],
+        writer: asyncio.StreamWriter,
+        lock: asyncio.Lock,
+    ) -> None:
+        started = monotonic()
+        budget_seconds = cloud_request["deadline_ms"] / 1000
+        request_id = cloud_request["request_id"]
+        transform_fn = getattr(self.ranker, "transform_voice_text", None)
+        if transform_fn is None:
+            await self._write(
+                writer,
+                lock,
+                {
+                    "schema_version": 1,
+                    "type": "result",
+                    "status": "error",
+                    "request_id": request_id,
+                    "task": cloud_request["task"],
+                    "model_id": cloud_request["model_id"],
+                    "elapsed_ms": round((monotonic() - started) * 1000, 3),
+                },
+            )
+            return
+        try:
+            remaining = budget_seconds - (monotonic() - started)
+            if remaining <= 0:
+                return
+            result = await asyncio.wait_for(
+                asyncio.get_running_loop().run_in_executor(
+                    self._rank_executor,
+                    transform_fn,
+                    cloud_request,
+                ),
+                timeout=remaining,
+            )
+        except asyncio.TimeoutError:
+            sys.stderr.write(f"[cloud] voice_transform timeout request={request_id}\n")
+            sys.stderr.flush()
+            return
+        except asyncio.CancelledError:
+            sys.stderr.write(f"[cloud] voice_transform cancelled request={request_id}\n")
+            sys.stderr.flush()
+            return
+        except Exception as exc:
+            sys.stderr.write(
+                f"[cloud] voice_transform error request={request_id} "
+                f"{type(exc).__name__}: {exc}\n"
+            )
+            sys.stderr.flush()
+            await self._write(
+                writer,
+                lock,
+                {
+                    "schema_version": 1,
+                    "type": "result",
+                    "status": "error",
+                    "request_id": request_id,
+                    "task": cloud_request["task"],
+                    "model_id": cloud_request["model_id"],
+                    "elapsed_ms": round((monotonic() - started) * 1000, 3),
+                },
+            )
+            return
+        elapsed = (monotonic() - started) * 1000
+        if elapsed > cloud_request["deadline_ms"]:
+            return
+        sys.stderr.write(
+            f"[cloud] voice_transform task={cloud_request['task']} "
+            f"elapsed={elapsed:.0f}ms\n"
+        )
+        sys.stderr.flush()
+        await self._write(
+            writer,
+            lock,
+            {
+                "schema_version": 1,
+                "type": "result",
+                "status": "ok",
+                "request_id": request_id,
+                "task": result["task"],
+                "transformed_text": result["transformed_text"],
+                "model_id": cloud_request["model_id"],
+                "elapsed_ms": round(elapsed, 3),
+            },
         )
 
     def _prepare_history_request(

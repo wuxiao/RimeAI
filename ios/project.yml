@@ -40,6 +40,7 @@ targets:
       - path: ../Sources/RimeAIInputCore/RimeAISettingsStore.swift
       - path: ../Sources/RimeAIInputCore/SessionContextStore.swift
       - path: ../Sources/RimeAIInputCore/VoiceDictationKeyRouter.swift
+      - path: ../Sources/RimeAIInputCore/VoicePreferenceTypes.swift
       - path: ../LICENSE
         buildPhase: resources
       - path: ThirdPartyLicenses
@@ -87,6 +88,7 @@ targets:
       - path: ../Sources/RimeAIInputCore/LocalSemanticRanker.swift
       - path: ../Sources/RimeAIInputCore/SessionContextStore.swift
       - path: ../Sources/RimeAIInputCore/VoiceDictationKeyRouter.swift
+      - path: ../Sources/RimeAIInputCore/VoicePreferenceTypes.swift
     dependencies:
       - framework: Native/RimeAINative.xcframework
     settings:
@@ -137,6 +139,7 @@ targets:
       - path: ../Sources/RimeAIInputCore/LocalSemanticRanker.swift
       - path: ../Sources/RimeAIInputCore/SessionContextStore.swift
       - path: ../Sources/RimeAIInputCore/VoiceDictationKeyRouter.swift
+      - path: ../Sources/RimeAIInputCore/VoicePreferenceTypes.swift
     dependencies:
       - framework: Native/RimeAINative.xcframework
     settings:

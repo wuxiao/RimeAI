@@ -542,7 +542,7 @@ struct VoiceDictationXPCTransportTests {
         defer { engine.releaseFirstCancel() }
 
         DispatchQueue.global().async {
-            engine.triggerOversizePartial()
+            engine.triggerInvalidPartial()
         }
         #expect(engine.waitUntilFirstCancelBegins())
 
@@ -974,12 +974,12 @@ private final class BlockingFirstCancelVoiceEngine:
         }
     }
 
-    func triggerOversizePartial() {
+    func triggerInvalidPartial() {
         lock.lock()
         let sink = self.sink
         lock.unlock()
         sink?(.partial(
-            stableText: String(repeating: "字", count: 201),
+            stableText: "非法\n多行",
             partialText: "",
             confidence: 0.8
         ))

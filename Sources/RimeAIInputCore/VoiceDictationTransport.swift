@@ -42,10 +42,10 @@ public enum VoiceDictationWireError: Error, Equatable, CustomStringConvertible {
     }
 }
 
-/// NDJSON 编解码：一行一个 JSON 对象，行上限 64 KiB，
+/// NDJSON 编解码：一行一个 JSON 对象，行上限 4 MiB（支持不限字数的长段听写），
 /// 超限或坏行按协议错误处理（断开，不猜测语义）。
 public enum VoiceDictationWire {
-    public static let maximumLineBytes = 65_536
+    public static let maximumLineBytes = 4 * 1_024 * 1_024
 
     private static let typeKey = "type"
 

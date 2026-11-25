@@ -79,6 +79,7 @@ public struct VoiceHelperReleaseBootstrap {
                   [
                       "unavailable",
                       "apple-speech",
+                      "mlx-qwen3-asr",
                       "product-managed",
                   ].contains(values[3])
             else {

@@ -45,6 +45,7 @@ targets:
         embed: false
       - sdk: AppKit.framework
       - sdk: Carbon.framework
+      - sdk: CoreAudio.framework
       - sdk: InputMethodKit.framework
       - sdk: Network.framework
       - sdk: Security.framework

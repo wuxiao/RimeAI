@@ -134,3 +134,60 @@ public struct VoiceHotwordAdmissionState: Equatable, Sendable {
         phrases.removeAll(keepingCapacity: false)
     }
 }
+
+/// Priority merger that assembles one bounded, protocol-valid
+/// `VoiceHotwordSnapshot` from multiple hotword tiers:
+///   P0: User-curated custom voice hotwords / common phrases
+///   P1: L1 phrasebook & active domain lexicon entries
+///   P2: Current-session ephemeral Rime commits
+///
+/// Any individual phrase that violates `VoiceHotwordSnapshot` constraints is
+/// skipped instead of rejecting the entire hotword list.
+public enum VoiceHotwordMerger {
+    public static func merge(
+        customPhrases: [String] = [],
+        phraseBookPhrases: [String] = [],
+        sessionRimePhrases: [String] = [],
+        maximumEntries: Int = VoiceDictationConstants.maximumHotwordCount
+    ) -> VoiceHotwordSnapshot {
+        let cap = max(
+            0,
+            min(maximumEntries, VoiceDictationConstants.maximumHotwordCount)
+        )
+        guard cap > 0 else {
+            return .empty
+        }
+        var seen = Set<String>()
+        var accepted: [String] = []
+        accepted.reserveCapacity(min(cap, customPhrases.count + phraseBookPhrases.count + sessionRimePhrases.count))
+        var totalUTF8Bytes = 0
+
+        for source in [customPhrases, phraseBookPhrases, sessionRimePhrases] {
+            for raw in source {
+                guard accepted.count < cap else {
+                    break
+                }
+                guard let single = try? VoiceHotwordSnapshot(phrases: [raw]),
+                      let normalized = single.phrases.first
+                else {
+                    continue
+                }
+                guard seen.insert(normalized).inserted else {
+                    continue
+                }
+                let phraseBytes = normalized.utf8.count
+                guard totalUTF8Bytes + phraseBytes
+                    <= VoiceDictationConstants.maximumHotwordSetUTF8Bytes
+                else {
+                    continue
+                }
+                accepted.append(normalized)
+                totalUTF8Bytes += phraseBytes
+            }
+            if accepted.count >= cap {
+                break
+            }
+        }
+        return (try? VoiceHotwordSnapshot(phrases: accepted)) ?? .empty
+    }
+}

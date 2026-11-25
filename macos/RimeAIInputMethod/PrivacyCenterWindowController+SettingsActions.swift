@@ -3,6 +3,49 @@ import UniformTypeIdentifiers
 
 /// 机械拆分自 PrivacyCenterWindowController.swift（纯代码搬移，行为不变）。
 extension PrivacyCenterWindowController {
+    /// 开关分发表：每个开关对应一个独立处理函数，新增开关不再让单个方法
+    /// 随分支数量膨胀。
+    private var toggleHandlers: [ObjectIdentifier: (NSButton) -> Void] {
+        [
+            ObjectIdentifier(aiToggle): { [weak self] in
+                self?.applyAIToggle($0)
+            },
+            ObjectIdentifier(voiceToggle): { [weak self] in
+                self?.applyVoiceToggle($0)
+            },
+            ObjectIdentifier(voiceRimeHotwordToggle): { [weak self] in
+                self?.applyVoiceRimeHotwordToggle($0)
+            },
+            ObjectIdentifier(voicePhraseBookHotwordToggle): { [weak self] in
+                self?.applyVoicePhraseBookHotwordToggle($0)
+            },
+            ObjectIdentifier(voiceAutoLearnCorrectionsToggle): { [weak self] in
+                self?.applyVoiceAutoLearnCorrectionsToggle($0)
+            },
+            ObjectIdentifier(voiceCloudHotwordsToggle): { [weak self] in
+                self?.applyVoiceCloudHotwordsToggle($0)
+            },
+            ObjectIdentifier(voiceAXFallbackReadToggle): { [weak self] in
+                self?.applyVoiceAXFallbackReadToggle($0)
+            },
+            ObjectIdentifier(voiceSmartPolishToggle): { [weak self] in
+                self?.applyVoiceSmartPolishToggle($0)
+            },
+            ObjectIdentifier(voiceAutoPasteToggle): { [weak self] in
+                self?.applyVoiceAutoPasteToggle($0)
+            },
+            ObjectIdentifier(voiceHistoryToggle): { [weak self] in
+                self?.applyVoiceHistoryToggle($0)
+            },
+            ObjectIdentifier(voiceSoundEffectsToggle): { [weak self] in
+                self?.applyVoiceSoundEffectsToggle($0)
+            },
+            ObjectIdentifier(voiceMuteSystemAudioToggle): { [weak self] in
+                self?.applyVoiceMuteSystemAudioToggle($0)
+            },
+        ]
+    }
+
     @objc func toggleChanged(_ sender: NSButton) {
         if lifecycleCoordinator.isReconciling,
            sender === aiToggle || sender === voiceToggle
@@ -14,49 +57,250 @@ extension PrivacyCenterWindowController {
             )
             return
         }
-        if sender === aiToggle {
-            let enabled = sender.state == .on
-            settings.aiEnabled = enabled
-            if !enabled {
-                settings.clearEphemeralData()
-                DaemonClient.shared.disconnect()
-                settings.voiceEnabled = false
-            }
-            reconcileRuntime(
-                SettingsRuntimeTransition(
-                    daemonEnabled: enabled,
-                    cloudBrokerEnabled: nil,
-                    voiceHelperEnabled: enabled ? nil : false
-                ),
-                operation: enabled ? "本地 AI 已设为启用" : "本地 AI 已设为停用"
+        toggleHandlers[ObjectIdentifier(sender)]?(sender)
+    }
+
+    private func applyAIToggle(_ sender: NSButton) {
+        let enabled = sender.state == .on
+        settings.aiEnabled = enabled
+        if !enabled {
+            settings.clearEphemeralData()
+            DaemonClient.shared.disconnect()
+            settings.voiceEnabled = false
+        }
+        reconcileRuntime(
+            SettingsRuntimeTransition(
+                daemonEnabled: enabled,
+                cloudBrokerEnabled: nil,
+                voiceHelperEnabled: enabled ? nil : false
+            ),
+            operation: enabled ? "本地 AI 已设为启用" : "本地 AI 已设为停用"
+        )
+    }
+
+    private func applyVoiceToggle(_ sender: NSButton) {
+        guard settings.aiEnabled else {
+            voiceToggle.state = .off
+            return
+        }
+        let enabled = sender.state == .on
+        if !enabled {
+            settings.voiceEnabled = false
+        }
+        reconcileRuntime(
+            SettingsRuntimeTransition(
+                daemonEnabled: nil,
+                cloudBrokerEnabled: nil,
+                voiceHelperEnabled: enabled
+            ),
+            operation: enabled ? "语音已设为启用" : "语音已设为停用"
+        )
+    }
+
+    /// 热词与自动纠错类开关的共同前置：AI 与语音均开启且非 strict 策略。
+    private func voiceContextFeatureAllowed() -> Bool {
+        settings.aiEnabled
+            && settings.voiceEnabled
+            && settings.contextPolicy != .strict
+    }
+
+    /// 不满足前置条件时把控件恢复为已保存的取值。
+    private func restoreToggle(_ button: NSButton, isOn: Bool) {
+        button.state = isOn ? .on : .off
+    }
+
+    private func applyVoiceRimeHotwordToggle(_ sender: NSButton) {
+        guard voiceContextFeatureAllowed() else {
+            restoreToggle(voiceRimeHotwordToggle, isOn: settings.voiceRimeHotwordsEnabled)
+            return
+        }
+        settings.voiceRimeHotwordsEnabled = sender.state == .on
+    }
+
+    private func applyVoicePhraseBookHotwordToggle(_ sender: NSButton) {
+        guard voiceContextFeatureAllowed() else {
+            restoreToggle(
+                voicePhraseBookHotwordToggle,
+                isOn: settings.voicePhraseBookHotwordsEnabled
             )
-        } else if sender === voiceToggle {
-            guard settings.aiEnabled else {
-                voiceToggle.state = .off
+            return
+        }
+        settings.voicePhraseBookHotwordsEnabled = sender.state == .on
+    }
+
+    private func applyVoiceAutoLearnCorrectionsToggle(_ sender: NSButton) {
+        guard voiceContextFeatureAllowed() else {
+            restoreToggle(
+                voiceAutoLearnCorrectionsToggle,
+                isOn: settings.voiceAutoLearnCorrectionsEnabled
+            )
+            return
+        }
+        settings.voiceAutoLearnCorrectionsEnabled = sender.state == .on
+        if sender.state != .on {
+            VoicePostCommitEditTracker.shared.clearEphemeralData()
+        }
+    }
+
+    private func applyVoiceCloudHotwordsToggle(_ sender: NSButton) {
+        guard settings.aiEnabled, settings.voiceEnabled else {
+            restoreToggle(voiceCloudHotwordsToggle, isOn: settings.voiceCloudHotwordsEnabled)
+            return
+        }
+        // 默认关闭的显式 opt-in：只有开启后热词上下文才会离开本机。
+        settings.setVoiceCloudHotwordsEnabled(sender.state == .on)
+    }
+
+    private func applyVoiceAXFallbackReadToggle(_ sender: NSButton) {
+        guard voiceContextFeatureAllowed() else {
+            restoreToggle(voiceAXFallbackReadToggle, isOn: settings.voiceAXFallbackReadEnabled)
+            return
+        }
+        // 默认关闭的显式 opt-in：读取光标周边文本属于额外的隐私边界。
+        let enabled = sender.state == .on
+        settings.setVoiceAXFallbackReadEnabled(enabled)
+        if !enabled {
+            VoicePostCommitEditTracker.shared.clearEphemeralData()
+        }
+    }
+
+    private func applyVoiceSmartPolishToggle(_ sender: NSButton) {
+        settings.voiceSmartPolishEnabled = sender.state == .on
+    }
+
+    private func applyVoiceAutoPasteToggle(_ sender: NSButton) {
+        settings.voiceAutoPasteEnabled = sender.state == .on
+    }
+
+    private func applyVoiceHistoryToggle(_ sender: NSButton) {
+        settings.voiceHistoryEnabled = sender.state == .on
+    }
+
+    private func applyVoiceSoundEffectsToggle(_ sender: NSButton) {
+        settings.voiceSoundEffectsEnabled = sender.state == .on
+        if sender.state == .on {
+            VoiceSoundEffectsPlayer.shared.play(.start, enabled: true)
+        }
+    }
+
+    private func applyVoiceMuteSystemAudioToggle(_ sender: NSButton) {
+        settings.voiceMuteSystemAudioEnabled = sender.state == .on
+    }
+
+    @objc func voicePolishStyleChanged(_ sender: NSPopUpButton) {
+        let styles = VoicePolishStyle.allCases
+        let index = max(0, min(sender.indexOfSelectedItem, styles.count - 1))
+        settings.voicePolishStyle = styles[index]
+    }
+
+    @objc func voiceTranslateLanguageChanged(_ sender: NSPopUpButton) {
+        let languages = VoiceTranslationLanguage.allCases
+        let index = max(0, min(sender.indexOfSelectedItem, languages.count - 1))
+        settings.voiceTranslateTargetLanguage = languages[index]
+    }
+
+    func captureVoiceTranslateShortcut(
+        keyCode: UInt16,
+        modifierFlags: NSEvent.ModifierFlags
+    ) {
+        guard let shortcut = VoiceHotKeyManager.makeShortcut(
+            keyCode: keyCode,
+            modifierFlags: modifierFlags
+        ) else {
+            voiceTranslateShortcutCaptureButton.showValidationFailure()
+            voiceTranslateShortcutStatusLabel.stringValue =
+                "组合不可用；原翻译快捷键 \(settings.voiceTranslateShortcut.displayName) 仍已保留"
+            voiceTranslateShortcutStatusLabel.textColor = .systemRed
+            updateSettingsActionStatus(
+                .failure,
+                "翻译快捷键未更改："
+                    + VoiceDictationShortcut.validationFailureDescription
+            )
+            return
+        }
+        guard shortcut != settings.voiceShortcut else {
+            voiceTranslateShortcutCaptureButton.showValidationFailure()
+            voiceTranslateShortcutStatusLabel.stringValue =
+                "不能与语音听写快捷键（\(settings.voiceShortcut.displayName)）相同"
+            voiceTranslateShortcutStatusLabel.textColor = .systemRed
+            updateSettingsActionStatus(
+                .failure,
+                "翻译快捷键不能与语音听写快捷键重复"
+            )
+            return
+        }
+        settings.voiceTranslateShortcut = shortcut
+        voiceTranslateShortcutCaptureButton.finishCapture(
+            displayName: shortcut.displayName
+        )
+        voiceTranslateShortcutCancelButton.isEnabled = false
+        updateSettingsActionStatus(
+            .success,
+            "一键翻译快捷键已更改为 \(shortcut.displayName)"
+        )
+        refreshVoiceTranslateShortcutStatus()
+    }
+
+    @objc func cancelVoiceTranslateShortcutEdit(_ sender: Any?) {
+        voiceTranslateShortcutCaptureButton.cancelCapture()
+        voiceTranslateShortcutCancelButton.isEnabled = false
+        refreshVoiceTranslateShortcutStatus()
+    }
+
+    @objc func restoreDefaultVoiceTranslateShortcut(_ sender: Any?) {
+        let shortcut = VoiceDictationShortcut.defaultTranslate
+        settings.voiceTranslateShortcut = shortcut
+        voiceTranslateShortcutCaptureButton.finishCapture(
+            displayName: shortcut.displayName
+        )
+        voiceTranslateShortcutCancelButton.isEnabled = false
+        updateSettingsActionStatus(
+            .success,
+            "一键翻译快捷键已恢复为 \(shortcut.displayName)"
+        )
+        refreshVoiceTranslateShortcutStatus()
+    }
+
+    @objc func saveVoiceCustomHotwords(_ sender: Any?) {
+        // 与编辑器实时计数共用同一解析规则，保证“编辑中 N 条”与保存结果一致。
+        let parts = VoiceHotwordsEditing.parse(voiceCustomHotwordsTextView.string)
+        let normalized = RimeAISettingsStore.normalizedVoiceCustomHotwords(parts)
+        settings.voiceCustomHotwords = normalized
+        voiceCustomHotwordsTextView.string = normalized.joined(separator: "\n")
+        voiceCustomHotwordsIsDirty = false
+        let skipped = max(0, parts.count - normalized.count)
+        let suffix = skipped > 0 ? "（已跳过 \(skipped) 条重复或非法词条）" : ""
+        updateSettingsActionStatus(
+            .success,
+            "已保存 \(normalized.count) 条语音常用语热词\(suffix)"
+        )
+    }
+
+    @objc func clearVoiceLearnedCorrections(_ sender: Any?) {
+        let count = settings.voiceLearnedCorrections.count
+        guard count > 0 else {
+            updateSettingsActionStatus(.success, "当前没有自动纠错映射")
+            return
+        }
+        // 不可撤销的删除必须先确认，避免误点。
+        let alert = NSAlert()
+        alert.messageText = "清空自动纠错映射？"
+        alert.informativeText =
+            "将删除 \(count) 条从你上屏后手动修改中学到的纠错映射（错词 → 正词）。"
+            + "自定义热词与个人短语库不受影响。"
+        alert.addButton(withTitle: "清空")
+        alert.addButton(withTitle: "取消")
+        alert.alertStyle = .warning
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn, let self else {
                 return
             }
-            let enabled = sender.state == .on
-            if !enabled {
-                settings.voiceEnabled = false
-            }
-            reconcileRuntime(
-                SettingsRuntimeTransition(
-                    daemonEnabled: nil,
-                    cloudBrokerEnabled: nil,
-                    voiceHelperEnabled: enabled
-                ),
-                operation: enabled ? "语音已设为启用" : "语音已设为停用"
+            self.settings.voiceLearnedCorrections = [:]
+            VoicePostCommitEditTracker.shared.clearEphemeralData()
+            self.updateSettingsActionStatus(
+                .success,
+                "已清空 \(count) 条自动纠错映射（手动/已收录热词保留在上方列表）"
             )
-        } else if sender === voiceRimeHotwordToggle {
-            guard settings.aiEnabled,
-                  settings.voiceEnabled,
-                  settings.contextPolicy != .strict
-            else {
-                voiceRimeHotwordToggle.state = settings
-                    .voiceRimeHotwordsEnabled ? .on : .off
-                return
-            }
-            settings.voiceRimeHotwordsEnabled = sender.state == .on
         }
     }
 
@@ -117,6 +361,20 @@ extension PrivacyCenterWindowController {
         refreshVoiceShortcutStatus()
     }
 
+    @objc func useRightCommandVoiceShortcut(_ sender: Any?) {
+        let shortcut = VoiceDictationShortcut.rightCommand
+        settings.voiceShortcut = shortcut
+        voiceShortcutCaptureButton.finishCapture(
+            displayName: shortcut.displayName
+        )
+        voiceShortcutCancelButton.isEnabled = false
+        updateSettingsActionStatus(
+            .success,
+            "语音快捷键已设为 \(shortcut.displayName)（按一下开始，再按一下结束）"
+        )
+        refreshVoiceShortcutStatus()
+    }
+
     @objc func restoreDefaultVoiceShortcut(_ sender: Any?) {
         let shortcut = VoiceDictationShortcut.default
         settings.voiceShortcut = shortcut
@@ -138,6 +396,10 @@ extension PrivacyCenterWindowController {
             return
         }
         NSWorkspace.shared.open(url)
+    }
+
+    @objc func openAccessibilityPrivacy(_ sender: Any?) {
+        VoiceSystemSettingsOpener.open(.accessibility)
     }
 
     @objc func openSpeechRecognitionPrivacy(_ sender: Any?) {

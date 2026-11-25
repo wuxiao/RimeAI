@@ -444,12 +444,137 @@ struct VoiceDictationKeyRouterTests {
         ))
     }
 
+    @Test("Right Command modifier tap shortcut is valid while Left Command stays rejected")
+    func rightCommandShortcutAndTapDetector() throws {
+        let rightCmd = try #require(
+            VoiceDictationShortcut(keyCode: 54, modifiers: [.command])
+        )
+        #expect(rightCmd == .rightCommand)
+        #expect(rightCmd.isModifierTap)
+        #expect(rightCmd.displayName == "右 ⌘")
+        #expect(VoiceDictationShortcut(keyCode: 55, modifiers: [.command]) == nil)
+        #expect(VoiceDictationShortcut(keyCode: 54, modifiers: [.command, .shift]) == nil)
+
+        // Codable round-trip
+        let encoded = try JSONEncoder().encode(rightCmd)
+        let decoded = try JSONDecoder().decode(VoiceDictationShortcut.self, from: encoded)
+        #expect(decoded == rightCmd)
+
+        var detector = VoiceModifierTapDetector()
+        func feed(
+            _ keyCode: UInt16,
+            _ modifiers: VoiceDictationKeyModifiers,
+            _ timestamp: TimeInterval
+        ) -> Bool {
+            detector.handleFlagsChanged(
+                keyCode: keyCode,
+                modifiers: modifiers,
+                timestamp: timestamp,
+                shortcut: rightCmd
+            )
+        }
+
+        // Clean single tap triggers on release
+        #expect(!feed(54, [.command], 10.0))
+        #expect(feed(54, [], 10.12))
+
+        // Left Command (55) never triggers
+        #expect(!feed(55, [.command], 11.0))
+        #expect(!feed(55, [], 11.1))
+
+        // Right Command + another key (e.g. Right Cmd + C) cancels tap
+        #expect(!feed(54, [.command], 12.0))
+        detector.handleOtherKeyDown()
+        #expect(!feed(54, [], 12.15))
+
+        // Right Command + Shift cancels tap
+        #expect(!feed(54, [.command], 13.0))
+        #expect(!feed(56, [.command, .shift], 13.05))
+        #expect(!feed(54, [], 13.15))
+
+        // Holding too long (> 0.65s) does not trigger a tap
+        #expect(!feed(54, [.command], 14.0))
+        #expect(!feed(54, [], 15.0))
+    }
+
+    // MARK: - Commit raw text while a cloud transform is still running
+
+    @Test(arguments: [UInt16(49), 36, 76])
+    func confirmationKeyDuringTransformCommitsRawText(keyCode: UInt16) {
+        #expect(decision(
+            keyCode: keyCode,
+            active: true,
+            pending: true,
+            transforming: true
+        ) == .commitRawDuringTransform)
+        // 即使还没进入待确认态，变换进行中按确认键同样直接提交原文。
+        #expect(decision(
+            keyCode: keyCode,
+            active: true,
+            pending: false,
+            transforming: true
+        ) == .commitRawDuringTransform)
+    }
+
+    @Test("commit-raw yields to Escape, modifiers and non-confirmation keys")
+    func commitRawDuringTransformHasLowerPrecedenceThanCancel() {
+        // Escape 始终是取消并吞掉事件。
+        #expect(decision(
+            keyCode: 53,
+            active: true,
+            pending: true,
+            transforming: true
+        ) == .cancelAndConsume)
+        // 带修饰键的 Space / Return 不是确认键：按普通按键处理。
+        #expect(decision(
+            keyCode: 49,
+            active: true,
+            pending: true,
+            transforming: true,
+            plainConfirmation: false
+        ) == .cancelAndContinue)
+        // Tab、数字等非确认键位不变。
+        #expect(decision(
+            keyCode: 48,
+            active: true,
+            pending: true,
+            transforming: true
+        ) == .cancelAndContinue)
+        // 没有活动会话时一律透传。
+        #expect(decision(
+            keyCode: 49,
+            active: false,
+            pending: true,
+            transforming: true
+        ) == .passThrough)
+    }
+
+    @Test("without a running transform the confirmation keys still confirm")
+    func confirmWinsWhenNotTransforming() {
+        #expect(decision(
+            keyCode: 49,
+            active: true,
+            pending: true,
+            transforming: false
+        ) == .confirm)
+        // isTransforming 缺省值为 false：既有调用方行为不变。
+        #expect(VoiceDictationKeyRouter.decision(
+            keyCode: 36,
+            isExactVoiceShortcut: false,
+            shortcutRegistered: false,
+            hasActiveSession: true,
+            pendingConfirmation: true,
+            isPlainConfirmationKey: true
+        ) == .confirm)
+    }
+
     private func decision(
         keyCode: UInt16,
         exactShortcut: Bool = false,
         registered: Bool = false,
         active: Bool = false,
         pending: Bool = false,
+        transforming: Bool = false,
         plainConfirmation: Bool = true
     ) -> VoiceDictationKeyDecision {
         VoiceDictationKeyRouter.decision(
@@ -458,6 +583,7 @@ struct VoiceDictationKeyRouterTests {
             shortcutRegistered: registered,
             hasActiveSession: active,
             pendingConfirmation: pending,
+            isTransforming: transforming,
             isPlainConfirmationKey: plainConfirmation
         )
     }

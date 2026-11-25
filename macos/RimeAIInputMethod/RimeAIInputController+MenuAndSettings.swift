@@ -4,8 +4,25 @@ import InputMethodKit
 /// 输入法菜单、偏好切换动作与设置变更观察。
 extension RimeAIInputController {
     nonisolated func makeInputMethodMenu() -> NSMenu {
-        let preferences = RimeAISettingsStore.shared.inputPreferences
         let menu = NSMenu(title: "RimeAI")
+        appendInputPreferenceItems(to: menu)
+        menu.addItem(.separator())
+        appendVoiceMenuItems(to: menu)
+        // 不得给 IMK 菜单项设置 keyEquivalent：输入法菜单的按键等效项
+        // 是系统级匹配，会抢占宿主应用自身的 ⌘，(Settings) 等快捷键。
+        let settingsItem = NSMenuItem(
+            title: "RimeAI 设置…",
+            action: #selector(showPrivacyCenter(_:)),
+            keyEquivalent: ""
+        )
+        settingsItem.target = self
+        menu.addItem(settingsItem)
+        return menu
+    }
+
+    /// 字形、字符宽度、标点与续写联想：带勾选状态的偏好开关。
+    private nonisolated func appendInputPreferenceItems(to menu: NSMenu) {
+        let preferences = RimeAISettingsStore.shared.inputPreferences
         menu.addItem(preferenceMenuItem(
             title: "简体中文",
             action: #selector(useSimplifiedChinese(_:)),
@@ -44,25 +61,51 @@ extension RimeAIInputController {
             action: #selector(toggleContinuationSuggestion(_:)),
             selected: RimeAISettingsStore.shared.continuationSuggestionEnabled
         ))
+    }
+
+    /// 语音：顶层只保留一个简洁的“语音听写设置…”入口，快捷开关收进子菜单，
+    /// 不再在顶层堆一行超长的状态文案。
+    private nonisolated func appendVoiceMenuItems(to menu: NSMenu) {
+        let voiceSettings = RimeAISettingsStore.shared
         let voiceItem = NSMenuItem(
-            title: RimeAISettingsStore.shared.voiceEnabled
-                ? "语音听写已开启（按住 \(VoiceHotKeyManager.displayShortcut)）"
-                : "设置语音听写…",
-            action: #selector(showPrivacyCenter(_:)),
+            title: "语音听写设置…",
+            action: #selector(showVoiceSettings(_:)),
             keyEquivalent: ""
         )
         voiceItem.target = self
+        voiceItem.setAccessibilityLabel(
+            voiceSettings.voiceEnabled
+                ? "语音听写设置，当前快捷键 \(VoiceHotKeyManager.displayShortcut)"
+                : "语音听写设置，语音听写未开启"
+        )
+        if voiceSettings.voiceEnabled {
+            let voiceSubmenu = NSMenu(title: "语音快捷开关")
+            voiceSubmenu.addItem(preferenceMenuItem(
+                title: "语音智能润色（\(voiceSettings.voicePolishStyle.shortName)）",
+                action: #selector(toggleVoiceSmartPolish(_:)),
+                selected: voiceSettings.voiceSmartPolishEnabled
+            ))
+            voiceSubmenu.addItem(preferenceMenuItem(
+                title: "语音完成后自动粘贴",
+                action: #selector(toggleVoiceAutoPaste(_:)),
+                selected: voiceSettings.voiceAutoPasteEnabled
+            ))
+            voiceSubmenu.addItem(preferenceMenuItem(
+                title: "语音输入时自动静音",
+                action: #selector(toggleVoiceMuteSystemAudio(_:)),
+                selected: voiceSettings.voiceMuteSystemAudioEnabled
+            ))
+            voiceItem.submenu = voiceSubmenu
+        }
         menu.addItem(voiceItem)
-        // 不得给 IMK 菜单项设置 keyEquivalent：输入法菜单的按键等效项
-        // 是系统级匹配，会抢占宿主应用自身的 ⌘，(Settings) 等快捷键。
-        let settingsItem = NSMenuItem(
-            title: "RimeAI 设置…",
-            action: #selector(showPrivacyCenter(_:)),
+
+        let voiceHistoryItem = NSMenuItem(
+            title: "语音历史…",
+            action: #selector(showVoiceHistoryAndStats(_:)),
             keyEquivalent: ""
         )
-        settingsItem.target = self
-        menu.addItem(settingsItem)
-        return menu
+        voiceHistoryItem.target = self
+        menu.addItem(voiceHistoryItem)
     }
 
     private nonisolated func preferenceMenuItem(
@@ -119,6 +162,41 @@ extension RimeAIInputController {
     @objc private func showPrivacyCenter(_ sender: Any?) {
         MainActor.assumeIsolated {
             PrivacyCenterWindowController.shared.showWindow()
+        }
+    }
+
+    @objc private func showVoiceSettings(_ sender: Any?) {
+        MainActor.assumeIsolated {
+            PrivacyCenterWindowController.shared.showWindow(
+                selectingTab: PrivacyCenterWindowController.TabIdentifier.voice
+            )
+        }
+    }
+
+    @objc private func showVoiceHistoryAndStats(_ sender: Any?) {
+        MainActor.assumeIsolated {
+            PrivacyCenterWindowController.shared.showWindow(
+                selectingTab: PrivacyCenterWindowController.TabIdentifier.voiceHistory
+            )
+        }
+    }
+
+    @objc private func toggleVoiceSmartPolish(_ sender: Any?) {
+        MainActor.assumeIsolated {
+            settings.voiceSmartPolishEnabled = !settings.voiceSmartPolishEnabled
+        }
+    }
+
+    @objc private func toggleVoiceAutoPaste(_ sender: Any?) {
+        MainActor.assumeIsolated {
+            settings.voiceAutoPasteEnabled = !settings.voiceAutoPasteEnabled
+        }
+    }
+
+    @objc private func toggleVoiceMuteSystemAudio(_ sender: Any?) {
+        MainActor.assumeIsolated {
+            settings.voiceMuteSystemAudioEnabled =
+                !settings.voiceMuteSystemAudioEnabled
         }
     }
 

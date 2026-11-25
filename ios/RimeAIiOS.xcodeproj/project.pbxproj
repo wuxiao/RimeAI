@@ -36,10 +36,12 @@
 		8AA6F2B5198DD0B91049DBBD /* KeyboardViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB547FDC85EEE87F199AE5C0 /* KeyboardViewController.swift */; };
 		8EC6730B703411FE2206EE31 /* RimeAIKeyboard.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 32CFB4D89CBF3678704EE31A /* RimeAIKeyboard.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		904016E8298661EA62EE49C9 /* LICENSE in Resources */ = {isa = PBXBuildFile; fileRef = 7D320EC1D0325B1E0CAB7EF9 /* LICENSE */; };
+		93135B633AD9CE5948ED5D8A /* VoicePreferenceTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 18A870E0292736C6F9D87994 /* VoicePreferenceTypes.swift */; };
 		9535198E6F559FB24233E541 /* RimeBridgeC.cc in Sources */ = {isa = PBXBuildFile; fileRef = EA5391E955042D9DE660654E /* RimeBridgeC.cc */; };
 		9562797D4C9B9FE9A299766C /* CloudGeneratedSentencePolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D473666A7B7032BDE411E38 /* CloudGeneratedSentencePolicy.swift */; };
 		998AB59E79516686F51DEAE1 /* SemanticModel in Resources */ = {isa = PBXBuildFile; fileRef = 4BE72A421A5A59F6F24ECC87 /* SemanticModel */; };
 		9E34A45865D533ECFC92899E /* CompositionState+Derived.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04CB1583712A4B0E3711C3E3 /* CompositionState+Derived.swift */; };
+		A260E9184D1F2F468EC4C5EE /* VoicePreferenceTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 18A870E0292736C6F9D87994 /* VoicePreferenceTypes.swift */; };
 		A61E8EC1FC44E2A4E23C07F2 /* CloudGeneratedSentencePolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D473666A7B7032BDE411E38 /* CloudGeneratedSentencePolicy.swift */; };
 		A75B3D427059FB4D0617810F /* RimeData in Resources */ = {isa = PBXBuildFile; fileRef = 2E844ACA905A4D402DF2F8B7 /* RimeData */; };
 		A7FF821262560DB31C4BCB25 /* CloudConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = DBD0251A5236459AD7BC2AC2 /* CloudConfiguration.swift */; };
@@ -57,6 +59,7 @@
 		CC246EFE2C1DDBCA75E06AE4 /* CompositionState.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF57E3A230AFEFF7860AAAC2 /* CompositionState.swift */; };
 		D3B2F77D18F08B22DDC89C40 /* DaemonProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 34E132BC90CCEFC24D48F027 /* DaemonProtocol.swift */; };
 		D9C00FE9F148529973564162 /* CompositionState.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF57E3A230AFEFF7860AAAC2 /* CompositionState.swift */; };
+		E142202765FA6A84D2F3EE9D /* VoicePreferenceTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 18A870E0292736C6F9D87994 /* VoicePreferenceTypes.swift */; };
 		E5E2A253CF0A101BA1EDAF4D /* RimeAINative.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 2DFB1D82D61DB354384144D3 /* RimeAINative.xcframework */; };
 		E64EDD0BB3480F94CB5EB530 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = B8263002701C93B3FB9D0EC9 /* PrivacyInfo.xcprivacy */; };
 		E6E3E58E5A8E87C5845E8AEF /* DaemonProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 34E132BC90CCEFC24D48F027 /* DaemonProtocol.swift */; };
@@ -115,6 +118,7 @@
 		0379CB3D4A6A313D154FE803 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		04CB1583712A4B0E3711C3E3 /* CompositionState+Derived.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "CompositionState+Derived.swift"; sourceTree = "<group>"; };
 		12B7515B53A6BE3F091BDA75 /* CandidateSelectionTransition.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CandidateSelectionTransition.swift; sourceTree = "<group>"; };
+		18A870E0292736C6F9D87994 /* VoicePreferenceTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoicePreferenceTypes.swift; sourceTree = "<group>"; };
 		26F1B64AD61DCF32125ED8D5 /* VoiceDictationKeyRouter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceDictationKeyRouter.swift; sourceTree = "<group>"; };
 		2A30F957DD2B14C528521D6F /* RimeCandidateIntegrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RimeCandidateIntegrationTests.swift; sourceTree = "<group>"; };
 		2DFB1D82D61DB354384144D3 /* RimeAINative.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = RimeAINative.xcframework; path = Native/RimeAINative.xcframework; sourceTree = "<group>"; };
@@ -199,6 +203,7 @@
 				48AC0202340FE574C3962BC2 /* RimeAISettingsStore.swift */,
 				7F1470328C762376AE7332E6 /* SessionContextStore.swift */,
 				26F1B64AD61DCF32125ED8D5 /* VoiceDictationKeyRouter.swift */,
+				18A870E0292736C6F9D87994 /* VoicePreferenceTypes.swift */,
 			);
 			path = RimeAIInputCore;
 			sourceTree = "<group>";
@@ -470,6 +475,7 @@
 				B64E14066EC14FC7829510DD /* RimeKeyboardEngine.swift in Sources */,
 				EAED101605D2EE77F33A0B09 /* SessionContextStore.swift in Sources */,
 				714F6F2281AA062BB37330B9 /* VoiceDictationKeyRouter.swift in Sources */,
+				E142202765FA6A84D2F3EE9D /* VoicePreferenceTypes.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -491,6 +497,7 @@
 				B7DEE7DC10F1E0E0D7CD10DF /* RimeAISettingsStore.swift in Sources */,
 				AB4DEFA6A71E53078B587734 /* SessionContextStore.swift in Sources */,
 				8282AFDFA7107F6BECDB15D0 /* VoiceDictationKeyRouter.swift in Sources */,
+				93135B633AD9CE5948ED5D8A /* VoicePreferenceTypes.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -523,6 +530,7 @@
 				AD21E12FBC9439E20410FAF9 /* RimeKeyboardEngine.swift in Sources */,
 				370557E5129BD5117D063A59 /* SessionContextStore.swift in Sources */,
 				38A722A74CB6B3A03D30EB13 /* VoiceDictationKeyRouter.swift in Sources */,
+				A260E9184D1F2F468EC4C5EE /* VoicePreferenceTypes.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

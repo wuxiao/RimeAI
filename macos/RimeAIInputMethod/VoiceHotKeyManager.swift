@@ -6,6 +6,9 @@ extension Notification.Name {
     static let rimeAIVoiceHotKeyRegistrationDidChange = Notification.Name(
         "fun.wwcn.inputmethod.RimeAI.voice-hotkey-registration-did-change"
     )
+    static let rimeAIVoiceTranslateHotKeyRegistrationDidChange = Notification.Name(
+        "fun.wwcn.inputmethod.RimeAI.voice-translate-hotkey-registration-did-change"
+    )
 }
 
 enum VoiceHotKeyRegistrationFailureKind: Equatable, Sendable {
@@ -68,22 +71,40 @@ final class VoiceHotKeyManager: @unchecked Sendable {
     nonisolated static var displayShortcut: String {
         RimeAISettingsStore.shared.voiceShortcut.displayName
     }
+    nonisolated static var displayTranslateShortcut: String {
+        RimeAISettingsStore.shared.voiceTranslateShortcut.displayName
+    }
+    nonisolated static var isModifierTapShortcut: Bool {
+        RimeAISettingsStore.shared.voiceShortcut.isModifierTap
+    }
 
     nonisolated private static let signature: OSType =
         (UInt32(ascii: "R") << 24)
         | (UInt32(ascii: "V") << 16)
         | (UInt32(ascii: "O") << 8)
         | UInt32(ascii: "I")
+    nonisolated private static let translateSignature: OSType =
+        (UInt32(ascii: "R") << 24)
+        | (UInt32(ascii: "V") << 16)
+        | (UInt32(ascii: "T") << 8)
+        | UInt32(ascii: "R")
     private weak var activeOwner: AnyObject?
     private var onPressed: (() -> Void)?
     private var onReleased: (() -> Void)?
     private var onSecureInputDetected: (() -> Void)?
+    private weak var translateOwner: AnyObject?
+    private var onTranslatePressed: (() -> Void)?
+    private var onTranslateReleased: (() -> Void)?
     private var eventHandler: EventHandlerRef?
     private var eventHandlerIsAvailable = false
     private var hotKey: EventHotKeyRef?
+    private var translateHotKey: EventHotKeyRef?
     private var secureInputTimer: DispatchSourceTimer?
     private var registrationState = VoiceHotKeyRegistrationState()
+    private var translateRegistrationState = VoiceHotKeyRegistrationState()
     private(set) var registrationStatus: VoiceHotKeyRegistrationStatus = .inactive
+    private(set) var translateRegistrationStatus: VoiceHotKeyRegistrationStatus =
+        .inactive
     private let registrar: VoiceHotKeyRegistrar
 
     private init() {
@@ -125,6 +146,9 @@ final class VoiceHotKeyManager: @unchecked Sendable {
         if let hotKey {
             _ = registrar.unregister(hotKey)
         }
+        if let translateHotKey {
+            _ = registrar.unregister(translateHotKey)
+        }
         if let eventHandler {
             RemoveEventHandler(eventHandler)
         }
@@ -138,6 +162,38 @@ final class VoiceHotKeyManager: @unchecked Sendable {
         onReleased: @escaping () -> Void,
         onSecureInputDetected: @escaping () -> Void
     ) throws {
+        if shortcut.isModifierTap {
+            // 右侧 Command 点按切换由 IMKInputController 的 flagsChanged 直接处理，
+            // 无需 Carbon RegisterEventHotKey（Carbon 也不支持裸修饰键）。
+            if activeOwner === owner,
+               hotKey == nil,
+               registrationState.registeredShortcut == shortcut
+            {
+                self.onPressed = onPressed
+                self.onReleased = onReleased
+                self.onSecureInputDetected = onSecureInputDetected
+                updateRegistrationStatus(.registered(shortcut))
+                return
+            }
+            let previousRelease = unregisterCurrentHotKey(
+                endingPressedSession: activeOwner != nil
+            )
+            activeOwner = nil
+            self.onPressed = nil
+            self.onReleased = nil
+            self.onSecureInputDetected = nil
+            previousRelease?()
+
+            _ = registrationState.activate(shortcut: shortcut)
+            activeOwner = owner
+            self.onPressed = onPressed
+            self.onReleased = onReleased
+            self.onSecureInputDetected = onSecureInputDetected
+            updateRegistrationStatus(.registered(shortcut))
+            startSecureInputTimer()
+            return
+        }
+
         guard eventHandlerIsAvailable else {
             let message = "无法安装语音快捷键事件处理器。"
             updateRegistrationStatus(.failed(
@@ -240,6 +296,7 @@ final class VoiceHotKeyManager: @unchecked Sendable {
     }
 
     func deactivate(owner: AnyObject) {
+        deactivateTranslation(owner: owner)
         guard activeOwner === owner else {
             return
         }
@@ -249,6 +306,201 @@ final class VoiceHotKeyManager: @unchecked Sendable {
         onReleased = nil
         onSecureInputDetected = nil
         release?()
+    }
+
+    /// 注册一键语音翻译快捷键（独立 Carbon 签名 RVTR，不与主听写热键冲突）。
+    func activateTranslation(
+        owner: AnyObject,
+        shortcut: VoiceDictationShortcut = RimeAISettingsStore.shared
+            .voiceTranslateShortcut,
+        onPressed: @escaping () -> Void,
+        onReleased: @escaping () -> Void
+    ) throws {
+        if shortcut.isModifierTap {
+            if translateOwner === owner,
+               translateHotKey == nil,
+               translateRegistrationState.registeredShortcut == shortcut
+            {
+                onTranslatePressed = onPressed
+                onTranslateReleased = onReleased
+                updateTranslateRegistrationStatus(.registered(shortcut))
+                return
+            }
+            let previousRelease = unregisterTranslateHotKey(
+                endingPressedSession: translateOwner != nil
+            )
+            translateOwner = nil
+            onTranslatePressed = nil
+            onTranslateReleased = nil
+            previousRelease?()
+
+            _ = translateRegistrationState.activate(shortcut: shortcut)
+            translateOwner = owner
+            onTranslatePressed = onPressed
+            onTranslateReleased = onReleased
+            updateTranslateRegistrationStatus(.registered(shortcut))
+            return
+        }
+
+        guard eventHandlerIsAvailable else {
+            let message = "无法安装语音翻译快捷键事件处理器。"
+            updateTranslateRegistrationStatus(.failed(
+                shortcut: shortcut,
+                kind: .system,
+                code: -1,
+                message: message
+            ))
+            throw hotKeyError(message, code: -1)
+        }
+        if translateOwner === owner,
+           translateHotKey != nil,
+           translateRegistrationState.registeredShortcut == shortcut
+        {
+            onTranslatePressed = onPressed
+            onTranslateReleased = onReleased
+            updateTranslateRegistrationStatus(.registered(shortcut))
+            return
+        }
+
+        let previousRelease = unregisterTranslateHotKey(
+            endingPressedSession: translateOwner != nil
+        )
+        translateOwner = nil
+        onTranslatePressed = nil
+        onTranslateReleased = nil
+        previousRelease?()
+
+        let activation = translateRegistrationState.activate(shortcut: shortcut)
+        guard case let .register(registrationID, _) = activation else {
+            let message = "无法建立新的语音翻译快捷键注册代际。"
+            updateTranslateRegistrationStatus(.failed(
+                shortcut: shortcut,
+                kind: .system,
+                code: Int32(paramErr),
+                message: message
+            ))
+            throw hotKeyError(message, code: Int32(paramErr))
+        }
+        translateOwner = owner
+        onTranslatePressed = onPressed
+        onTranslateReleased = onReleased
+        let identifier = EventHotKeyID(
+            signature: Self.translateSignature,
+            id: registrationID
+        )
+        let registrationOptions = OptionBits(kEventHotKeyExclusive)
+        let result = registrar.register(.init(
+            keyCode: UInt32(shortcut.keyCode),
+            modifiers: Self.carbonModifiers(for: shortcut.modifiers),
+            identifier: identifier,
+            options: registrationOptions
+        ))
+        let evaluation = VoiceHotKeyRegistrationPolicy.evaluate(
+            requestedExclusive: registrationOptions
+                == OptionBits(kEventHotKeyExclusive),
+            status: result.status,
+            referenceWasCreated: result.reference != nil,
+            conflictStatus: OSStatus(eventHotKeyExistsErr)
+        )
+        if case .registered = evaluation, let reference = result.reference {
+            translateHotKey = reference
+            updateTranslateRegistrationStatus(.registered(shortcut))
+            return
+        }
+
+        let failure: (kind: VoiceHotKeyRegistrationFailureKind, code: Int32)
+        switch evaluation {
+        case .conflict:
+            failure = (.conflict, OSStatus(eventHotKeyExistsErr))
+        case let .systemFailure(status):
+            failure = (.system, status)
+        case .invalidRegistration, .registered:
+            failure = (.system, Int32(paramErr))
+        }
+        translateRegistrationState.registrationFailed(
+            registrationID: registrationID
+        )
+        translateOwner = nil
+        onTranslatePressed = nil
+        onTranslateReleased = nil
+        let message = failure.kind == .conflict
+            ? "翻译快捷键 \(shortcut.displayName) 已被其他应用占用。"
+            : "翻译快捷键 \(shortcut.displayName) 无法注册（错误 \(failure.code)）。"
+        updateTranslateRegistrationStatus(.failed(
+            shortcut: shortcut,
+            kind: failure.kind,
+            code: failure.code,
+            message: message
+        ))
+        throw hotKeyError(message, code: failure.code)
+    }
+
+    func deactivateTranslation(owner: AnyObject) {
+        guard translateOwner === owner else {
+            return
+        }
+        let release = unregisterTranslateHotKey(endingPressedSession: true)
+        translateOwner = nil
+        onTranslatePressed = nil
+        onTranslateReleased = nil
+        release?()
+    }
+
+    private func handleTranslate(
+        eventKind: UInt32,
+        eventRegistrationID: UInt32
+    ) {
+        guard translateOwner != nil else {
+            _ = unregisterTranslateHotKey(endingPressedSession: false)
+            return
+        }
+        switch eventKind {
+        case UInt32(kEventHotKeyPressed):
+            guard translateRegistrationState.press(
+                registrationID: eventRegistrationID
+            ) else {
+                return
+            }
+            onTranslatePressed?()
+        case UInt32(kEventHotKeyReleased):
+            guard translateRegistrationState.release(
+                registrationID: eventRegistrationID
+            ) else {
+                return
+            }
+            onTranslateReleased?()
+        default:
+            break
+        }
+    }
+
+    private func unregisterTranslateHotKey(
+        endingPressedSession: Bool
+    ) -> (() -> Void)? {
+        let release = endingPressedSession
+            && translateRegistrationState.pressedRegistrationID != nil
+            ? onTranslateReleased
+            : nil
+        if let translateHotKey {
+            _ = registrar.unregister(translateHotKey)
+            self.translateHotKey = nil
+        }
+        translateRegistrationState.deactivate()
+        updateTranslateRegistrationStatus(.inactive)
+        return release
+    }
+
+    private func updateTranslateRegistrationStatus(
+        _ status: VoiceHotKeyRegistrationStatus
+    ) {
+        guard translateRegistrationStatus != status else {
+            return
+        }
+        translateRegistrationStatus = status
+        NotificationCenter.default.post(
+            name: .rimeAIVoiceTranslateHotKeyRegistrationDidChange,
+            object: self
+        )
     }
 
     private func handle(eventKind: UInt32, eventRegistrationID: UInt32) {
@@ -317,10 +569,14 @@ final class VoiceHotKeyManager: @unchecked Sendable {
             }
             let handler = self.onSecureInputDetected
             _ = self.unregisterCurrentHotKey(endingPressedSession: false)
+            _ = self.unregisterTranslateHotKey(endingPressedSession: false)
             self.activeOwner = nil
             self.onPressed = nil
             self.onReleased = nil
             self.onSecureInputDetected = nil
+            self.translateOwner = nil
+            self.onTranslatePressed = nil
+            self.onTranslateReleased = nil
             handler?()
         }
         secureInputTimer = timer
@@ -414,9 +670,10 @@ private let voiceHotKeyEventHandler: EventHandlerUPP = {
         &actualSize,
         &identifier
     )
-    guard status == noErr,
-          identifier.signature == VoiceHotKeyManager.eventSignature
-    else {
+    let isDictation = identifier.signature == VoiceHotKeyManager.eventSignature
+    let isTranslate =
+        identifier.signature == VoiceHotKeyManager.translateEventSignature
+    guard status == noErr, isDictation || isTranslate else {
         return OSStatus(eventNotHandledErr)
     }
     let eventRegistrationID = identifier.id
@@ -425,19 +682,33 @@ private let voiceHotKeyEventHandler: EventHandlerUPP = {
     // 的 release 先于 press 执行，从而留下无法停止的录音。
     if Thread.isMainThread {
         MainActor.assumeIsolated {
-            manager.handleFromCarbon(
-                eventKind: kind,
-                registrationID: eventRegistrationID
-            )
+            if isTranslate {
+                manager.handleTranslateFromCarbon(
+                    eventKind: kind,
+                    registrationID: eventRegistrationID
+                )
+            } else {
+                manager.handleFromCarbon(
+                    eventKind: kind,
+                    registrationID: eventRegistrationID
+                )
+            }
         }
     } else {
         // 防御性回退；正常的 ApplicationEventTarget 不会走到这里。
         DispatchQueue.main.async {
             MainActor.assumeIsolated {
-                manager.handleFromCarbon(
-                    eventKind: kind,
-                    registrationID: eventRegistrationID
-                )
+                if isTranslate {
+                    manager.handleTranslateFromCarbon(
+                        eventKind: kind,
+                        registrationID: eventRegistrationID
+                    )
+                } else {
+                    manager.handleFromCarbon(
+                        eventKind: kind,
+                        registrationID: eventRegistrationID
+                    )
+                }
             }
         }
     }
@@ -446,9 +717,17 @@ private let voiceHotKeyEventHandler: EventHandlerUPP = {
 
 extension VoiceHotKeyManager {
     nonisolated static var eventSignature: OSType { signature }
+    nonisolated static var translateEventSignature: OSType { translateSignature }
 
     func handleFromCarbon(eventKind: UInt32, registrationID: UInt32) {
         handle(
+            eventKind: eventKind,
+            eventRegistrationID: registrationID
+        )
+    }
+
+    func handleTranslateFromCarbon(eventKind: UInt32, registrationID: UInt32) {
+        handleTranslate(
             eventKind: eventKind,
             eventRegistrationID: registrationID
         )

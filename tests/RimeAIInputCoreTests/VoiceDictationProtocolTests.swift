@@ -261,7 +261,7 @@ func voiceMessagesRoundTripThroughSnakeCaseJSON() throws {
     #expect(object["type"] as? String == "dictation_start")
     #expect(object["request_id"] as? String == "req-1")
     #expect(object["deadline_ms"] as? Int == 1_500)
-    #expect(object["max_duration_ms"] as? Int == 60_000)
+    #expect(object["max_duration_ms"] as? Int == 0)
     let hotwords = try #require(
         object["hotword_snapshot"] as? [String: Any]
     )
@@ -389,10 +389,10 @@ func deltaValidationRejectsNewlinesAndOversizeText() {
         elapsedMilliseconds: 0
     ).isValid)
 
-    #expect(!VoiceDictationDelta(
+    #expect(VoiceDictationDelta(
         requestID: "req-1",
         sequence: 1,
-        stableText: String(repeating: "字", count: 201),
+        stableText: String(repeating: "字", count: 500),
         partialText: "",
         confidence: 0.8,
         elapsedMilliseconds: 0
@@ -414,7 +414,7 @@ func startValidationRejectsOutOfBoundsDeadlineAndDuration() {
 
     func startWith(
         deadline: Int = 1_500,
-        duration: Int = 60_000
+        duration: Int = 0
     ) -> VoiceDictationStart {
         VoiceDictationStart(
             requestID: "req-1",
@@ -427,9 +427,13 @@ func startValidationRejectsOutOfBoundsDeadlineAndDuration() {
         )
     }
 
+    #expect(startWith(duration: 0).isValid)
+    #expect(startWith(duration: 300_000).isValid)
     #expect(!startWith(deadline: 0).isValid)
-    #expect(!startWith(deadline: 5_001).isValid)
-    #expect(!startWith(duration: 60_001).isValid)
+    #expect(!startWith(
+        deadline: VoiceDictationConstants.maximumDeadlineMilliseconds + 1
+    ).isValid)
+    #expect(!startWith(duration: -1).isValid)
 }
 
 @Test
@@ -915,37 +919,35 @@ func serverKeepsElapsedFiniteWhenInjectedClockIsNonFinite() throws {
 }
 
 @Test
-func serverTruncatesOversizeDeltaAndFinalizesInsteadOfFailing() throws {
+func serverForwardsUnlimitedLengthDeltaWithoutPrematureFinalization() throws {
     let engine = ScriptedVoiceEngine()
     let server = VoiceDictationServerCore(engine: engine)
-    let text = String(repeating: "字", count: 201)
+    let text = String(repeating: "字", count: 500)
     engine.enqueue([
         .partial(stableText: text, partialText: "尾", confidence: 0.8)
     ])
     server.handle(VoiceHelloRequest())
     let outputs = server.handle(makeStart(requestID: "long-delta"))
 
-    let final = try #require(outputs.compactMap { output in
-        if case let .final(value) = output { return value }
+    let delta = try #require(outputs.compactMap { output in
+        if case let .delta(value) = output { return value }
         return nil
     }.first)
-    #expect(final.finalText.count == 200)
-    #expect(final.finalText == String(text.prefix(200)))
-    #expect(final.isValid)
+    #expect(delta.stableText == text)
+    #expect(delta.partialText == "尾")
+    #expect(delta.isValid)
     #expect(!outputs.contains(where: {
+        if case .final = $0 { return true }
         if case .error = $0 { return true }
         return false
     }))
-    #expect(engine.cancelledRequestIDs == engine.startedRequestIDs)
+    #expect(engine.cancelledRequestIDs.isEmpty)
 }
 
 @Test
-func serverFinalizesOversizeDeltaAcrossGraphemeJoinBoundary() throws {
+func serverForwardsLongDeltaAcrossGraphemeJoinBoundary() throws {
     let engine = ScriptedVoiceEngine()
     let server = VoiceDictationServerCore(engine: engine)
-    // 两字段各自合计 201 Characters；拼接后重音符与末尾 a 合并为
-    // 一个 Character，cumulativeText.count 仅 200。仍须按字段协议上限
-    // 走安全 final，不能落入 delta.isValid 后变成 asr_engine_error。
     let stable = String(repeating: "a", count: 200)
     let partial = "\u{301}"
     engine.enqueue([
@@ -954,24 +956,21 @@ func serverFinalizesOversizeDeltaAcrossGraphemeJoinBoundary() throws {
     server.handle(VoiceHelloRequest())
     let outputs = server.handle(makeStart(requestID: "joined-grapheme"))
 
-    let final = try #require(outputs.compactMap { output in
-        if case let .final(value) = output { return value }
+    let delta = try #require(outputs.compactMap { output in
+        if case let .delta(value) = output { return value }
         return nil
     }.first)
-    #expect(final.finalText == stable + partial)
-    #expect(final.finalText.count == 200)
-    #expect(!outputs.contains(where: {
-        if case .error = $0 { return true }
-        return false
-    }))
-    #expect(engine.cancelledRequestIDs == engine.startedRequestIDs)
+    #expect(delta.stableText == stable)
+    #expect(delta.partialText == partial)
+    #expect(delta.isValid)
+    #expect(engine.cancelledRequestIDs.isEmpty)
 }
 
 @Test
-func serverSafelyTruncatesOversizeEngineFinal() throws {
+func serverForwardsUnlimitedLengthEngineFinalWithoutTruncation() throws {
     let engine = ScriptedVoiceEngine()
     let server = VoiceDictationServerCore(engine: engine)
-    let text = String(repeating: "👩🏽‍💻", count: 201)
+    let text = String(repeating: "👩🏽‍💻", count: 500)
     engine.enqueue([
         .finished(text: text, confidence: 0.9, polishApplied: true)
     ])
@@ -982,8 +981,8 @@ func serverSafelyTruncatesOversizeEngineFinal() throws {
         if case let .final(value) = output { return value }
         return nil
     }.first)
-    #expect(final.finalText.count == 200)
-    #expect(final.finalText == String(text.prefix(200)))
+    #expect(final.finalText.count == 500)
+    #expect(final.finalText == text)
     #expect(final.polishApplied)
     #expect(final.isValid)
     #expect(!outputs.contains(where: {

@@ -5,10 +5,12 @@ executor isolation)."""
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import sys
 import tempfile
 import textwrap
+import time
 from pathlib import Path
 from time import monotonic
 
@@ -466,6 +468,32 @@ def _infer_message(revision: int, request_id: str, **overrides):
     return message
 
 
+@contextlib.asynccontextmanager
+async def _client(
+    socket_path: Path, *, late_capability: bool = True
+):
+    """A connected, greeted client whose socket is always closed.
+
+    The ``finally`` matters as much as the handshake: a client leaked by
+    a failed assertion keeps its handler parked on ``readline()``, and
+    on Python 3.12+ that parks ``server.close()`` too — every assertion
+    failure would turn into a hung test.
+    """
+    reader, writer = await asyncio.open_unix_connection(socket_path)
+    try:
+        hello = await _hello(reader, writer, late_capability=late_capability)
+        yield reader, writer, hello
+    finally:
+        writer.close()
+        with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+            await writer.wait_closed()
+
+
+def _run_scenario(scenario) -> None:
+    with tempfile.TemporaryDirectory(prefix="rai-", dir="/tmp") as directory:
+        asyncio.run(scenario(Path(directory)))
+
+
 def test_hello_advertises_capability_and_artifacts_when_configured():
     async def scenario(runtime_root: Path):
         socket_path = runtime_root / "runtime" / "rimeai.sock"
@@ -475,27 +503,23 @@ def test_hello_advertises_capability_and_artifacts_when_configured():
         )
         await server.start()
         try:
-            reader, writer = await asyncio.open_unix_connection(socket_path)
-            response = await _hello(reader, writer)
-            assert "sentence-late" in response["capabilities"]
-            roles = [
-                artifact.get("role")
-                for artifact in response["model_artifacts"]
-            ]
-            assert "neural_sentence" in roles
-            neural_entry = next(
-                artifact
-                for artifact in response["model_artifacts"]
-                if artifact.get("role") == "neural_sentence"
-            )
-            assert neural_entry["model_artifact_id"] == "stub:mlx-8bit:v3"
-            writer.close()
-            await writer.wait_closed()
+            async with _client(socket_path) as (_reader, _writer, hello):
+                assert "sentence-late" in hello["capabilities"]
+                roles = [
+                    artifact.get("role")
+                    for artifact in hello["model_artifacts"]
+                ]
+                assert "neural_sentence" in roles
+                neural_entry = next(
+                    artifact
+                    for artifact in hello["model_artifacts"]
+                    if artifact.get("role") == "neural_sentence"
+                )
+                assert neural_entry["model_artifact_id"] == "stub:mlx-8bit:v3"
         finally:
             await server.close()
 
-    with tempfile.TemporaryDirectory(prefix="rai-", dir="/tmp") as directory:
-        asyncio.run(scenario(Path(directory)))
+    _run_scenario(scenario)
 
 
 def test_hello_omits_capability_without_a_configured_service():
@@ -504,21 +528,17 @@ def test_hello_omits_capability_without_a_configured_service():
         server = RimeAIDaemonServer(socket_path, FakeEngine())
         await server.start()
         try:
-            reader, writer = await asyncio.open_unix_connection(socket_path)
-            response = await _hello(reader, writer)
-            assert "sentence-late" not in response["capabilities"]
-            assert not [
-                artifact
-                for artifact in response["model_artifacts"]
-                if artifact.get("role") == "neural_sentence"
-            ]
-            writer.close()
-            await writer.wait_closed()
+            async with _client(socket_path) as (_reader, _writer, hello):
+                assert "sentence-late" not in hello["capabilities"]
+                assert not [
+                    artifact
+                    for artifact in hello["model_artifacts"]
+                    if artifact.get("role") == "neural_sentence"
+                ]
         finally:
             await server.close()
 
-    with tempfile.TemporaryDirectory(prefix="rai-", dir="/tmp") as directory:
-        asyncio.run(scenario(Path(directory)))
+    _run_scenario(scenario)
 
 
 def test_late_frame_follows_result_and_binds_to_revision():
@@ -530,31 +550,27 @@ def test_late_frame_follows_result_and_binds_to_revision():
         )
         await server.start()
         try:
-            reader, writer = await asyncio.open_unix_connection(socket_path)
-            await _hello(reader, writer)
-            await _write_json(
-                writer, _infer_message(1, "request-1")
-            )
-            result = await _read_json(reader)
-            assert result["type"] == "result"
-            assert result["status"] == "ok"
-            late = await _read_json(reader)
-            assert late["type"] == "sentence_late"
-            assert late["status"] == "ok"
-            assert late["request_id"] == "request-1"
-            assert late["composition_id"] == "composition-1"
-            assert late["revision"] == 1
-            assert late["app_session_id"] == "app-1"
-            assert late["sentence_suggestion"] == "请执行命令"
-            assert late["model_artifact_id"] == "stub:mlx-8bit:v3"
-            assert late["elapsed_ms"] >= 0
-            writer.close()
-            await writer.wait_closed()
+            async with _client(socket_path) as (reader, writer, _hello):
+                await _write_json(
+                    writer, _infer_message(1, "request-1")
+                )
+                result = await _read_json(reader)
+                assert result["type"] == "result"
+                assert result["status"] == "ok"
+                late = await _read_json(reader)
+                assert late["type"] == "sentence_late"
+                assert late["status"] == "ok"
+                assert late["request_id"] == "request-1"
+                assert late["composition_id"] == "composition-1"
+                assert late["revision"] == 1
+                assert late["app_session_id"] == "app-1"
+                assert late["sentence_suggestion"] == "请执行命令"
+                assert late["model_artifact_id"] == "stub:mlx-8bit:v3"
+                assert late["elapsed_ms"] >= 0
         finally:
             await server.close()
 
-    with tempfile.TemporaryDirectory(prefix="rai-", dir="/tmp") as directory:
-        asyncio.run(scenario(Path(directory)))
+    _run_scenario(scenario)
 
 
 def test_client_without_capability_never_receives_late_frames():
@@ -566,30 +582,29 @@ def test_client_without_capability_never_receives_late_frames():
         )
         await server.start()
         try:
-            reader, writer = await asyncio.open_unix_connection(socket_path)
-            await _hello(reader, writer, late_capability=False)
-            await _write_json(
-                writer, _infer_message(1, "request-1")
-            )
-            result = await _read_json(reader)
-            assert result["type"] == "result"
-            # No late frame may follow for a client that did not opt in;
-            # prove it by sending another request on the same connection
-            # and observing the next frame is its result, not a late one.
-            await _write_json(
-                writer, _infer_message(2, "request-2")
-            )
-            result2 = await _read_json(reader)
-            assert result2["type"] == "result"
-            assert result2["request_id"] == "request-2"
-            writer.close()
-            await writer.wait_closed()
+            async with _client(
+                socket_path, late_capability=False
+            ) as (reader, writer, _hello):
+                await _write_json(
+                    writer, _infer_message(1, "request-1")
+                )
+                result = await _read_json(reader)
+                assert result["type"] == "result"
+                # No late frame may follow for a client that did not opt
+                # in; prove it by sending another request on the same
+                # connection and observing the next frame is its result,
+                # not a late one.
+                await _write_json(
+                    writer, _infer_message(2, "request-2")
+                )
+                result2 = await _read_json(reader)
+                assert result2["type"] == "result"
+                assert result2["request_id"] == "request-2"
         finally:
             await server.close()
         assert service.seen_revisions == []
 
-    with tempfile.TemporaryDirectory(prefix="rai-", dir="/tmp") as directory:
-        asyncio.run(scenario(Path(directory)))
+    _run_scenario(scenario)
 
 
 def test_stale_revision_late_frame_is_dropped():
@@ -601,32 +616,28 @@ def test_stale_revision_late_frame_is_dropped():
         )
         await server.start()
         try:
-            reader, writer = await asyncio.open_unix_connection(socket_path)
-            await _hello(reader, writer)
-            await _write_json(
-                writer, _infer_message(1, "request-1")
-            )
-            await asyncio.sleep(0.01)
-            await _write_json(
-                writer, _infer_message(2, "request-2")
-            )
-            result1 = await _read_json(reader)
-            assert result1["request_id"] == "request-1"
-            result2 = await _read_json(reader)
-            assert result2["request_id"] == "request-2"
-            late = await _read_json(reader)
-            # The revision-1 neural decode outlived its revision: only the
-            # revision-2 frame may surface.
-            assert late["type"] == "sentence_late"
-            assert late["revision"] == 2
-            writer.close()
-            await writer.wait_closed()
+            async with _client(socket_path) as (reader, writer, _hello):
+                await _write_json(
+                    writer, _infer_message(1, "request-1")
+                )
+                await asyncio.sleep(0.01)
+                await _write_json(
+                    writer, _infer_message(2, "request-2")
+                )
+                result1 = await _read_json(reader)
+                assert result1["request_id"] == "request-1"
+                result2 = await _read_json(reader)
+                assert result2["request_id"] == "request-2"
+                late = await _read_json(reader)
+                # The revision-1 neural decode outlived its revision: only
+                # the revision-2 frame may surface.
+                assert late["type"] == "sentence_late"
+                assert late["revision"] == 2
         finally:
             await server.close()
         assert service.seen_revisions == [1, 2]
 
-    with tempfile.TemporaryDirectory(prefix="rai-", dir="/tmp") as directory:
-        asyncio.run(scenario(Path(directory)))
+    _run_scenario(scenario)
 
 
 def test_allow_sentence_false_disables_the_tier():
@@ -638,29 +649,32 @@ def test_allow_sentence_false_disables_the_tier():
         )
         await server.start()
         try:
-            reader, writer = await asyncio.open_unix_connection(socket_path)
-            await _hello(reader, writer)
-            await _write_json(
-                writer,
-                _infer_message(
-                    1, "request-1", allow_sentence=False
-                ),
-            )
-            result = await _read_json(reader)
-            assert result["type"] == "result"
-            await _write_json(
-                writer, _infer_message(2, "request-2")
-            )
-            result2 = await _read_json(reader)
-            assert result2["type"] == "result"
-            writer.close()
-            await writer.wait_closed()
+            async with _client(socket_path) as (reader, writer, _hello):
+                await _write_json(
+                    writer,
+                    _infer_message(
+                        1, "request-1", allow_sentence=False
+                    ),
+                )
+                result = await _read_json(reader)
+                assert result["type"] == "result"
+                await _write_json(
+                    writer, _infer_message(2, "request-2")
+                )
+                # request-2 opens the neural tier: its instant decode used
+                # to race the (equally instant) result and could put
+                # sentence_late on the wire first (~1 run in 6).
+                result2 = await _read_json(reader)
+                assert result2["type"] == "result"
+                assert result2["request_id"] == "request-2"
+                late = await asyncio.wait_for(_read_json(reader), timeout=2.0)
+                assert late["type"] == "sentence_late"
+                assert late["request_id"] == "request-2"
         finally:
             await server.close()
         assert service.seen_revisions == [2]
 
-    with tempfile.TemporaryDirectory(prefix="rai-", dir="/tmp") as directory:
-        asyncio.run(scenario(Path(directory)))
+    _run_scenario(scenario)
 
 
 def test_abstaining_service_sends_no_late_frame():
@@ -672,25 +686,234 @@ def test_abstaining_service_sends_no_late_frame():
         )
         await server.start()
         try:
-            reader, writer = await asyncio.open_unix_connection(socket_path)
-            await _hello(reader, writer)
-            await _write_json(
-                writer, _infer_message(1, "request-1")
-            )
-            result = await _read_json(reader)
-            assert result["type"] == "result"
-            await _write_json(
-                writer, _infer_message(2, "request-2")
-            )
-            result2 = await _read_json(reader)
-            assert result2["type"] == "result"
-            writer.close()
-            await writer.wait_closed()
+            async with _client(socket_path) as (reader, writer, _hello):
+                await _write_json(
+                    writer, _infer_message(1, "request-1")
+                )
+                result = await _read_json(reader)
+                assert result["type"] == "result"
+                await _write_json(
+                    writer, _infer_message(2, "request-2")
+                )
+                result2 = await _read_json(reader)
+                assert result2["type"] == "result"
         finally:
             await server.close()
 
-    with tempfile.TemporaryDirectory(prefix="rai-", dir="/tmp") as directory:
-        asyncio.run(scenario(Path(directory)))
+    _run_scenario(scenario)
+
+
+# --------------------------------------------------------------------------
+# 写序合同：write_lock 只串行化写入、不排序。同一请求的同步 result 与
+# 异步 sentence_late 并发产出时，旧实现可能把迟到帧先写出；客户端在
+# result 到达时才为迟到帧布防期望槽，先到的迟到帧被当成被取代的
+# revision 丢弃（并回写错误的 superseded 反馈）。迟到帧必须严格晚于
+# result，且仅在 result 真的写出后才交付。
+
+
+class SlowEngine(FakeEngine):
+    """Synchronous arm deliberately slower than an instant neural decode."""
+
+    def __init__(self, delay: float) -> None:
+        self._delay = delay
+
+    def infer(self, request: dict) -> dict:
+        time.sleep(self._delay)
+        return super().infer(request)
+
+
+class ScriptedEngine(FakeEngine):
+    """Fails or stalls on demand, keyed by request_id."""
+
+    def __init__(self, behaviors: dict[str, str]) -> None:
+        self.behaviors = behaviors
+
+    def infer(self, request: dict) -> dict:
+        behavior = self.behaviors.get(request["request_id"])
+        if behavior == "raise":
+            raise RuntimeError("engine exploded")
+        if behavior == "stall":
+            time.sleep(0.25)
+        return super().infer(request)
+
+
+def test_late_frame_never_overtakes_a_slow_result():
+    # 对抗性时序：同步臂放慢到 120ms，神经解码瞬时完成——每一轮都必须
+    # 是 result → sentence_late，且两帧绑定同一请求。
+    async def scenario(runtime_root: Path):
+        socket_path = runtime_root / "runtime" / "rimeai.sock"
+        service = StubNeuralService()
+        server = RimeAIDaemonServer(
+            socket_path, SlowEngine(delay=0.12), neural_sentence=service
+        )
+        await server.start()
+        try:
+            async with _client(socket_path) as (reader, writer, _hello):
+                for revision in range(1, 13):
+                    request_id = f"request-{revision}"
+                    await _write_json(
+                        writer, _infer_message(revision, request_id)
+                    )
+                    first = await asyncio.wait_for(
+                        _read_json(reader), timeout=2.0
+                    )
+                    second = await asyncio.wait_for(
+                        _read_json(reader), timeout=2.0
+                    )
+                    assert first["type"] == "result", first
+                    assert first["status"] == "ok"
+                    assert first["request_id"] == request_id
+                    assert second["type"] == "sentence_late", second
+                    assert second["request_id"] == request_id
+                    assert second["revision"] == revision
+        finally:
+            await server.close()
+        assert service.seen_revisions == list(range(1, 13))
+
+    _run_scenario(scenario)
+
+
+def test_no_late_frame_follows_an_engine_error_or_timeout():
+    # 迟到帧只在同步 result 之后交付：同步臂以 engine_error / timeout
+    # 收场时神经臂必须弃权。解码照常并行发生（同步臂尚未收场），
+    # 用后续请求证明连接上没有残留的迟到帧。
+    async def scenario(runtime_root: Path):
+        socket_path = runtime_root / "runtime" / "rimeai.sock"
+        service = StubNeuralService()
+        engine = ScriptedEngine(
+            {"request-error": "raise", "request-timeout": "stall"}
+        )
+        server = RimeAIDaemonServer(
+            socket_path, engine, neural_sentence=service
+        )
+        await server.start()
+        try:
+            async with _client(socket_path) as (reader, writer, _hello):
+                await _write_json(
+                    writer, _infer_message(1, "request-error")
+                )
+                failed = await _read_json(reader)
+                assert failed["type"] == "result"
+                assert failed["status"] == "engine_error"
+                assert failed["request_id"] == "request-error"
+
+                await _write_json(
+                    writer,
+                    _infer_message(
+                        2, "request-timeout", deadline_ms=50
+                    ),
+                )
+                timed_out = await _read_json(reader)
+                assert timed_out["type"] == "result"
+                assert timed_out["status"] == "timeout"
+                assert timed_out["request_id"] == "request-timeout"
+
+                await _write_json(
+                    writer, _infer_message(3, "request-ok")
+                )
+                recovered = await _read_json(reader)
+                assert recovered["type"] == "result"
+                assert recovered["status"] == "ok"
+                assert recovered["request_id"] == "request-ok"
+                late = await asyncio.wait_for(_read_json(reader), timeout=2.0)
+                assert late["type"] == "sentence_late"
+                assert late["request_id"] == "request-ok"
+        finally:
+            await server.close()
+        assert service.seen_revisions == [1, 2, 3]
+
+    _run_scenario(scenario)
+
+
+def test_superseded_request_without_a_result_emits_no_late_frame():
+    # 请求 A 的神经解码瞬时完成、在门上等待 A 的 result；此时同一
+    # composition 的请求 B（allow_sentence=False，不直接取消 A 的神经
+    # 臂）取代了 A：A 的同步臂被取消、无 result 可跟，等待中的神经臂
+    # 必须由门释放并弃权，而不是交付一帧无主的迟到帧。
+    async def scenario(runtime_root: Path):
+        socket_path = runtime_root / "runtime" / "rimeai.sock"
+        service = StubNeuralService()
+        server = RimeAIDaemonServer(
+            socket_path, SlowEngine(delay=0.2), neural_sentence=service
+        )
+        await server.start()
+        try:
+            async with _client(socket_path) as (reader, writer, _hello):
+                await _write_json(
+                    writer, _infer_message(1, "request-a")
+                )
+                # A 的神经臂此时已解码完毕并在门上等待。
+                await asyncio.sleep(0.05)
+                replacement = _infer_message(
+                    2, "request-b", allow_sentence=False
+                )
+                await _write_json(writer, replacement)
+                result_b = await asyncio.wait_for(
+                    _read_json(reader), timeout=2.0
+                )
+                assert result_b["type"] == "result"
+                assert result_b["status"] == "ok"
+                assert result_b["request_id"] == "request-b"
+
+                follow_up = _infer_message(
+                    3, "request-c", allow_sentence=False
+                )
+                await _write_json(writer, follow_up)
+                result_c = await asyncio.wait_for(
+                    _read_json(reader), timeout=2.0
+                )
+                assert result_c["type"] == "result"
+                assert result_c["request_id"] == "request-c"
+        finally:
+            await server.close()
+        # A reached the decoder while its revision was live and its result
+        # was still pending; only the wire is gated.
+        assert service.seen_revisions == [1]
+
+    _run_scenario(scenario)
+
+
+def test_cancelled_request_emits_neither_result_nor_late_frame():
+    async def scenario(runtime_root: Path):
+        socket_path = runtime_root / "runtime" / "rimeai.sock"
+        service = StubNeuralService()
+        engine = ScriptedEngine({"request-cancel": "stall"})
+        server = RimeAIDaemonServer(
+            socket_path, engine, neural_sentence=service
+        )
+        await server.start()
+        try:
+            async with _client(socket_path) as (reader, writer, _hello):
+                await _write_json(
+                    writer, _infer_message(1, "request-cancel")
+                )
+                await _write_json(
+                    writer,
+                    {
+                        "schema_version": 1,
+                        "type": "cancel",
+                        "request_id": "request-cancel",
+                    },
+                )
+                ack = await _read_json(reader)
+                assert ack["type"] == "cancelled"
+                assert ack["request_id"] == "request-cancel"
+                await _write_json(
+                    writer, _infer_message(2, "request-next")
+                )
+                result = await asyncio.wait_for(
+                    _read_json(reader), timeout=2.0
+                )
+                assert result["type"] == "result"
+                assert result["status"] == "ok"
+                assert result["request_id"] == "request-next"
+                late = await asyncio.wait_for(_read_json(reader), timeout=2.0)
+                assert late["type"] == "sentence_late"
+                assert late["request_id"] == "request-next"
+        finally:
+            await server.close()
+
+    _run_scenario(scenario)
 
 
 # --------------------------------------------------------------------------
@@ -1007,29 +1230,21 @@ def test_server_gate_drops_frames_below_min_confidence():
         )
         await server.start()
         try:
-            reader, writer = await asyncio.open_unix_connection(
-                socket_path
-            )
-            await _hello(reader, writer)
-            await _write_json(
-                writer, _infer_message(1, "request-1")
-            )
-            result = await _read_json(reader)
-            assert result["type"] == "result"
-            try:
-                late = await asyncio.wait_for(
-                    reader.readline(), timeout=1.0
+            async with _client(socket_path) as (reader, writer, _hello):
+                await _write_json(
+                    writer, _infer_message(1, "request-1")
                 )
-                frame = json.loads(late.decode("utf-8"))
-                assert frame["type"] != "sentence_late", (
-                    "below-min-confidence frame must be dropped"
-                )
-            except asyncio.TimeoutError:
-                pass  # 预期：无迟到帧
-            writer.close()
-            await writer.wait_closed()
+                result = await _read_json(reader)
+                assert result["type"] == "result"
+                try:
+                    await asyncio.wait_for(reader.readline(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    pass  # 预期：无迟到帧
+                else:
+                    raise AssertionError(
+                        "below-min-confidence frame must be dropped"
+                    )
         finally:
             await server.close()
 
-    with tempfile.TemporaryDirectory(prefix="rai-", dir="/tmp") as dir_:
-        asyncio.run(scenario(Path(dir_)))
+    _run_scenario(scenario)

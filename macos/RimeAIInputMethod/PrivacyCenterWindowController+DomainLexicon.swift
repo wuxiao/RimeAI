@@ -343,12 +343,13 @@ extension PrivacyCenterWindowController {
     // MARK: - 刷新
 
     func reloadDomainLexiconEditors() {
+        // 所选词库 id 是主 actor 隔离的状态：必须先在主线程读取，再切到后台队列。
+        let selectedID = lexiconEditorSelectedIdSnapshot()
+        // 内层回主线程的闭包弱捕获 self，外层必须同样显式弱捕获才真正生效。
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let service = RimeAIPhraseBookService.shared
             let lexicons = (try? service.lexicons()) ?? []
-            let selected = lexicons.first {
-                $0.id == self?.lexiconEditorSelectedIdSnapshot()
-            } ?? lexicons.first
+            let selected = lexicons.first { $0.id == selectedID } ?? lexicons.first
             let entries = selected.flatMap {
                 try? service.lexiconEntries(lexiconId: $0.id, limit: 300)
             } ?? []

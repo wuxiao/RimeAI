@@ -85,7 +85,7 @@ struct SherpaOnnxBufferTransportTests {
         )
 
         // 后验（finalize re-hash source files）必须拒绝被替换的 source。
-        await #expect(throws: SherpaOnnxProductBackendError.self) {
+        #expect(throws: SherpaOnnxProductBackendError.self) {
             _ = try fixture.load(using: loader)
         }
         // captured bytes 是前验时读入的原始字节——hostile 替换不可达
@@ -128,7 +128,7 @@ struct SherpaOnnxBufferTransportTests {
             transport: .buffer
         )
 
-        await #expect(throws: SherpaOnnxProductBackendError.self) {
+        #expect(throws: SherpaOnnxProductBackendError.self) {
             _ = try fixture.load(using: loader)
         }
         let configuration = try #require(runtime.capturedConfiguration)

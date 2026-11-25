@@ -499,60 +499,27 @@ public final class VoiceDictationServerCore: @unchecked Sendable {
         case let .partial(stableText, partialText, confidence):
             let elapsed = elapsedMilliseconds(for: session)
             session.lastElapsedMilliseconds = elapsed
-            let cumulativeText = stableText + partialText
-
-            if stableText.count + partialText.count
-                > VoiceDictationConstants.maximumTextCharacters
-            {
-                // delta 的协议长度是两个字段各自的 Character 数之和。
-                // 拼接边界可能让组合字符合并，不能只检查 cumulativeText.count；
-                // 一旦字段总长度超限，就安全截至完整 Character 并 final。
-                session.isClosed = true
-                let final = VoiceDictationFinal(
-                    requestID: requestID,
-                    finalText: VoiceTextValidation
-                        .truncatedToMaximumCharacters(cumulativeText),
-                    confidence: confidence,
-                    asrEngineID: engineDescriptor.protocolEngineID,
-                    polishApplied: false,
-                    elapsedMilliseconds: elapsed
-                )
-                if final.isValid {
-                    session.finalAcceptHash = VoiceDictationAccept
-                        .acceptHash(for: final.finalText)
-                    outbox.append(.final(final))
-                } else {
-                    outbox.append(.error(VoiceDictationError(
-                        requestID: requestID,
-                        errorCode: .asrEngineError,
-                        retryable: false
-                    )))
-                }
+            session.lastSequence += 1
+            let delta = VoiceDictationDelta(
+                requestID: requestID,
+                sequence: session.lastSequence,
+                stableText: stableText,
+                partialText: partialText,
+                confidence: confidence,
+                elapsedMilliseconds: elapsed
+            )
+            if delta.isValid {
                 self.session = session
-                shouldCancelEngine = true
+                outbox.append(.delta(delta))
             } else {
-                session.lastSequence += 1
-                let delta = VoiceDictationDelta(
+                session.isClosed = true
+                self.session = session
+                outbox.append(.error(VoiceDictationError(
                     requestID: requestID,
-                    sequence: session.lastSequence,
-                    stableText: stableText,
-                    partialText: partialText,
-                    confidence: confidence,
-                    elapsedMilliseconds: elapsed
-                )
-                if delta.isValid {
-                    self.session = session
-                    outbox.append(.delta(delta))
-                } else {
-                    session.isClosed = true
-                    self.session = session
-                    outbox.append(.error(VoiceDictationError(
-                        requestID: requestID,
-                        errorCode: .asrEngineError,
-                        retryable: false
-                    )))
-                    shouldCancelEngine = true
-                }
+                    errorCode: .asrEngineError,
+                    retryable: false
+                )))
+                shouldCancelEngine = true
             }
 
         case let .finished(text, confidence, polishApplied):
@@ -561,8 +528,7 @@ public final class VoiceDictationServerCore: @unchecked Sendable {
             session.isClosed = true
             let final = VoiceDictationFinal(
                 requestID: requestID,
-                finalText: VoiceTextValidation
-                    .truncatedToMaximumCharacters(text),
+                finalText: text,
                 confidence: confidence,
                 asrEngineID: engineDescriptor.protocolEngineID,
                 polishApplied: polishApplied,

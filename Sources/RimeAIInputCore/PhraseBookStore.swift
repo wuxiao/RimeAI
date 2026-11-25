@@ -174,7 +174,7 @@ public final class PhraseBookStore: @unchecked Sendable {
             // Repair legacy domain names once, at open time: rows written
             // when `_` was still an accepted domain character would
             // otherwise stay unreachable under the dead name.
-            try? migrateLegacyDomainNames()
+            _ = try? migrateLegacyDomainNames()
         } catch {
             sqlite3_close_v2(opened)
             database = nil

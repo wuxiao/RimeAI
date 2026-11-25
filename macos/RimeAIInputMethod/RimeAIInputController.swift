@@ -29,6 +29,12 @@ final class RimeAIInputController: IMKInputController,
     let settings = RimeAISettingsStore.shared
     var voiceHotKeyRegistrationFailed = false
     var voiceHotKeyIsRegistered = false
+    var voiceTranslateHotKeyIsRegistered = false
+    var voiceModifierTapDetector = VoiceModifierTapDetector()
+    var voiceTranslateModifierTapDetector = VoiceModifierTapDetector()
+    /// 右 ⌘ 点按误触发防护：⌘+点击 / ⌘+滚轮不得启动或结束听写。
+    var voiceModifierTapPointerGuard = VoiceModifierTapPointerGuard()
+    var voiceTranslateModifierTapPointerGuard = VoiceModifierTapPointerGuard()
     var isHostActive = false
     var voiceHotwordAdmission = VoiceHotwordAdmissionState()
     /// 上屏后续写协调器（惰性装配，依赖注入见 +Continuation.swift）。
@@ -93,8 +99,14 @@ final class RimeAIInputController: IMKInputController,
 
     override nonisolated func deactivateServer(_ sender: Any!) {
         MainActor.assumeIsolated {
-            VoiceDictationRuntime.shared.deactivate(owner: self)
-            voiceHotKeyIsRegistered = false
+            VoiceGlobalHotKeyService.shared.unregisterActiveController(self)
+            // 只有在全局监控不可用时，才在失活时强制收尾右 ⌘ 点按录音；
+            // 有全局监控时交由 `controllerDidDeactivate` 在同应用切输入法场景下平滑延续。
+            if !VoiceGlobalHotKeyService.shared.isGlobalMonitorActive {
+                releaseModifierTapDictationIfRecording()
+            }
+            VoiceDictationRuntime.shared.controllerDidDeactivate(owner: self)
+            resetVoiceModifierTapDetectors()
             isHostActive = false
             invalidateInference(clearPresentation: true)
             candidatePanel.hide()
@@ -107,12 +119,22 @@ final class RimeAIInputController: IMKInputController,
             // cancel 同时撤掉提交前的在途状态与提交刚 arm 的一轮。
             continuationCoordinator.cancel(.deactivated)
             continuationAnchorRect = nil
+            VoicePostCommitEditTracker.shared.settleAndDisarm(
+                reason: .deactivated
+            )
             composition.reset()
             Self.contextStore.suspend(ownerID: sessionNonce)
             voiceHotwordAdmission.deactivate()
             activeClientObject = nil
         }
         super.deactivateServer(sender)
+    }
+
+    override nonisolated func recognizedEvents(_ sender: Any!) -> Int {
+        Int(
+            NSEvent.EventTypeMask.keyDown.rawValue
+                | NSEvent.EventTypeMask.flagsChanged.rawValue
+        )
     }
 
     override nonisolated func handle(
@@ -138,11 +160,15 @@ final class RimeAIInputController: IMKInputController,
         guard let client = sender as? any IMKTextInput else {
             return
         }
-        cancelVoiceDictation()
         adoptActiveClient(sender as AnyObject)
+        // 无全局监控时仍在此收尾进行中的右 ⌘ 点按录音。
+        if !VoiceGlobalHotKeyService.shared.isGlobalMonitorActive {
+            releaseModifierTapDictationIfRecording()
+        }
         guard composition.hasComposition else {
             return
         }
+        cancelVoiceDictation()
         commitText(
             composition.committedOuterText + composition.pinyin,
             source: .rawPinyin,
@@ -193,6 +219,9 @@ final class RimeAIInputController: IMKInputController,
             ownerID: sessionNonce
         )
         if composition.appSessionID != sessionID {
+            VoicePostCommitEditTracker.shared.settleAndDisarm(
+                reason: .sessionSwitched
+            )
             VoiceDictationRuntime.shared.sessionSwitched(owner: self)
             invalidateInference(clearPresentation: true)
             candidatePanel.hide()
@@ -213,31 +242,36 @@ final class RimeAIInputController: IMKInputController,
 
     func adoptActiveClient(_ clientObject: AnyObject) {
         if let activeClientObject, activeClientObject !== clientObject {
-            VoiceHotKeyManager.shared.deactivate(owner: self)
-            voiceHotKeyIsRegistered = false
             VoiceDictationRuntime.shared.sessionSwitched(owner: self)
             hostFocusEpoch &+= 1
         }
         activeClientObject = clientObject
+        VoiceGlobalHotKeyService.shared.registerActiveController(self)
     }
 
     func beginHostActivation(_ clientObject: AnyObject) {
         isHostActive = true
-        VoiceHotKeyManager.shared.deactivate(owner: self)
-        voiceHotKeyIsRegistered = false
         VoiceDictationRuntime.shared.claim(owner: self)
         VoiceDictationRuntime.shared.sessionSwitched(owner: self)
         hostFocusEpoch &+= 1
         activeClientObject = clientObject
+        VoiceGlobalHotKeyService.shared.registerActiveController(self)
     }
 
     func enterSecureInput(client: any IMKTextInput) {
+        // 诊断计数只记一次“进入安全输入”：此前每个修饰键都会累加
+        // privacyBlocked，把真实的快捷键尝试淹没在噪声里。下方
+        // composition.enterSecureInput() 会置位，必须先取快照。
+        let wasAlreadyInSecureInput = composition.isSecureInput
+        VoicePostCommitEditTracker.shared.cancelForSecureInput()
         VoiceDictationRuntime.shared.secureInputChanged(
             active: true,
             owner: self
         )
         VoiceHotKeyManager.shared.deactivate(owner: self)
         voiceHotKeyIsRegistered = false
+        voiceTranslateHotKeyIsRegistered = false
+        resetVoiceModifierTapDetectors()
         continuationCoordinator.cancel(.secureInput)
         continuationAnchorRect = nil
         invalidateInference(clearPresentation: true)
@@ -250,10 +284,13 @@ final class RimeAIInputController: IMKInputController,
             replacementRange: notFoundRange
         )
         candidatePanel.hide()
-        settings.record(.privacyBlocked)
+        if !wasAlreadyInSecureInput {
+            settings.record(.privacyBlocked)
+        }
     }
 
     func enterSecureInputIfPossible() {
+        VoicePostCommitEditTracker.shared.cancelForSecureInput()
         guard let client = activeClientObject as? any IMKTextInput else {
             VoiceDictationRuntime.shared.secureInputChanged(
                 active: true,
@@ -261,6 +298,8 @@ final class RimeAIInputController: IMKInputController,
             )
             VoiceHotKeyManager.shared.deactivate(owner: self)
             voiceHotKeyIsRegistered = false
+            voiceTranslateHotKeyIsRegistered = false
+            resetVoiceModifierTapDetectors()
             continuationCoordinator.cancel(.secureInput)
             continuationAnchorRect = nil
             invalidateInference(clearPresentation: true)

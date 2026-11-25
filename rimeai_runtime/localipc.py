@@ -12,14 +12,18 @@ the 103-byte sun_path limit, the 0.1-second liveness probe, and the
 geteuid comparison stay exactly as both servers implemented them.
 """
 
+from __future__ import annotations
+
 import asyncio
+import contextlib
 import ctypes
 import os
-from pathlib import Path
 import socket
 import stat
 import struct
-from typing import Any, Callable
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
 
 
 class PeerIdentityError(ValueError):
@@ -38,7 +42,11 @@ def peer_uid(file_descriptor: int) -> int:
         libc = ctypes.CDLL(None, use_errno=True)
         getpeereid = libc.getpeereid
     except AttributeError as error:
-        if not hasattr(socket, "SO_PEERCRED"):
+        # typeshed declares SO_PEERCRED for Linux only, and the attribute
+        # must be read here, at call time, so a platform without it is
+        # detected however the module was imported.
+        peer_credential_option = getattr(socket, "SO_PEERCRED", None)
+        if peer_credential_option is None:
             raise PeerIdentityError(
                 "this platform cannot verify Unix socket peer identity"
             ) from error
@@ -46,7 +54,7 @@ def peer_uid(file_descriptor: int) -> int:
         try:
             credentials = peer_socket.getsockopt(
                 socket.SOL_SOCKET,
-                socket.SO_PEERCRED,
+                peer_credential_option,
                 struct.calcsize("3i"),
             )
         finally:
@@ -150,3 +158,88 @@ async def prepare_unix_listener_socket(
     )
     os.chmod(socket_path, 0o600)
     return server
+
+
+class ClientSession:
+    """One live client connection of a Unix-socket server.
+
+    The client handler registers a session as soon as it starts and
+    discards it in a ``finally`` when it returns, so
+    ``shutdown_unix_listener`` always knows which connections are open.
+    """
+
+    __slots__ = ("handler", "writer")
+
+    def __init__(
+        self,
+        writer: asyncio.StreamWriter,
+        handler: asyncio.Task[Any] | None,
+    ) -> None:
+        self.writer = writer
+        self.handler = handler
+
+
+async def disconnect_client_sessions(
+    sessions: set[ClientSession],
+    *,
+    grace_seconds: float,
+    timeout_seconds: float,
+) -> None:
+    """Bring every live client handler down, gracefully first.
+
+    Closing our writer flushes what is still queued and then feeds EOF
+    into the handler's own reader, so an idle handler leaves its read
+    loop by itself. A peer that stopped reading would hold that flush —
+    and with it the server's ``close()`` — forever, so after
+    ``grace_seconds`` whatever is still open is aborted (its unsent
+    bytes are dropped). Never waits longer than the grace period plus
+    ``timeout_seconds``.
+    """
+    for session in list(sessions):
+        session.writer.close()
+    handlers = {
+        session.handler for session in sessions if session.handler is not None
+    }
+    if not handlers:
+        return
+    _, stuck = await asyncio.wait(handlers, timeout=grace_seconds)
+    if not stuck:
+        return
+    for session in list(sessions):
+        transport = session.writer.transport
+        # Abort only a transport still holding unsent bytes: that is the
+        # one case graceful close cannot finish, and it is safe here (a
+        # transport that already lost its connection must never be
+        # aborted again).
+        if transport is not None and transport.get_write_buffer_size() > 0:
+            transport.abort()
+    await asyncio.wait(stuck, timeout=timeout_seconds)
+
+
+async def shutdown_unix_listener(
+    server: asyncio.AbstractServer,
+    sessions: set[ClientSession],
+    *,
+    grace_seconds: float,
+    timeout_seconds: float,
+) -> None:
+    """Stop a Unix listener and bring its clients down within a bounded budget.
+
+    On Python 3.12+ ``Server.wait_closed()`` also waits for every client
+    handler to return, so one idle client that simply keeps its socket
+    open would pin the server's ``close()`` forever. This closes the
+    listener, tears its clients down (see ``disconnect_client_sessions``)
+    and then waits for the server — for at most ``timeout_seconds``, so
+    the caller's ``close()`` always completes. Callers stop accepting
+    new work (and cancel their in-flight request tasks) *before* calling
+    this, so no handler starts another round of work while it is being
+    torn down.
+    """
+    server.close()
+    await disconnect_client_sessions(
+        sessions,
+        grace_seconds=grace_seconds,
+        timeout_seconds=timeout_seconds,
+    )
+    with contextlib.suppress(asyncio.TimeoutError):
+        await asyncio.wait_for(server.wait_closed(), timeout=timeout_seconds)

@@ -19,6 +19,7 @@ from typing import Any, Protocol
 
 from rimeai_runtime.localipc import (
     AlreadyListeningError,
+    ClientSession,
     ExistingSocketUnverifiableError,
     NotASocketPathError,
     PeerIdentityError,
@@ -26,6 +27,7 @@ from rimeai_runtime.localipc import (
     SocketPathTooLongError,
     peer_uid,
     prepare_unix_listener_socket,
+    shutdown_unix_listener,
 )
 
 from .decision_log import RESOLVABLE_OUTCOMES, DecisionLog
@@ -196,6 +198,60 @@ SENTENCE_FEEDBACK_CAPABILITY = "sentence-feedback"
 # Daemon shutdown is bounded: a wedged client handler (e.g. a peer that
 # vanishes mid-teardown) must never block close() forever.
 CLOSE_TEARDOWN_TIMEOUT_SECONDS = 5.0
+# Graceful phase of the client teardown: pending frames are flushed before
+# the socket closes; whatever is still open after this is aborted.
+CLOSE_CLIENT_GRACE_SECONDS = 0.5
+# The neural arm waits for the synchronous result frame for at most the
+# request deadline plus this slack. Defensive only: the gate is always
+# released when the synchronous arm ends.
+RESULT_GATE_GRACE_SECONDS = 1.0
+
+
+class _RequestGate:
+    """Per-request ordering contract between the synchronous ``result``
+    frame and the async ``sentence_late`` frame.
+
+    ``write_lock`` serialises writes but does not order them: the neural
+    arm can finish first and put ``sentence_late`` on the wire ahead of
+    the ``result`` it belongs to. The client arms its late-frame slot
+    only when the result arrives, so a late frame that wins that race is
+    taken for a superseded revision and dropped. The neural arm therefore
+    waits here until the result frame is on the wire, and abstains when
+    the request ended any other way (error, timeout, cancellation,
+    superseded revision).
+    """
+
+    __slots__ = ("_delivered", "_settled")
+
+    def __init__(self) -> None:
+        self._settled = asyncio.Event()
+        self._delivered = False
+
+    @property
+    def closed_without_result(self) -> bool:
+        """The synchronous arm already ended and wrote no result frame."""
+        return self._settled.is_set() and not self._delivered
+
+    def result_delivered(self) -> None:
+        """The synchronous ``result`` frame is on the wire."""
+        self._delivered = True
+        self._settled.set()
+
+    def abort(self) -> None:
+        """The request will not produce a ``result`` frame after all.
+
+        Idempotent, and never revokes a result that was already delivered.
+        """
+        self._settled.set()
+
+    async def wait_for_result(self, timeout: float) -> bool:
+        """``True`` only when the synchronous result frame was written."""
+        if not self._settled.is_set():
+            try:
+                await asyncio.wait_for(self._settled.wait(), timeout)
+            except asyncio.TimeoutError:
+                return False
+        return self._delivered
 
 
 class RimeAIDaemonServer:
@@ -223,6 +279,10 @@ class RimeAIDaemonServer:
             thread_name_prefix="rimeai-neural-sentence",
         )
         self._all_tasks: set[asyncio.Task[Any]] = set()
+        self._clients: set[ClientSession] = set()
+        # Flipped by close(): handlers leave their read loop at the top of
+        # their next iteration instead of starting more request arms.
+        self._closing = False
         self._consecutive_failures = 0
         self._circuit_open_until = 0.0
 
@@ -232,6 +292,7 @@ class RimeAIDaemonServer:
             self._circuit_open_until = monotonic() + 30
 
     async def start(self) -> None:
+        self._closing = False
         try:
             self._server = await prepare_unix_listener_socket(
                 self.socket_path,
@@ -260,12 +321,25 @@ class RimeAIDaemonServer:
         logger.info("daemon listening on %s", self.socket_path)
 
     async def close(self) -> None:
-        if self._server is not None:
-            self._server.close()
-            await self._server.wait_closed()
-            self._server = None
+        # Refuse new work first: every handler leaves its read loop at the
+        # top of its next iteration, so no request arm is created after
+        # this point.
+        self._closing = True
+        server, self._server = self._server, None
+        # In-flight request arms go first: once a client writer is closed,
+        # a late write would only hit a dead transport.
         for task in list(self._all_tasks):
             task.cancel()
+        if server is not None:
+            # Closes the listener and brings every client handler down
+            # within a bounded budget (idle clients included), then
+            # waits — bounded as well — for the server itself.
+            await shutdown_unix_listener(
+                server,
+                self._clients,
+                grace_seconds=CLOSE_CLIENT_GRACE_SECONDS,
+                timeout_seconds=CLOSE_TEARDOWN_TIMEOUT_SECONDS,
+            )
         if self._all_tasks:
             with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(
@@ -334,6 +408,8 @@ class RimeAIDaemonServer:
             return
 
         write_lock = asyncio.Lock()
+        session = ClientSession(writer, asyncio.current_task())
+        self._clients.add(session)
         hello_complete = False
         client_wants_late_sentences = False
         pending_by_key: dict[tuple[str, str], asyncio.Task[Any]] = {}
@@ -342,10 +418,15 @@ class RimeAIDaemonServer:
         neural_by_id: dict[str, asyncio.Task[Any]] = {}
         latest_revision: dict[tuple[str, str], int] = {}
         try:
-            while not reader.at_eof():
+            while not reader.at_eof() and not self._closing:
                 try:
                     line = await reader.readline()
                 except (ValueError, asyncio.LimitOverrunError):
+                    break
+                except OSError:
+                    # The transport reported the peer gone (e.g. a reset
+                    # after it closed with frames still unread): that is an
+                    # ordinary disconnect, not a handler failure.
                     break
                 if not line:
                     break
@@ -561,6 +642,9 @@ class RimeAIDaemonServer:
                 previous_task = pending_by_key.get(key)
                 if previous_task is not None:
                     previous_task.cancel()
+                # One gate per request: the neural arm may not write its
+                # sentence_late frame until the synchronous result is out.
+                gate = _RequestGate()
                 task = asyncio.create_task(
                     self._run_inference(
                         request,
@@ -568,6 +652,7 @@ class RimeAIDaemonServer:
                         latest_revision,
                         writer,
                         write_lock,
+                        gate,
                     )
                 )
                 pending_by_key[key] = task
@@ -579,12 +664,18 @@ class RimeAIDaemonServer:
                     *,
                     current_key: tuple[str, str] = key,
                     current_id: str = request_id,
+                    current_gate: _RequestGate = gate,
                 ) -> None:
                     self._all_tasks.discard(completed)
                     if pending_by_key.get(current_key) is completed:
                         pending_by_key.pop(current_key, None)
                     if pending_by_id.get(current_id) is completed:
                         pending_by_id.pop(current_id, None)
+                    # However the synchronous arm ended — result, error,
+                    # cancellation, even a cancel that landed before its
+                    # coroutine ever started — release the neural arm
+                    # waiting on it (a no-op once the result did).
+                    current_gate.abort()
 
                 task.add_done_callback(cleanup)
                 if (
@@ -601,6 +692,7 @@ class RimeAIDaemonServer:
                             latest_revision,
                             writer,
                             write_lock,
+                            gate,
                         )
                     )
                     neural_by_key[key] = neural_task
@@ -629,6 +721,7 @@ class RimeAIDaemonServer:
             writer.close()
             with contextlib.suppress(BrokenPipeError, ConnectionResetError):
                 await writer.wait_closed()
+            self._clients.discard(session)
 
     async def _run_inference(
         self,
@@ -637,6 +730,7 @@ class RimeAIDaemonServer:
         latest_revision: dict[tuple[str, str], int],
         writer: asyncio.StreamWriter,
         write_lock: asyncio.Lock,
+        gate: _RequestGate,
     ) -> None:
         loop = asyncio.get_running_loop()
         started_at = monotonic()
@@ -816,6 +910,9 @@ class RimeAIDaemonServer:
                 "elapsed_ms": round((monotonic() - started_at) * 1000, 3),
             },
         )
+        # Release the neural arm only now, with the result frame on the
+        # wire, so sentence_late can never overtake it.
+        gate.result_delivered()
         if (
             self.decision_log is not None
             and decision in {"ranked_candidate", "sentence_suggestion"}
@@ -846,12 +943,14 @@ class RimeAIDaemonServer:
         latest_revision: dict[tuple[str, str], int],
         writer: asyncio.StreamWriter,
         write_lock: asyncio.Lock,
+        gate: _RequestGate,
     ) -> None:
         """Async neural sentence tier: decode off the sync executor and
         deliver a `sentence_late` frame bound to the request, but only
-        while that revision is still the latest for the key and within
-        the configured budget. Failures never surface as errors — the
-        tier simply abstains."""
+        after that request's synchronous `result` frame, while that
+        revision is still the latest for the key and within the
+        configured budget. Failures never surface as errors — the tier
+        simply abstains."""
         service = self.neural_sentence
         if service is None:
             return
@@ -863,6 +962,14 @@ class RimeAIDaemonServer:
             logger.debug(
                 "neural late skipped (stale before dispatch)"
                 " request_id=%s",
+                request["request_id"],
+            )
+            return
+        if gate.closed_without_result:
+            # The synchronous arm already errored, timed out or was
+            # cancelled: there is no result frame for a late one to follow.
+            logger.debug(
+                "neural late skipped (no result to follow) request_id=%s",
                 request["request_id"],
             )
             return
@@ -927,6 +1034,22 @@ class RimeAIDaemonServer:
                 request["request_id"],
                 confidence,
                 service.min_confidence,
+            )
+            return
+        # Ordering contract (see _RequestGate): the late frame is strictly
+        # late. Abstain when no result frame precedes it.
+        if not await gate.wait_for_result(
+            request["deadline_ms"] / 1000 + RESULT_GATE_GRACE_SECONDS
+        ):
+            logger.debug(
+                "neural late withheld (no result frame) request_id=%s",
+                request["request_id"],
+            )
+            return
+        if latest_revision.get(key) != request["revision"]:
+            logger.debug(
+                "neural late dropped (stale behind result) request_id=%s",
+                request["request_id"],
             )
             return
         logger.debug(

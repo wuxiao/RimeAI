@@ -775,4 +775,54 @@ struct RimeAISettingsStoreTests {
         )
         #expect(decoded == .continuation)
     }
+
+    @Test("voice experience settings default, persist, export/import, and restore")
+    func voiceExperienceSettingsRoundTrip() throws {
+        let (store, defaults) = makeStore()
+        #expect(store.voiceHistoryEnabled)
+        #expect(store.voiceSmartPolishEnabled)
+        #expect(store.voicePolishStyle == .concise)
+        #expect(store.voiceTranslateShortcut == .defaultTranslate)
+        #expect(store.voiceTranslateTargetLanguage == .autoEnZh)
+        #expect(store.voiceAutoPasteEnabled)
+        #expect(store.voiceSoundEffectsEnabled)
+        #expect(store.voiceMuteSystemAudioEnabled)
+
+        let customTranslate = try #require(
+            VoiceDictationShortcut(keyCode: 16, modifiers: [.option, .shift])
+        )
+        store.voiceHistoryEnabled = false
+        store.voiceSmartPolishEnabled = false
+        store.voicePolishStyle = .formal
+        store.voiceTranslateShortcut = customTranslate
+        store.voiceTranslateTargetLanguage = .japanese
+        store.voiceAutoPasteEnabled = false
+        store.voiceSoundEffectsEnabled = false
+        store.voiceMuteSystemAudioEnabled = false
+
+        let reloaded = RimeAISettingsStore(defaults: defaults)
+        #expect(!reloaded.voiceHistoryEnabled)
+        #expect(!reloaded.voiceSmartPolishEnabled)
+        #expect(reloaded.voicePolishStyle == .formal)
+        #expect(reloaded.voiceTranslateShortcut == customTranslate)
+        #expect(reloaded.voiceTranslateTargetLanguage == .japanese)
+        #expect(!reloaded.voiceAutoPasteEnabled)
+        #expect(!reloaded.voiceSoundEffectsEnabled)
+        #expect(!reloaded.voiceMuteSystemAudioEnabled)
+
+        let exported = reloaded.exportSnapshot()
+        let (dest, _) = makeStore()
+        try dest.applyImport(exported, hasCloudCredential: false)
+        #expect(dest.exportSnapshot() == exported)
+
+        dest.restoreDefaults()
+        #expect(dest.voiceHistoryEnabled)
+        #expect(dest.voiceSmartPolishEnabled)
+        #expect(dest.voicePolishStyle == .concise)
+        #expect(dest.voiceTranslateShortcut == .defaultTranslate)
+        #expect(dest.voiceTranslateTargetLanguage == .autoEnZh)
+        #expect(dest.voiceAutoPasteEnabled)
+        #expect(dest.voiceSoundEffectsEnabled)
+        #expect(dest.voiceMuteSystemAudioEnabled)
+    }
 }

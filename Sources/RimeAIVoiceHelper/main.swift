@@ -33,7 +33,7 @@ do {
     FileHandle.standardError.write(Data(
         (
             "Debug 用法: rimeai-voice-helper --socket <path> "
-                + "[--engine unavailable|apple-speech|product-managed]\n"
+                + "[--engine unavailable|apple-speech|mlx-qwen3-asr|product-managed]\n"
         ).utf8
     ))
     exit(64)
@@ -44,6 +44,8 @@ let engine: any VoiceDictationEngine
 switch engineName {
 case "apple-speech":
     engine = AppleSpeechEngine()
+case "mlx-qwen3-asr":
+    engine = MLXQwen3ASREngine()
 case "product-managed":
     do {
         engine = try SherpaOnnxProductVoiceEngineFactory.makeEngine(

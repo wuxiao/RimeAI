@@ -213,6 +213,99 @@ final class CloudBrokerClientContinuationTests: XCTestCase {
         )
     }
 
+    /// 回归测试：当连接的云端 broker 未声明 `voice-transform` 能力（例如旧版
+    /// 常驻进程）时，`transformVoiceText` 必须立即 fail-fast 返回 nil，让客户端
+    /// 0ms 回退本地润色，而不是死等 6 秒超时。
+    func testTransformVoiceTextFailsFastWhenBrokerLacksVoiceTransformCapability() throws {
+        let socketPath = makeTemporarySocketPath()
+        defer { try? FileManager.default.removeItem(atPath: socketPath) }
+
+        let server = try FakeCloudBrokerUDSServer(
+            socketPath: socketPath,
+            capabilities: [
+                "candidate-id-only",
+                "cancel",
+                "latest-request-wins",
+                "history-generation",
+            ]
+        )
+        server.start()
+        defer { server.stop() }
+
+        let client = CloudBrokerClient(socketPath: socketPath)
+        defer { client.disconnect() }
+
+        let request = CloudVoiceTransformRequest(
+            requestID: "vt-unsupported-1",
+            clientSessionID: "session-1",
+            bundleIdentifier: "com.apple.Notes",
+            task: .polish,
+            text: "嗯，那个明天开会",
+            style: .concise,
+            deadlineMilliseconds: 6_000
+        )
+
+        final class CallbackBox: @unchecked Sendable {
+            private let lock = NSLock()
+            private var _received = false
+            private var _response: CloudVoiceTransformResponse?
+
+            var received: Bool {
+                lock.lock()
+                defer { lock.unlock() }
+                return _received
+            }
+
+            var response: CloudVoiceTransformResponse? {
+                lock.lock()
+                defer { lock.unlock() }
+                return _response
+            }
+
+            func record(_ value: CloudVoiceTransformResponse?) {
+                lock.lock()
+                _response = value
+                _received = true
+                lock.unlock()
+            }
+        }
+
+        // 1. 握手尚未完成时先入队：hello 完成后应立刻 fail-fast（远小于 6s）。
+        let startedFirst = Date()
+        let firstBox = CallbackBox()
+        client.transformVoiceText(request, apiKey: "test-api-key") { response in
+            firstBox.record(response)
+        }
+        XCTAssertTrue(
+            waitUntil(timeout: 2.0) { firstBox.received },
+            "缺少 voice-transform 能力时不应等到 6 秒超时"
+        )
+        XCTAssertNil(firstBox.response)
+        XCTAssertLessThan(Date().timeIntervalSince(startedFirst), 2.0)
+
+        // 2. 握手完成后再次发起：同步队列立即可判定无能力，0ms 返回 nil，且不发帧到服务端。
+        let startedSecond = Date()
+        let secondBox = CallbackBox()
+        let secondRequest = CloudVoiceTransformRequest(
+            requestID: "vt-unsupported-2",
+            clientSessionID: "session-1",
+            bundleIdentifier: "com.apple.Notes",
+            task: .polish,
+            text: "第二句测试",
+            style: .concise,
+            deadlineMilliseconds: 6_000
+        )
+        client.transformVoiceText(secondRequest, apiKey: "test-api-key") { response in
+            secondBox.record(response)
+        }
+        XCTAssertTrue(waitUntil(timeout: 1.0) { secondBox.received })
+        XCTAssertNil(secondBox.response)
+        XCTAssertLessThan(Date().timeIntervalSince(startedSecond), 0.5)
+        XCTAssertFalse(
+            server.receivedLines.contains { $0.contains("vt-unsupported-2") }
+        )
+    }
+
     private func makeTemporarySocketPath() -> String {
         let shortID = UUID().uuidString.prefix(8)
         return "/tmp/rimeai-cloud-test-\(shortID).sock"

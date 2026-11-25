@@ -368,8 +368,13 @@ public final class AppleSpeechEngine: VoiceDictationEngine, @unchecked Sendable 
                 )
             }
         )
-        let durationWork = DispatchWorkItem { [weak self] in
-            self?.stop(requestID: requestID)
+        let durationWork: DispatchWorkItem?
+        if maximumDurationMilliseconds > 0 {
+            durationWork = DispatchWorkItem { [weak self] in
+                self?.stop(requestID: requestID)
+            }
+        } else {
+            durationWork = nil
         }
 
         lock.lock()
@@ -394,11 +399,13 @@ public final class AppleSpeechEngine: VoiceDictationEngine, @unchecked Sendable 
             return
         }
 
-        workQueue.asyncAfter(
-            deadline: .now()
-                + Double(maximumDurationMilliseconds) / 1_000,
-            execute: durationWork
-        )
+        if let durationWork, maximumDurationMilliseconds > 0 {
+            workQueue.asyncAfter(
+                deadline: .now()
+                    + Double(maximumDurationMilliseconds) / 1_000,
+                execute: durationWork
+            )
+        }
     }
 
     private func handleRecognitionResult(

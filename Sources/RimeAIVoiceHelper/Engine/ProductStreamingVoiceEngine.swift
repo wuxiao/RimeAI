@@ -1054,12 +1054,7 @@ public final class ProductStreamingVoiceEngine: VoiceDictationEngine,
             }
             session.currentPartialText = ""
         } else {
-            let remaining = max(
-                0,
-                VoiceDictationConstants.maximumTextCharacters
-                    - session.stableText.count
-            )
-            session.currentPartialText = String(text.prefix(remaining))
+            session.currentPartialText = text
         }
 
         let payload = Session.PartialPayload(
@@ -1120,15 +1115,11 @@ public final class ProductStreamingVoiceEngine: VoiceDictationEngine,
         generation expectedGeneration: UInt64,
         requestID: String
     ) {
-        let boundedMilliseconds = max(
-            1,
-            min(
-                milliseconds,
-                VoiceDictationConstants.maximumDurationMilliseconds
-            )
-        )
+        guard milliseconds > 0 else {
+            return
+        }
         let cancellation = scheduleAfterMilliseconds(
-            boundedMilliseconds
+            milliseconds
         ) { [weak self] in
             self?.beginStop(
                 requestID: requestID,
@@ -1183,14 +1174,11 @@ public final class ProductStreamingVoiceEngine: VoiceDictationEngine,
     }
 
     private static func normalizedDriverText(_ value: String) -> String {
-        let singleLine = value
+        value
             .replacingOccurrences(of: "\r\n", with: " ")
             .replacingOccurrences(of: "\r", with: " ")
             .replacingOccurrences(of: "\n", with: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        return String(singleLine.prefix(
-            VoiceDictationConstants.maximumTextCharacters
-        ))
     }
 
     private static func normalizedHotwords(
@@ -1232,9 +1220,7 @@ public final class ProductStreamingVoiceEngine: VoiceDictationEngine,
         _ prefix: String,
         _ suffix: String
     ) -> String {
-        String((prefix + suffix).prefix(
-            VoiceDictationConstants.maximumTextCharacters
-        ))
+        prefix + suffix
     }
 
     private static func accepts(_ descriptor: VoiceEngineDescriptor) -> Bool {

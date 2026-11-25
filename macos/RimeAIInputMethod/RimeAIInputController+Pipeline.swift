@@ -116,19 +116,24 @@ extension RimeAIInputController {
     /// requestID 路由到发起请求的 pipeline，帧到时一次性取回，
     /// 不再依赖被最新 controller init 覆盖的单例单槽）。控制器在
     /// init 尾部才把 pipeline 存入属性，故经 self 间接取用。
+    /// 闭包本身即声明为 `@Sendable`：流水线在主 actor 上同步调用它，
+    /// 迟路由登记必须先于发送完成，因此读取 pipeline 时回到主 actor。
     private static func makeDaemonSendClosure(
         controller: RimeAIInputController
-    ) -> (
+    ) -> @Sendable (
         SemanticInferenceRequest,
         @escaping @Sendable (SemanticInferenceResult?) -> Void
     ) -> Void {
         { [weak controller] request, completion in
-            if request.allowSentence,
-               let pipeline = controller?.pipeline {
-                DaemonClient.shared.registerSentenceLateRoute(
-                    requestID: request.requestID
-                ) { frame in
-                    pipeline.applyNeuralSentenceLate(frame)
+            if request.allowSentence {
+                MainActor.assumeIsolated {
+                    if let pipeline = controller?.pipeline {
+                        DaemonClient.shared.registerSentenceLateRoute(
+                            requestID: request.requestID
+                        ) { frame in
+                            pipeline.applyNeuralSentenceLate(frame)
+                        }
+                    }
                 }
             }
             DaemonClient.shared.infer(
