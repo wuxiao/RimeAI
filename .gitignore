@@ -59,3 +59,5 @@ secrets/cloud.env
 !secrets/cloud.env.example
 # Teacher synthesis products (training assets; user-seeded rows carry user pinyin distribution)
 datasets/teacher-synthesis-*.jsonl
+# Local-teacher SFT products (same privacy boundary as above)
+datasets/local-teacher-*.jsonl
