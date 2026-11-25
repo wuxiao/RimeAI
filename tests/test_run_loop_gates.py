@@ -157,6 +157,58 @@ def test_model_fails_above_latency_budget():
     assert gates.check_model(report)["verdict"] == "fail"
 
 
+def test_model_holdout_leg_uses_per_leg_latency_budget():
+    # 2026-10-26 归因：holdout 腿用自身基线标定预算；在 frozen 预算之上、
+    # holdout 预算之下必须 pass（不能沿用 frozen 派生地板误判 fail）。
+    report = json.loads(json.dumps(MODEL_PASS))
+    report["latency_ms"]["p50"] = (
+        gates.MODEL_FROZEN_P50_MS * gates.MODEL_MAX_P50_FACTOR + 50
+    )
+    gate = gates.check_model(
+        report,
+        min_sentence_accuracy=gates.MODEL_HOLDOUT_MIN_SENTENCE_ACCURACY,
+        latency_p50_budget_ms=gates.MODEL_HOLDOUT_P50_MS
+        * gates.MODEL_MAX_P50_FACTOR,
+    )
+    assert gate["verdict"] == "pass"
+    found = statuses(gate)
+    assert found["latency_p50_ms"] == "pass"
+
+
+def test_model_holdout_leg_fails_above_its_own_latency_budget():
+    report = json.loads(json.dumps(MODEL_PASS))
+    report["latency_ms"]["p50"] = (
+        gates.MODEL_HOLDOUT_P50_MS * gates.MODEL_MAX_P50_FACTOR + 1
+    )
+    gate = gates.check_model(
+        report,
+        min_sentence_accuracy=gates.MODEL_HOLDOUT_MIN_SENTENCE_ACCURACY,
+        latency_p50_budget_ms=gates.MODEL_HOLDOUT_P50_MS
+        * gates.MODEL_MAX_P50_FACTOR,
+    )
+    assert gate["verdict"] == "fail"
+
+
+def test_model_gate_holdout_latency_uses_calibrated_budget(monkeypatch, tmp_path):
+    # 端到端 stub：holdout p50=555.158（gate 实测值）在 frozen 预算之上，
+    # 但按腿标定后必须 pass；阈值应记录校准后的 832.737。
+    holdout = json.loads(json.dumps(MODEL_PASS))
+    holdout["latency_ms"]["p50"] = 555.158
+    gate = _run_model_gate_with_stub(
+        monkeypatch, tmp_path, frozen=MODEL_PASS, holdout=holdout
+    )
+    assert gate["verdict"] == "pass"
+    holdout_metric = next(
+        m
+        for m in gate["metrics"]
+        if m["name"] == "holdout_latency_p50_ms"
+    )
+    assert holdout_metric["status"] == "pass"
+    assert holdout_metric["threshold"] == round(
+        gates.MODEL_HOLDOUT_P50_MS * gates.MODEL_MAX_P50_FACTOR, 3
+    )
+
+
 def _run_model_gate_with_stub(
     monkeypatch, tmp_path, *, frozen, holdout, holdout_exists=True
 ):
