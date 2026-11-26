@@ -331,4 +331,89 @@ final class VoiceRuntimePolicyTests: XCTestCase {
             )
         )
     }
+
+    // MARK: - IMK 光标矩形可用性
+
+    func testCaretRectPolicyAcceptsZeroWidthInsertionPointAndRejectsPlaceholders() {
+        // 常规光标矩形原样返回。
+        XCTAssertEqual(
+            VoiceCaretRectPolicy.normalizedAnchor(
+                NSRect(x: 120, y: 300, width: 1, height: 18)
+            ),
+            NSRect(x: 120, y: 300, width: 1, height: 18)
+        )
+        // Electron / 微信空输入框的零宽插入点：是真实光标，归一化为 1pt 宽，
+        // 下游的 isEmpty 判定才不会把它当成无锚点。
+        XCTAssertEqual(
+            VoiceCaretRectPolicy.normalizedAnchor(
+                NSRect(x: 120, y: 300, width: 0, height: 18)
+            ),
+            NSRect(x: 120, y: 300, width: 1, height: 18)
+        )
+        // 未排版出真实光标的占位值、零行高、负宽与非有限坐标一律不可用。
+        XCTAssertNil(VoiceCaretRectPolicy.normalizedAnchor(.zero))
+        XCTAssertNil(VoiceCaretRectPolicy.normalizedAnchor(
+            NSRect(x: 0, y: 0, width: 0, height: 18)
+        ))
+        XCTAssertNil(VoiceCaretRectPolicy.normalizedAnchor(
+            NSRect(x: 120, y: 300, width: 4, height: 0)
+        ))
+        XCTAssertNil(VoiceCaretRectPolicy.normalizedAnchor(
+            NSRect(x: 120, y: 300, width: -1, height: 18)
+        ))
+        XCTAssertNil(VoiceCaretRectPolicy.normalizedAnchor(
+            NSRect(x: CGFloat.nan, y: 300, width: 2, height: 18)
+        ))
+        XCTAssertNil(VoiceCaretRectPolicy.normalizedAnchor(
+            NSRect(x: 120, y: CGFloat.infinity, width: 2, height: 18)
+        ))
+    }
+
+    // MARK: - 采样式目标校验去抖
+
+    func testTargetValidityDebouncerIgnoresTransientBlipsAndLatchesSustainedInvalidity() {
+        var debouncer = VoiceTargetValidityDebouncer()
+        let interval = VoiceTargetValidityDebouncer.lockoutInterval
+
+        // 首个无效采样只开始计时，不判定失效。
+        XCTAssertFalse(debouncer.noteSample(isValid: false, at: 100))
+        // 窗口内恢复有效：清零，不锁死（此前单次抖动就会永久废掉自动上屏）。
+        XCTAssertFalse(debouncer.noteSample(isValid: true, at: 100.1))
+        XCTAssertNil(debouncer.firstInvalidSampleAt)
+
+        // 连续无效但尚未满窗口：仍不锁死。
+        XCTAssertFalse(debouncer.noteSample(isValid: false, at: 200))
+        XCTAssertFalse(
+            debouncer.noteSample(isValid: false, at: 200 + interval - 0.05)
+        )
+        // 中途一次有效采样必须让计时重来。
+        XCTAssertFalse(
+            debouncer.noteSample(isValid: true, at: 200 + interval - 0.02)
+        )
+        XCTAssertFalse(debouncer.noteSample(isValid: false, at: 400))
+
+        // 真实的焦点切换是持续状态：连续无效满窗口后判定失效，并保持到恢复有效。
+        XCTAssertTrue(
+            debouncer.noteSample(isValid: false, at: 400 + interval + 0.05)
+        )
+        XCTAssertTrue(
+            debouncer.noteSample(isValid: false, at: 400 + interval + 0.2)
+        )
+        XCTAssertFalse(debouncer.noteSample(isValid: true, at: 401))
+        XCTAssertNil(debouncer.firstInvalidSampleAt)
+
+        // 有效/无效交替的抖动无论持续多久都不会锁死。
+        var alternating = VoiceTargetValidityDebouncer()
+        for step in 0..<40 {
+            XCTAssertFalse(
+                alternating.noteSample(
+                    isValid: step.isMultiple(of: 2),
+                    at: Double(step) * 0.07
+                )
+            )
+        }
+
+        debouncer.reset()
+        XCTAssertEqual(debouncer, VoiceTargetValidityDebouncer())
+    }
 }

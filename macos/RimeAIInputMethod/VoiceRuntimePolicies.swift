@@ -95,6 +95,85 @@ enum VoiceTransformRawCommit {
     }
 }
 
+// MARK: - IMK 光标矩形可用性
+
+/// `IMKTextInput.attributes(forCharacterIndex:lineHeightRectangle:)` 的原始返回值
+/// 能否作为语音听写的光标锚点。
+/// 部分 Electron/Chromium/微信输入框在空内容或刚聚焦时，把插入点报告为
+/// `{x, y, width: 0, height: lineHeight}`：`NSRect.isEmpty` 为 true，但零宽且有行高
+/// 的矩形就是真实插入点，不能据此判定“未检测到光标”。
+enum VoiceCaretRectPolicy {
+    /// 归一化为可用锚点；不可用时返回 nil。
+    /// 零宽插入点补成 1pt 宽——下游用 `isEmpty` 判断锚点是否有效，原始零宽矩形会被
+    /// 误当成无锚点而退回鼠标位置。
+    static func normalizedAnchor(_ rect: NSRect) -> NSRect? {
+        // `NSRect.width/height` 取的是绝对值，负尺寸必须用 size 原值判断。
+        let rawWidth = rect.size.width
+        let rawHeight = rect.size.height
+        guard rect.origin.x.isFinite,
+              rect.origin.y.isFinite,
+              rawWidth.isFinite,
+              rawHeight.isFinite,
+              rawHeight > 0,
+              rawWidth >= 0
+        else {
+            return nil
+        }
+        // 屏幕原点处的零宽矩形是宿主的占位值（尚未排版出真实光标），不是光标位置。
+        guard rawWidth > 0 || rect.origin != .zero else {
+            return nil
+        }
+        guard rawWidth > 0 else {
+            return NSRect(
+                x: rect.origin.x,
+                y: rect.origin.y,
+                width: 1,
+                height: rawHeight
+            )
+        }
+        return rect
+    }
+}
+
+// MARK: - 采样式目标校验去抖
+
+/// 录音/润色期间的目标有效性来自两类高频采样：150ms 定时器与每次 ASR 预览回调。
+/// 宿主（尤其 Electron/Chromium）重排或滚动时，单次 XPC 查询可能拿到瞬时抖动的
+/// 选区/光标矩形；若据此立即把 `hasEditableTarget` 永久置为 false，本次听写就只能
+/// 手动复制（提示“焦点已切换”），哪怕下一个采样光标仍在原处。
+///
+/// 这里要求“连续无效”持续满 `lockoutInterval` 才判定目标失效，任何一次有效采样都会
+/// 重新计时。真正的焦点切换是持续状态，必然在窗口内被确认；上屏瞬间仍会同步复核
+/// 目标有效性，去抖不会把文本写进已失焦的输入框。
+struct VoiceTargetValidityDebouncer: Equatable {
+    /// 连续无效需持续的秒数：远大于单次 XPC 抖动与一帧重排，又短于用户可感知的延迟。
+    static let lockoutInterval: TimeInterval = 0.6
+
+    /// 连续无效段的首个采样时刻；nil 表示最近一次采样有效。
+    private(set) var firstInvalidSampleAt: TimeInterval?
+
+    /// 记录一次采样；返回 true 表示应判定目标失效。
+    /// `timestamp` 须来自单调时钟（如 `ProcessInfo.systemUptime`）。
+    mutating func noteSample(
+        isValid: Bool,
+        at timestamp: TimeInterval
+    ) -> Bool {
+        guard !isValid else {
+            firstInvalidSampleAt = nil
+            return false
+        }
+        guard let first = firstInvalidSampleAt else {
+            firstInvalidSampleAt = timestamp
+            return false
+        }
+        return timestamp - first >= Self.lockoutInterval
+    }
+
+    mutating func reset() {
+        firstInvalidSampleAt = nil
+    }
+}
+
 // MARK: - 宿主 markedRange 判定
 
 /// 部分宿主（Electron / Chromium / 断联 XPC proxy）在没有未上屏组合文本时

@@ -118,14 +118,7 @@ extension RimeAIInputController {
             forCharacterIndex: max(0, characterIndex),
             lineHeightRectangle: &caretRect
         )
-        guard !caretRect.isEmpty,
-              caretRect.origin.x.isFinite,
-              caretRect.origin.y.isFinite,
-              caretRect.size.width.isFinite,
-              caretRect.size.height.isFinite
-        else {
-            return nil
-        }
-        return caretRect
+        // 零宽插入点（Electron/微信空输入框）同样是真实光标，不能判成“未检测到光标”。
+        return VoiceCaretRectPolicy.normalizedAnchor(caretRect)
     }
 }

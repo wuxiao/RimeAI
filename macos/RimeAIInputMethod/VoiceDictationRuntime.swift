@@ -117,6 +117,8 @@ final class VoiceDictationRuntime {
     private(set) var isTransforming = false
     /// 开始听写时是否存在可自动上屏的光标；用于区分“未检测到光标”与“焦点已切换”。
     private var targetWasEditableAtStart = false
+    /// 采样式目标校验的去抖状态；每次新会话与清场时复位。
+    private var targetValidityDebouncer = VoiceTargetValidityDebouncer()
     private var activeTransformRequestID: String?
     private var incrementalPolish = VoiceIncrementalPolishPipeline()
     private var pendingRestartAfterFinalizing: (
@@ -541,6 +543,7 @@ final class VoiceDictationRuntime {
         self.anchorRect = anchorRect
         self.hasEditableTarget = effectiveEditableTarget
         targetWasEditableAtStart = effectiveEditableTarget
+        targetValidityDebouncer.reset()
         activeIntent = intent
         activeHotwords = context.hotwordSnapshot.phrases
         sessionStartedAt = Date()
@@ -849,6 +852,11 @@ final class VoiceDictationRuntime {
             }
         } else {
             // 焦点已离开仍保底写入剪贴板与语音历史，防止无缝续录时丢失上一句。
+            Self.logAutoPasteDegraded(
+                targetWasEditableAtStart ? .focusSwitched : .noCursor,
+                globalSession: owner.usesClipboardPasteForCommit,
+                targetValidNow: false
+            )
             let pasteboard = NSPasteboard.general
             pasteboard.clearContents()
             _ = pasteboard.setString(cleanedFinal, forType: .string)
@@ -1050,9 +1058,7 @@ final class VoiceDictationRuntime {
         guard let owner = activeOwner else {
             return
         }
-        if hasEditableTarget, !targetIsValid(owner: owner) {
-            hasEditableTarget = false
-        }
+        sampleTargetValidity(owner: owner)
         if pendingConfirm {
             audioMuter.restoreImmediately()
             if recordingDurationMilliseconds == 0, let startedAt = sessionStartedAt {
@@ -1668,6 +1674,11 @@ final class VoiceDictationRuntime {
         let copyReason: VoicePersistentCopyReason = targetWasEditableAtStart
             ? .focusSwitched
             : .noCursor
+        Self.logAutoPasteDegraded(
+            copyReason,
+            globalSession: owner.usesClipboardPasteForCommit,
+            targetValidNow: targetIsValid(owner: owner)
+        )
 
         coordinator.userCancelled()
         settings.record(.voiceAccepted)
@@ -1708,6 +1719,26 @@ final class VoiceDictationRuntime {
             onClose: { [weak self] in
                 self?.panel.hide()
             }
+        )
+    }
+
+    /// 降级诊断：只记原因枚举与布尔状态，绝不记录语音文本或剪贴板内容。
+    /// 排查“光标在输入框里却没有自动上屏”时，用
+    /// `log show --predicate 'process == "RimeAIInputMethod"' | grep VoiceDictation` 即可看到真实原因。
+    private static func logAutoPasteDegraded(
+        _ reason: VoicePersistentCopyReason,
+        pasteOutcome: VoiceClipboardPaster.Outcome? = nil,
+        globalSession: Bool,
+        targetValidNow: Bool
+    ) {
+        let paste = pasteOutcome.map { String(describing: $0) } ?? "notAttempted"
+        NSLog(
+            "[VoiceDictation] 自动上屏降级 reason=%@ paste=%@ globalSession=%d targetValidNow=%d axTrusted=%d",
+            String(describing: reason),
+            paste,
+            globalSession ? 1 : 0,
+            targetValidNow ? 1 : 0,
+            VoiceAccessibilityAuthorization.isTrusted ? 1 : 0
         )
     }
 
@@ -1854,11 +1885,18 @@ final class VoiceDictationRuntime {
         // 无法直接上屏时绝不丢失文本：按真实原因转为常驻手动复制浮窗。
         // 提交瞬间目标已不可用（焦点/选区离开）即“焦点已切换”；目标仍有效却
         // 写不进去则是“宿主拒绝写入”。
-        persistentCopyReason = VoiceClipboardFallbackPolicy.reason(
+        let fallbackReason = VoiceClipboardFallbackPolicy.reason(
             pasteOutcome: pasteOutcome,
             hadEditableTarget: hadEditableTargetAtStart,
             focusSwitched: !targetStillEditable,
             isAccessibilityTrusted: VoiceAccessibilityAuthorization.isTrusted
+        )
+        persistentCopyReason = fallbackReason
+        Self.logAutoPasteDegraded(
+            fallbackReason,
+            pasteOutcome: pasteOutcome,
+            globalSession: activeOwner?.usesClipboardPasteForCommit == true,
+            targetValidNow: targetStillEditable
         )
         settings.record(.voiceAccepted)
         // 降级为手动复制不等于成功上屏：不播放成功音。
@@ -2105,10 +2143,28 @@ final class VoiceDictationRuntime {
             owner.voiceRuntimeSecureInputDetected()
             return
         }
-        if hasEditableTarget, !targetIsValid(owner: owner) {
-            // 光标焦点离开后不再强行取消录音；降级为“结束时常驻悬浮手动复制”。
-            hasEditableTarget = false
+        sampleTargetValidity(owner: owner)
+    }
+
+    /// 采样式目标校验（150ms 定时器与每次 ASR 预览回调共用）：单次抖动不再永久
+    /// 关闭自动上屏，连续无效持续满去抖窗口才判定目标离开。显式的失活/会话切换
+    /// 事件仍走 `detachTargetIfActive()` 立即生效；上屏瞬间还会同步复核。
+    private func sampleTargetValidity(owner: any VoiceDictationRuntimeOwner) {
+        guard hasEditableTarget else {
+            return
         }
+        let latched = targetValidityDebouncer.noteSample(
+            isValid: targetIsValid(owner: owner),
+            at: ProcessInfo.processInfo.systemUptime
+        )
+        guard latched else {
+            return
+        }
+        // 光标焦点离开后不再强行取消录音；降级为“结束时常驻悬浮手动复制”。
+        hasEditableTarget = false
+        targetValidityDebouncer.reset()
+        // 只记诊断状态，不记任何语音文本。
+        NSLog("[VoiceDictation] 目标连续无效超过 %.2fs，本次关闭自动上屏", VoiceTargetValidityDebouncer.lockoutInterval)
     }
 
     private func detachTargetIfActive() {
@@ -2219,6 +2275,7 @@ final class VoiceDictationRuntime {
         targetSelection = NSRange(location: NSNotFound, length: 0)
         hasEditableTarget = false
         targetWasEditableAtStart = false
+        targetValidityDebouncer.reset()
         activeIntent = .dictation
         activeHotwords = []
         sessionStartedAt = nil
