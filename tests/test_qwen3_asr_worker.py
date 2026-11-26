@@ -21,6 +21,7 @@ from rimeai_runtime.qwen3_asr_worker import (
     Qwen3ASRWorker,
     _OfflineSocket,
     join_segments,
+    resolve_default_model_dir,
     sanitize_transcript,
     split_stable_partial,
 )
@@ -686,3 +687,91 @@ def test_warmup_runs_once_on_silence_and_stays_quiet(tmp_path, monkeypatch, caps
         (int(SAMPLE_RATE_HZ * 0.25), {"max_tokens": 8, "temperature": 0.0})
     ]
     assert _diagnostics(capsys) == []
+
+
+def test_resolve_default_model_dir_shared_hf_and_legacy_priority(tmp_path):
+    fake_home = tmp_path / "home"
+    fake_project = tmp_path / "project"
+    legacy_dir = fake_project / ".rimeai" / "models" / "qwen3-asr-0.6b-8bit"
+    legacy_dir.mkdir(parents=True)
+
+    # 1. Falls back to legacy repo path when neither shared nor HF cache exists
+    assert (
+        resolve_default_model_dir(
+            env={},
+            home_dir=fake_home,
+            project_root=fake_project,
+        )
+        == legacy_dir
+    )
+
+    # 2. Incomplete HF cache stub (refs/main without config.json) is ignored
+    hf_repo = (
+        fake_home
+        / ".cache"
+        / "huggingface"
+        / "hub"
+        / "models--mlx-community--Qwen3-ASR-0.6B-8bit"
+    )
+    (hf_repo / "refs").mkdir(parents=True)
+    (hf_repo / "refs" / "main").write_text("deadbeef\n", encoding="utf-8")
+    assert (
+        resolve_default_model_dir(
+            env={},
+            home_dir=fake_home,
+            project_root=fake_project,
+        )
+        == legacy_dir
+    )
+
+    # 3. Valid HF snapshot (with config.json) wins over legacy repo path
+    hf_snapshot = hf_repo / "snapshots" / "deadbeef"
+    hf_snapshot.mkdir(parents=True)
+    (hf_snapshot / "config.json").write_text("{}", encoding="utf-8")
+    assert (
+        resolve_default_model_dir(
+            env={},
+            home_dir=fake_home,
+            project_root=fake_project,
+        )
+        == hf_snapshot
+    )
+
+    # 4. Shared ~/Models/qwen3-asr-0.6b-8bit wins over HF cache
+    shared_dir = fake_home / "Models" / "qwen3-asr-0.6b-8bit"
+    shared_dir.mkdir(parents=True)
+    assert (
+        resolve_default_model_dir(
+            env={},
+            home_dir=fake_home,
+            project_root=fake_project,
+        )
+        == shared_dir
+    )
+
+    # 5. AI_MODELS_HOME overrides ~/Models
+    custom_home = tmp_path / "external-models"
+    custom_shared = custom_home / "qwen3-asr-0.6b-8bit"
+    custom_shared.mkdir(parents=True)
+    assert (
+        resolve_default_model_dir(
+            env={"AI_MODELS_HOME": str(custom_home)},
+            home_dir=fake_home,
+            project_root=fake_project,
+        )
+        == custom_shared
+    )
+
+    # 6. RIMEAI_VOICE_MLX_MODEL_DIR has highest precedence
+    explicit = tmp_path / "explicit-model"
+    assert (
+        resolve_default_model_dir(
+            env={
+                "RIMEAI_VOICE_MLX_MODEL_DIR": str(explicit),
+                "AI_MODELS_HOME": str(custom_home),
+            },
+            home_dir=fake_home,
+            project_root=fake_project,
+        )
+        == explicit
+    )

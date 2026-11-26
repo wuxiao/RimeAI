@@ -26,7 +26,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Protocol, Sequence
+from typing import Any, Callable, Mapping, Protocol, Sequence
 
 import numpy as np
 
@@ -1100,12 +1100,101 @@ def _emit_json(
     flusher()
 
 
-def resolve_default_model_dir() -> Path:
-    env_dir = os.environ.get("RIMEAI_VOICE_MLX_MODEL_DIR", "").strip()
+DEFAULT_MODEL_NAME = "qwen3-asr-0.6b-8bit"
+HF_QWEN3_ASR_REPO_DIR = "models--mlx-community--Qwen3-ASR-0.6B-8bit"
+
+
+def _resolve_hf_cached_model_dir(
+    source_env: Mapping[str, str],
+    *,
+    home_dir: Path,
+    allow_default_cache: bool = True,
+) -> Path | None:
+    hf_hub_cache = source_env.get("HF_HUB_CACHE", "").strip()
+    if hf_hub_cache:
+        hub_root = Path(hf_hub_cache).expanduser()
+    else:
+        hf_home = source_env.get("HF_HOME", "").strip()
+        if hf_home:
+            hub_root = Path(hf_home).expanduser() / "hub"
+        elif allow_default_cache:
+            hub_root = home_dir / ".cache" / "huggingface" / "hub"
+        else:
+            return None
+
+    repo_dir = hub_root / HF_QWEN3_ASR_REPO_DIR
+    ref_file = repo_dir / "refs" / "main"
+    if ref_file.is_file():
+        try:
+            rev = ref_file.read_text(encoding="utf-8").strip()
+        except OSError:
+            rev = ""
+        if rev:
+            snapshot_dir = repo_dir / "snapshots" / rev
+            if (snapshot_dir / "config.json").is_file():
+                return snapshot_dir
+
+    snapshots_root = repo_dir / "snapshots"
+    if snapshots_root.is_dir():
+        for snapshot_dir in sorted(snapshots_root.iterdir(), reverse=True):
+            if snapshot_dir.is_dir() and (snapshot_dir / "config.json").is_file():
+                return snapshot_dir
+    return None
+
+
+def resolve_default_model_dir(
+    env: Mapping[str, str] | None = None,
+    *,
+    home_dir: Path | None = None,
+    project_root: Path | None = None,
+) -> Path:
+    """Resolve Qwen3-ASR MLX model directory in priority order:
+
+    1. ``RIMEAI_VOICE_MLX_MODEL_DIR`` environment override
+    2. ``RIMEAI_MODEL_ROOT/qwen3-asr-0.6b-8bit`` environment override
+    3. ``AI_MODELS_HOME/qwen3-asr-0.6b-8bit`` (default ``~/Models/qwen3-asr-0.6b-8bit``)
+    4. Hugging Face local cache snapshot (``HF_HUB_CACHE`` / ``HF_HOME/hub`` / ``~/.cache/huggingface/hub``)
+    5. Legacy repo fallback ``<project_root>/.rimeai/models/qwen3-asr-0.6b-8bit``
+    """
+    source_env = os.environ if env is None else env
+    resolved_home = Path.home() if home_dir is None else home_dir
+    resolved_project = (
+        Path(__file__).resolve().parent.parent
+        if project_root is None
+        else project_root
+    )
+
+    env_dir = source_env.get("RIMEAI_VOICE_MLX_MODEL_DIR", "").strip()
     if env_dir:
         return Path(env_dir).expanduser()
-    project_root = Path(__file__).resolve().parent.parent
-    return project_root / ".rimeai" / "models" / "qwen3-asr-0.6b-8bit"
+
+    model_root_env = source_env.get("RIMEAI_MODEL_ROOT", "").strip()
+    if model_root_env:
+        return Path(model_root_env).expanduser() / DEFAULT_MODEL_NAME
+
+    ai_models_home_env = source_env.get("AI_MODELS_HOME", "").strip()
+    shared_home = (
+        Path(ai_models_home_env).expanduser()
+        if ai_models_home_env
+        else resolved_home / "Models"
+    )
+    shared_candidate = shared_home / DEFAULT_MODEL_NAME
+    if shared_candidate.is_dir():
+        return shared_candidate
+
+    hf_candidate = _resolve_hf_cached_model_dir(
+        source_env,
+        home_dir=resolved_home,
+        allow_default_cache=True,
+    )
+    if hf_candidate is not None:
+        return hf_candidate
+
+    legacy_candidate = resolved_project / ".rimeai" / "models" / DEFAULT_MODEL_NAME
+    if legacy_candidate.is_dir():
+        return legacy_candidate
+
+    return shared_candidate
 
 
 def main() -> int:

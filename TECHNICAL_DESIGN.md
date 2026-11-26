@@ -358,7 +358,10 @@ tracer 也都是独立工具，不向 helper argv 增加策略面。
 
 - **MLX Qwen3-ASR 离线流式引擎（Debug/开发）**：`MLXQwen3ASREngine` 通过私有
   stdin/stdout NDJSON 管道拉起 `script/voice_mlx_qwen3_asr_service.sh` →
-  `rimeai_runtime/qwen3_asr_worker.py`（默认模型 `.rimeai/models/qwen3-asr-0.6b-8bit`）。
+  `rimeai_runtime/qwen3_asr_worker.py`（模型与运行时优先复用跨工具共享标准仓
+  `${AI_MODELS_HOME:-~/Models}/qwen3-asr-0.6b-8bit` 及
+  `${AI_MODELS_HOME:-~/Models}/runtimes/voice-mlx-venv`，并自动兼容 Hugging Face
+  本地离线缓存 `~/.cache/huggingface/hub` 与历史仓库路径 `.rimeai/`）。
   worker 在加载模型前安装进程级 `AF_INET`/`AF_INET6` 网络守卫并开启离线环境变量；
   音频 PCM 仅驻留内存并在 stop/cancel 后清空；识别集成 Layer-1 `hotwords=` 上下文偏置与
   Layer-2 确定性 `HotwordCorrector`（英文去空格/大小写还原 + 基于 `pypinyin` 的保守中文同音校正）
