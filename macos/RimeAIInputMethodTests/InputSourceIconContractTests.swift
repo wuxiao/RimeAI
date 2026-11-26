@@ -69,6 +69,48 @@ final class InputSourceIconContractTests: XCTestCase {
         XCTAssertEqual(primary["tsInputModePaletteIconFileKey"] as? String, "RimeAI.pdf")
     }
 
+    func testLocalizedInfoPlistAvoidsDuplicateKeyboardSettingsSubtitle() throws {
+        let cfBundle = try XCTUnwrap(
+            CFBundleCreate(kCFAllocatorDefault, Bundle.main.bundleURL as CFURL)
+        )
+        let resolvedDisplayName = CFBundleGetValueForInfoDictionaryKey(
+            cfBundle,
+            "CFBundleDisplayName" as CFString
+        ) as? String
+        XCTAssertEqual(resolvedDisplayName, "")
+
+        let resolvedBundleName = CFBundleGetValueForInfoDictionaryKey(
+            cfBundle,
+            "CFBundleName" as CFString
+        ) as? String
+        XCTAssertEqual(resolvedBundleName, "RimeAI")
+
+        for locale in ["en", "zh-Hans"] {
+            let stringsURL = try XCTUnwrap(
+                Bundle.main.url(
+                    forResource: "InfoPlist",
+                    withExtension: "strings",
+                    subdirectory: "\(locale).lproj"
+                )
+            )
+            let table = try XCTUnwrap(
+                NSDictionary(contentsOf: stringsURL) as? [String: String]
+            )
+            XCTAssertEqual(table["CFBundleDisplayName"], "", "locale=\(locale)")
+            XCTAssertEqual(table["CFBundleName"], "RimeAI", "locale=\(locale)")
+            XCTAssertEqual(
+                table["fun.wwcn.inputmethod.RimeAI"],
+                "RimeAI",
+                "locale=\(locale)"
+            )
+            XCTAssertEqual(
+                table["fun.wwcn.inputmethod.RimeAI.Primary"],
+                "RimeAI",
+                "locale=\(locale)"
+            )
+        }
+    }
+
     private func visibleBounds(of url: URL, scale: Int) throws -> CGRect {
         let document = try XCTUnwrap(CGPDFDocument(url as CFURL))
         let page = try XCTUnwrap(document.page(at: 1))
