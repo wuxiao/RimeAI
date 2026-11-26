@@ -21,6 +21,7 @@ from urllib.parse import urlsplit
 from rimeai_daemon.segment_policy import split_segmented_text
 
 from .decision_journal import DecisionJournal
+from .profile import DOMAIN_PATTERN, ProfileStore, StyleProfile
 
 LOCAL_ENDPOINT = "http://localhost:11434/v1"
 # Official Zhipu Coding Plan, direct connection (product decision
@@ -258,6 +259,38 @@ def _prompt_context(context: str) -> str:
     the cursor, dropped entirely when it carries no Han."""
     tail = context[-PROMPT_CONTEXT_TAIL:]
     return tail if _han_count(tail) > 0 else ""
+
+
+_STYLE_HINT_LIMITS: dict[str, int] = {
+    "register": 3,
+    "cn_en_mixing": 3,
+    "punctuation_habits": 2,
+    "vocabulary_domains": 4,
+    "signature_phrases": 8,
+    "sentence_templates": 3,
+}
+_STYLE_HINT_TTL_SECONDS = 60.0
+
+
+def _voice_recent_context(context: str) -> str:
+    """Bounds preceding app context for voice transform, allowing Han and ASCII."""
+    stripped = context.strip()
+    return stripped[-PROMPT_CONTEXT_TAIL:] if stripped else ""
+
+
+def _compact_style_profile(profile: StyleProfile | None) -> dict[str, list[str]] | None:
+    """Extracts a bounded hint payload from a domain StyleProfile, or None."""
+    if profile is None or not profile.traits:
+        return None
+    hints: dict[str, list[str]] = {}
+    for key, limit in _STYLE_HINT_LIMITS.items():
+        items = profile.traits.get(key)
+        if not items:
+            continue
+        cleaned = [item.strip() for item in items if isinstance(item, str) and item.strip()]
+        if cleaned:
+            hints[key] = cleaned[:limit]
+    return hints or None
 
 
 def _tail_overlap(context: str, text: str) -> int:
@@ -509,6 +542,8 @@ class CloudModelClient:
         api_key_loader: Callable[[], str] | None = None,
         endpoint: str = ENDPOINT,
         decision_journal: DecisionJournal | None = None,
+        profile_store: ProfileStore | None = None,
+        domain_resolver: Callable[[str], str] | None = None,
     ) -> None:
         if endpoint.rstrip("/") != ENDPOINT:
             raise ValueError("the cloud endpoint is fixed by the product contract")
@@ -517,13 +552,80 @@ class CloudModelClient:
         self._api_key_lock = Lock()
         self._endpoint = ENDPOINT
         self.decision_journal = decision_journal
+        self._profile_store = profile_store
+        self._domain_resolver = domain_resolver
+        self._style_hint_lock = Lock()
+        self._domain_cache: dict[str, tuple[float, str]] = {}
+        self._style_hint_cache: dict[str, tuple[float, dict[str, list[str]] | None]] = {}
         self._http_pool = _KeepAliveHTTPPool()
-        # Pool-independent outputs are cached per (model, pinyin, context)
+        # Pool-independent outputs are cached per (model, pinyin, context, style)
         # and re-decided locally on every hit, so the synthesis gates stay
         # exact while repeat typing skips the network round trip entirely.
-        # Context is part of the key because the prompt (and therefore the
-        # composition) changes with it.
+        # Context and style hints are part of the key because the prompt
+        # (and therefore the composition) changes with them.
         self._decision_cache: OrderedDict[tuple, dict[str, Any]] = OrderedDict()
+
+    def _resolve_bundle_domain(self, bundle_id: str) -> str:
+        if not bundle_id or self._domain_resolver is None:
+            return "global"
+        now = monotonic()
+        with self._style_hint_lock:
+            cached = self._domain_cache.get(bundle_id)
+            if cached is not None and now - cached[0] < _STYLE_HINT_TTL_SECONDS:
+                return cached[1]
+        try:
+            domain = self._domain_resolver(bundle_id)
+        except Exception:
+            domain = "global"
+        resolved = (
+            domain
+            if isinstance(domain, str) and DOMAIN_PATTERN.fullmatch(domain) is not None
+            else "global"
+        )
+        with self._style_hint_lock:
+            self._domain_cache[bundle_id] = (now, resolved)
+        return resolved
+
+    def _load_cached_style_hints(self, domain: str) -> dict[str, list[str]] | None:
+        if self._profile_store is None:
+            return None
+        now = monotonic()
+        with self._style_hint_lock:
+            cached = self._style_hint_cache.get(domain)
+            if cached is not None and now - cached[0] < _STYLE_HINT_TTL_SECONDS:
+                return cached[1]
+        try:
+            profile = self._profile_store.load(domain)
+            hints = _compact_style_profile(profile)
+        except Exception:
+            # Style hints are optional: a damaged profile file (including one
+            # that is not valid UTF-8) must degrade to "no hints", never fail
+            # the ranking request it was meant to enrich.
+            hints = None
+        with self._style_hint_lock:
+            self._style_hint_cache[domain] = (now, hints)
+        return hints
+
+    def _resolve_style_profile_hints(
+        self,
+        cloud_request: dict[str, Any],
+    ) -> dict[str, list[str]] | None:
+        if self._profile_store is None:
+            return None
+        raw_domain = cloud_request.get("domain")
+        if isinstance(raw_domain, str) and DOMAIN_PATTERN.fullmatch(raw_domain):
+            domain = raw_domain
+        else:
+            bundle_id = cloud_request.get("bundle_id")
+            domain = self._resolve_bundle_domain(
+                bundle_id if isinstance(bundle_id, str) else ""
+            )
+        hints = self._load_cached_style_hints(domain)
+        if hints is not None:
+            return hints
+        if domain != "global":
+            return self._load_cached_style_hints("global")
+        return None
 
     def rank(self, cloud_request: dict[str, Any]) -> dict[str, Any]:
         started = monotonic()
@@ -537,11 +639,23 @@ class CloudModelClient:
         # ambiguity in the candidate panel).
         segments = cloud_request.get("segments")
         prompt_context = _prompt_context(cloud_request["recent_context"])
+        style_hints = self._resolve_style_profile_hints(cloud_request)
+        style_cache_tag = (
+            json.dumps(
+                style_hints,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            if style_hints is not None
+            else None
+        )
         if segments is None:
             cache_key = (
                 model_id,
                 cloud_request["pinyin"],
                 prompt_context,
+                style_cache_tag,
             )
         else:
             cache_key = None
@@ -597,17 +711,24 @@ class CloudModelClient:
                 "确实无法解读时输出空。"
             )
         max_tokens = 256
+        if style_hints:
+            system_content += (
+                "\n5. 若输入中包含 style_profile，可参考用户的个人表达风格、"
+                "领域用词与中英混排习惯；严禁将其中短语原样照抄进输出。"
+            )
         # One exchange (product decision 2026-10-12): the system message
         # carries the invariant contract so prefill caching can reuse the
         # whole prefix, and a single user message carries the per-request
         # input — the pinyin being typed (plus segments when the
         # composition spans punctuation) and the text nearest the cursor.
-        prompt = {
+        prompt: dict[str, Any] = {
             "pinyin": cloud_request["pinyin"],
             "recent_context": prompt_context,
         }
         if segments is not None:
             prompt["segments"] = segments
+        if style_hints:
+            prompt["style_profile"] = style_hints
         messages: list[dict[str, str]] = [
             {
                 "role": "system",
@@ -801,6 +922,27 @@ class CloudModelClient:
         system_prompt = _voice_transform_system_prompt(cloud_request)
         source_text, hotwords = _voice_transform_input(cloud_request)
         task = cloud_request["task"]
+        recent_context = _voice_recent_context(
+            str(cloud_request.get("recent_context") or "")
+        )
+        # Profile summaries carry personal phrases, exactly like hotwords: for
+        # voice polish they ride behind the same explicit opt-in (absent field
+        # on older clients means "not opted in"). Translation never gets them.
+        style_hints = (
+            self._resolve_style_profile_hints(cloud_request)
+            if task == "polish" and cloud_request.get("include_style_profile") is True
+            else None
+        )
+        if recent_context:
+            system_prompt += (
+                "\n若存在 recent_context 字段，仅用于理解代词指代、语境与"
+                "术语连贯性，严禁把其中的前文内容重复写进输出。"
+            )
+        if style_hints:
+            system_prompt += (
+                "\n若存在 style_profile 字段，可参考用户的表达风格、领域用词与"
+                "中英混排习惯；严禁添加未表达内容或照搬示例短语。"
+            )
         # One exchange, same shape as the inference path: the system
         # message carries the contract, a single user message carries the
         # per-request data as one JSON object (so no hotword can break
@@ -809,6 +951,10 @@ class CloudModelClient:
         prompt: dict[str, Any] = {"text": source_text}
         if hotwords:
             prompt["hotwords"] = hotwords
+        if recent_context:
+            prompt["recent_context"] = recent_context
+        if style_hints:
+            prompt["style_profile"] = style_hints
         payload = {
             "model": model_id,
             "messages": [
@@ -1131,7 +1277,7 @@ class CloudModelClient:
             # local Ollama endpoint) before this point; redirects are refused
             # by _RejectRedirects below, so the audited scheme set is closed.
             # pi-lens-ignore: python.urlopen-scheme-audit
-            cloud_request = request.Request(  # nosemgrep: python.urlopen-scheme-audit
+            cloud_request = request.Request(  # nosemgrep: python.urlopen-scheme-audit  # noqa: S310
                 url,
                 data=encoded,
                 headers=headers,

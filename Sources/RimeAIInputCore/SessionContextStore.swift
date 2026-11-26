@@ -34,6 +34,26 @@ public struct SessionContextStore: Sendable {
         activeSessionID == sessionID ? context : ""
     }
 
+    /// Returns retained context for `sessionID` even when the controller has
+    /// temporarily suspended active ownership (e.g. global voice hotkeys).
+    public func retainedContext(for sessionID: String) -> String {
+        retainedSessionID == sessionID ? context : ""
+    }
+
+    /// Appends committed text when either the active or retained session matches `sessionID`.
+    public mutating func appendCommittedTextIfSessionMatches(
+        _ text: String,
+        sessionID: String
+    ) {
+        guard !text.isEmpty,
+              activeSessionID == sessionID || retainedSessionID == sessionID
+        else {
+            return
+        }
+        let combined = context + text
+        context = String(combined.suffix(maxCharacters))
+    }
+
     public mutating func enterSecureInput() {
         erase()
     }

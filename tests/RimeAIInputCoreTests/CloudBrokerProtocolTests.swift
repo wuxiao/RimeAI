@@ -1093,3 +1093,93 @@ func continuationResponseValidation() {
     )
     #expect(!ContinuationTextPolicy.isValid(response: errored, for: request))
 }
+
+@Test("voice dictation source, session retained context, and optional domain/context wire fields")
+func unifiedContextAndWireFields() throws {
+    #expect(HistoryCommitSource.voiceDictation.rawValue == "voice_dictation")
+    let decodedSource = try JSONDecoder().decode(
+        HistoryCommitSource.self,
+        from: Data("\"voice_dictation\"".utf8)
+    )
+    #expect(decodedSource == .voiceDictation)
+
+    var store = SessionContextStore(maxCharacters: 50)
+    store.activate(sessionID: "com.example.Editor", ownerID: "c1")
+    store.appendCommittedText("之前输入了")
+    store.suspend(ownerID: "c1")
+    #expect(store.context(for: "com.example.Editor") == "")
+    #expect(store.retainedContext(for: "com.example.Editor") == "之前输入了")
+    store.appendCommittedTextIfSessionMatches("FastAPI", sessionID: "com.other.App")
+    store.appendCommittedTextIfSessionMatches("FastAPI", sessionID: "com.example.Editor")
+    #expect(store.retainedContext(for: "com.example.Editor") == "之前输入了FastAPI")
+    store.enterSecureInput()
+    #expect(store.retainedContext(for: "com.example.Editor") == "")
+
+    let token = CompositionToken(
+        compositionID: UUID(),
+        revision: 1,
+        appSessionID: "com.example.Editor#1"
+    )
+    let inferenceRequest = CloudInferenceRequest(
+        requestID: "req-domain",
+        token: token,
+        bundleIdentifier: "com.example.Editor",
+        clientSessionID: "sess-1",
+        pinyin: "nihao",
+        recentContext: "你好",
+        historySnippets: [],
+        historyGeneration: 0,
+        domain: "coding"
+    )
+    #expect(inferenceRequest.isValid)
+    let encodedInference = try JSONEncoder().encode(inferenceRequest)
+    let inferenceJSON = try JSONSerialization.jsonObject(with: encodedInference) as? [String: Any]
+    #expect(inferenceJSON?["domain"] as? String == "coding")
+
+    let voiceRequest = CloudVoiceTransformRequest(
+        requestID: "vt-ctx",
+        clientSessionID: "sess-1",
+        bundleIdentifier: "com.example.Editor",
+        task: .polish,
+        text: "测试润色",
+        style: .concise,
+        hotwords: ["RimeAI"],
+        domain: "coding",
+        recentContext: String(repeating: "文", count: 700)
+    )
+    #expect(voiceRequest.recentContext?.count == 600)
+    #expect(voiceRequest.domain == "coding")
+    #expect(VoiceTransformTextPolicy.isValid(request: voiceRequest))
+    let encodedVoice = try JSONEncoder().encode(voiceRequest)
+    let voiceJSON = try JSONSerialization.jsonObject(with: encodedVoice) as? [String: Any]
+    #expect(voiceJSON?["domain"] as? String == "coding")
+    #expect((voiceJSON?["recent_context"] as? String)?.count == 600)
+
+    // The style-profile switch is opt-in on the wire: absent unless the client
+    // asks for it, and older payloads without it still decode.
+    #expect(voiceJSON?["include_style_profile"] == nil)
+    let optedInVoiceRequest = CloudVoiceTransformRequest(
+        requestID: "vt-style",
+        clientSessionID: "sess-1",
+        bundleIdentifier: "com.example.Editor",
+        task: .polish,
+        text: "测试润色",
+        includeStyleProfile: true
+    )
+    let optedInJSON = try JSONSerialization.jsonObject(
+        with: JSONEncoder().encode(optedInVoiceRequest)
+    ) as? [String: Any]
+    #expect(optedInJSON?["include_style_profile"] as? Bool == true)
+
+    let legacyVoiceJSON = """
+    {"schema_version":1,"type":"voice_transform","request_id":"vt-legacy",\
+    "client_session_id":"sess-1","bundle_id":"com.example.Editor","model_id":"m",\
+    "task":"polish","text":"t","style":"concise","hotwords":[],"deadline_ms":100}
+    """
+    let legacyVoiceRequest = try JSONDecoder().decode(
+        CloudVoiceTransformRequest.self,
+        from: Data(legacyVoiceJSON.utf8)
+    )
+    #expect(legacyVoiceRequest.includeStyleProfile == nil)
+    #expect(VoiceTransformTextPolicy.isValid(request: legacyVoiceRequest))
+}

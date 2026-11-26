@@ -2268,8 +2268,6 @@ def test_keep_alive_http_pool_reuses_connections_retries_stale_and_refuses_redir
 ):
     import http.client
 
-    created: list[object] = []
-
     class FakeResponse:
         def __init__(self, status=200, body=b'{"ok":true}', will_close=False):
             self.status = status
@@ -2310,6 +2308,7 @@ def test_keep_alive_http_pool_reuses_connections_retries_stale_and_refuses_redir
             self.closed = True
             self.sock = None
 
+    created: list[FakeConn] = []
     monkeypatch.setattr(http.client, "HTTPSConnection", FakeConn)
     pool = cloud_model_module._KeepAliveHTTPPool()
 
@@ -2786,3 +2785,154 @@ def test_broker_close_returns_promptly_while_an_idle_client_stays_connected():
                 await asyncio.wait_for(server.close(), timeout=6.0)
 
     asyncio.run(scenario())
+
+
+def test_optional_domain_and_voice_recent_context_validation():
+    req = validate_request({**_request(), "domain": "coding"})
+    assert req["domain"] == "coding"
+    with pytest.raises(ValueError, match="domain is invalid"):
+        validate_request({**_request(), "domain": "../bad"})
+
+    vt = validate_voice_transform_request(
+        _voice_transform_request(domain="coding", recent_context="上文在调试RimeAI")
+    )
+    assert vt["domain"] == "coding"
+    assert vt["recent_context"] == "上文在调试RimeAI"
+
+    with pytest.raises(ValueError, match="domain is invalid"):
+        validate_voice_transform_request(_voice_transform_request(domain="INVALID"))
+    with pytest.raises(ValueError, match="recent_context is invalid"):
+        validate_voice_transform_request(
+            _voice_transform_request(recent_context="a" * 601)
+        )
+
+    # 画像开关是可选布尔；缺省即视为未同意。
+    validated = validate_voice_transform_request(
+        _voice_transform_request(include_style_profile=True)
+    )
+    assert validated["include_style_profile"] is True
+    assert "include_style_profile" not in validate_voice_transform_request(
+        _voice_transform_request()
+    )
+    with pytest.raises(ValueError, match="include_style_profile is invalid"):
+        validate_voice_transform_request(
+            _voice_transform_request(include_style_profile="yes")
+        )
+
+
+def test_cloud_model_injects_style_profile_and_voice_recent_context_when_opted_in():
+    from rimeai_cloud_broker.profile import ProfileStore, StyleProfile
+
+    with tempfile.TemporaryDirectory(dir="/tmp") as root:
+        store = ProfileStore(Path(root))
+        store.save(
+            StyleProfile(
+                domain="coding",
+                revision=1,
+                generated_at_ms=1_000,
+                generator="test",
+                traits={
+                    "register": ["简洁技术书面语"],
+                    "cn_en_mixing": ["中英混排技术名词"],
+                    "signature_phrases": ["按约定接口"],
+                },
+            )
+        )
+        store.save(
+            StyleProfile(
+                domain="global",
+                revision=1,
+                generated_at_ms=1_000,
+                generator="test",
+                traits={
+                    "register": ["自然流畅"],
+                },
+            )
+        )
+
+        class _ProfileRankStub(CloudModelClient):
+            def __init__(self):
+                super().__init__(
+                    api_key_loader=lambda: "secret",
+                    profile_store=store,
+                    domain_resolver=lambda bundle: (
+                        "coding" if bundle == "com.example.Editor" else "notes"
+                    ),
+                )
+                self.payloads: list[dict] = []
+
+            def _post_json(self, path, payload, *, timeout, api_key=None):
+                self.payloads.append(payload)
+                if payload["messages"][-1]["content"].startswith('{"text":'):
+                    return {
+                        "choices": [
+                            {
+                                "message": {"content": "明天在 RimeAI 里调试。"},
+                                "finish_reason": "stop",
+                            }
+                        ]
+                    }
+                return {
+                    "choices": [
+                        {
+                            "message": {"content": "你好"},
+                            "finish_reason": "stop",
+                        }
+                    ]
+                }
+
+        client = _ProfileRankStub()
+
+        # 1. rank(): resolves bundle -> coding style profile.
+        client.rank(_request())
+        rank_prompt = json.loads(client.payloads[-1]["messages"][-1]["content"])
+        assert rank_prompt["style_profile"] == {
+            "register": ["简洁技术书面语"],
+            "cn_en_mixing": ["中英混排技术名词"],
+            "signature_phrases": ["按约定接口"],
+        }
+
+        # 2. rank(): unmapped domain with no profile falls back to global style profile.
+        client.rank({**_request(), "bundle_id": "com.apple.Notes", "pinyin": "ceshi"})
+        fallback_prompt = json.loads(client.payloads[-1]["messages"][-1]["content"])
+        assert fallback_prompt["style_profile"] == {"register": ["自然流畅"]}
+
+        # 3. transform_voice_text(polish): recent_context always; the style profile
+        #    (personal phrases) only behind the same explicit opt-in as hotwords.
+        polish_request = _voice_transform_request(
+            bundle_id="com.example.Editor",
+            domain="coding",
+            recent_context="刚刚在聊 FastAPI 服务",
+        )
+        client.transform_voice_text(polish_request)
+        polish_system, polish_user = client.payloads[-1]["messages"]
+        assert VOICE_TRANSFORM_INPUT_CONTRACT in polish_system["content"]
+        polish_payload = json.loads(polish_user["content"])
+        assert polish_payload["recent_context"] == "刚刚在聊 FastAPI 服务"
+        assert "style_profile" not in polish_payload
+        assert "style_profile" not in polish_system["content"]
+
+        client.transform_voice_text(
+            {**polish_request, "include_style_profile": True}
+        )
+        polish_system, polish_user = client.payloads[-1]["messages"]
+        polish_payload = json.loads(polish_user["content"])
+        assert polish_payload["recent_context"] == "刚刚在聊 FastAPI 服务"
+        assert polish_payload["style_profile"]["cn_en_mixing"] == ["中英混排技术名词"]
+        assert "style_profile" in polish_system["content"]
+
+        # 4. transform_voice_text(translate): carries recent_context if given and
+        #    never carries style_profile, even when the client opted in.
+        client.transform_voice_text(
+            _voice_transform_request(
+                task="translate",
+                target_language="en",
+                bundle_id="com.example.Editor",
+                domain="coding",
+                recent_context="FastAPI context",
+                include_style_profile=True,
+            )
+        )
+        translate_payload = json.loads(client.payloads[-1]["messages"][-1]["content"])
+        assert translate_payload["recent_context"] == "FastAPI context"
+        assert "style_profile" not in translate_payload

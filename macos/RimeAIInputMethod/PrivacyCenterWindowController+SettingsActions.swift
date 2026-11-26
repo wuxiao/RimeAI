@@ -37,6 +37,9 @@ extension PrivacyCenterWindowController {
             ObjectIdentifier(voiceHistoryToggle): { [weak self] in
                 self?.applyVoiceHistoryToggle($0)
             },
+            ObjectIdentifier(voiceSharedHistoryToggle): { [weak self] in
+                self?.applyVoiceSharedHistoryToggle($0)
+            },
             ObjectIdentifier(voiceSoundEffectsToggle): { [weak self] in
                 self?.applyVoiceSoundEffectsToggle($0)
             },
@@ -176,6 +179,10 @@ extension PrivacyCenterWindowController {
         settings.voiceHistoryEnabled = sender.state == .on
     }
 
+    private func applyVoiceSharedHistoryToggle(_ sender: NSButton) {
+        settings.voiceSharedHistoryEnabled = sender.state == .on
+    }
+
     private func applyVoiceSoundEffectsToggle(_ sender: NSButton) {
         settings.voiceSoundEffectsEnabled = sender.state == .on
         if sender.state == .on {
@@ -268,6 +275,7 @@ extension PrivacyCenterWindowController {
         let parts = VoiceHotwordsEditing.parse(voiceCustomHotwordsTextView.string)
         let normalized = RimeAISettingsStore.normalizedVoiceCustomHotwords(parts)
         settings.voiceCustomHotwords = normalized
+        RimeAIPhraseBookService.shared.reloadVoiceHotwordsAsync()
         voiceCustomHotwordsTextView.string = normalized.joined(separator: "\n")
         voiceCustomHotwordsIsDirty = false
         let skipped = max(0, parts.count - normalized.count)
@@ -721,6 +729,7 @@ extension PrivacyCenterWindowController {
                     document,
                     hasCloudCredential: hasCloudCredential
                 )
+                RimeAIPhraseBookService.shared.reloadVoiceHotwordsAsync()
                 self.settings.clearEphemeralData()
                 let after = self.settings.exportSnapshot()
                 self.reconcileRuntime(

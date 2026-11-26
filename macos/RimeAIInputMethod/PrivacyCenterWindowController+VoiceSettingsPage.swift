@@ -358,6 +358,13 @@ extension PrivacyCenterWindowController {
             to: content
         )
         addVoiceCheckbox(
+            voiceSharedHistoryToggle,
+            title: VoicePrivacyCopy.sharedHistoryCheckbox,
+            identifier: "settings.voice-shared-history-enabled",
+            to: content
+        )
+        addNote(VoicePrivacyCopy.sharedHistoryNote, to: content)
+        addVoiceCheckbox(
             voiceSoundEffectsToggle,
             title: "启用交互提示音（开始录音、停止、完成上屏、取消）",
             identifier: "settings.voice-sound-effects",

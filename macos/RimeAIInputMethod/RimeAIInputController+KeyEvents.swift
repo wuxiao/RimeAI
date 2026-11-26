@@ -108,7 +108,8 @@ extension RimeAIInputController {
             invalidateCurrentResult()
             VoicePostCommitEditTracker.shared.noteDocumentActivity(
                 client: client as AnyObject,
-                invalidatesTailTracking: true
+                invalidatesTailTracking: true,
+                bundleIdentifier: currentBundleIdentifier ?? client.bundleIdentifier()
             )
             return false
         }
@@ -217,7 +218,8 @@ extension RimeAIInputController {
         guard composition.hasComposition else {
             VoicePostCommitEditTracker.shared.settleNowIfMatching(
                 client: client as AnyObject,
-                reason: .returnKey
+                reason: .returnKey,
+                bundleIdentifier: currentBundleIdentifier ?? client.bundleIdentifier()
             )
             return false
         }
@@ -352,7 +354,8 @@ extension RimeAIInputController {
         clearContextForCurrentApplication()
         VoicePostCommitEditTracker.shared.noteDocumentActivity(
             client: client as AnyObject,
-            invalidatesTailTracking: true
+            invalidatesTailTracking: true,
+            bundleIdentifier: currentBundleIdentifier ?? client.bundleIdentifier()
         )
         return false
     }
@@ -376,7 +379,8 @@ extension RimeAIInputController {
         {
             VoicePostCommitEditTracker.shared.noteDocumentActivity(
                 client: client as AnyObject,
-                invalidatesTailTracking: true
+                invalidatesTailTracking: true,
+                bundleIdentifier: currentBundleIdentifier ?? client.bundleIdentifier()
             )
             return false
         }
@@ -520,7 +524,8 @@ extension RimeAIInputController {
             return true
         }
         VoicePostCommitEditTracker.shared.noteUncomposedBackspace(
-            client: client as AnyObject
+            client: client as AnyObject,
+            bundleIdentifier: currentBundleIdentifier ?? client.bundleIdentifier()
         )
         return false
     }

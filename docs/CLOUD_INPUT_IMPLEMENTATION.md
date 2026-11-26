@@ -56,8 +56,8 @@
 
 | 项目 | 当前值 |
 |---|---|
-| 请求载荷 | 拼音 + segments（可选）+ recent_context + history_snippets；不再发送候选池与 pool hash（产品决策 2026-10-12：生成契约不读候选池；broker 过渡期对旧客户端仍接受并回显 `candidate_pool_hash`） |
-| prompt 视图 | 拼音 + 光标前最近 120 字 context（无汉字则不下发）；不携带候选池、历史 snippet 或画像 hint。模型只回纯文本句子，采纳只过结构门；输出跑飞被 max_tokens 截断时本地按 abstain 处理，不计云错误 |
+| 请求载荷 | 拼音 + segments（可选）+ recent_context + history_snippets + domain（可选，2026-11-26）；不再发送候选池与 pool hash（产品决策 2026-10-12：生成契约不读候选池；broker 过渡期对旧客户端仍接受并回显 `candidate_pool_hash`） |
+| prompt 视图 | 拼音 + 光标前最近 120 字 context（无汉字则不下发）；不携带候选池与历史 snippet；2026-11-26 起附带语言画像摘要 hint（`style_profile`，各特征有界，60s 缓存，参与决策缓存键；画像文件损坏时降级为无 hint）。模型只回纯文本句子，采纳只过结构门；输出跑飞被 max_tokens 截断时本地按 abstain 处理，不计云错误 |
 | 上下文 | recent 最多 600 字，检索 snippet 最多 8 条；仅纳入已确认上屏的文本——`raw_pinyin` 来源（回车把未转换拼音原样上屏）的记录保留在库中供审计/导出，但不写入会话上下文、不进入 recentText 与 snippet 检索 |
 | 拼音约束 | 单一策略（无请求字段）：输入 `[A-Za-z']` ≤256 字节；组句纠错与混排由模型负责，本地只做结构门 |
 | embedding | `text-embedding-v4`，512 维 |

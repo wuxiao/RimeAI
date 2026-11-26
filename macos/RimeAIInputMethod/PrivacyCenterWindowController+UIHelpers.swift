@@ -281,6 +281,12 @@ enum VoicePrivacyCopy {
     static let voiceDisabledBanner = "语音输入未启用：启用后以下选项才会生效。"
     static let historyCheckbox =
         "在本机保存语音听写与翻译历史（本地数据库，默认开启，不上传；可在「语音历史」页检索、复制或清空）"
+    static let sharedHistoryCheckbox =
+        "语音成稿同时计入键盘历史（用于上下文联想、语言画像与已启用的云端建议）"
+    static let sharedHistoryNote =
+        "默认开启。开启后，语音上屏的文字会像键盘上屏一样进入键盘历史：保存在本机；"
+        + "已配置云端时，会随键盘请求用作上下文。关闭上一项或本项都不会写入；"
+        + "可在「云端与历史」页查看或清除。"
     static let cloudPolishNote =
         "已配置云增强时，听写文本会发送到你配置的云端模型进行润色或翻译；"
         + "未配置、离线或超时时自动使用本地瞬时润色，绝不丢字。"

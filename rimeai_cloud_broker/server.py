@@ -54,6 +54,14 @@ from .history_index import (
     EMBEDDING_INDEXING_ENABLED,
     HistoryEmbeddingIndexer,
 )
+from .profile import DOMAIN_PATTERN
+
+
+def _validate_optional_domain(value: Any) -> None:
+    if value is None:
+        return
+    if not isinstance(value, str) or DOMAIN_PATTERN.fullmatch(value) is None:
+        raise ValueError("domain is invalid")
 
 
 class CandidateRanker(Protocol):
@@ -171,6 +179,7 @@ def validate_request(message: Any) -> dict[str, Any]:
         message["segments"] = validate_pinyin_segments(
             segments, active_pinyin=message["pinyin"]
         )
+    _validate_optional_domain(message.get("domain"))
     return message
 
 
@@ -278,19 +287,31 @@ def validate_voice_transform_request(message: Any) -> dict[str, Any]:
         if message.get("target_language") not in VOICE_TRANSFORM_TARGET_LANGUAGES:
             raise ValueError("target language is invalid")
     hotwords = message.get("hotwords")
-    if hotwords is not None:
-        if (
-            not isinstance(hotwords, list)
-            or len(hotwords) > 32
-            or any(
-                not isinstance(item, str)
-                or not item.strip()
-                or len(item) > 64
-                or "\x00" in item
-                for item in hotwords
-            )
-        ):
-            raise ValueError("hotwords are invalid")
+    if hotwords is not None and (
+        not isinstance(hotwords, list)
+        or len(hotwords) > 32
+        or any(
+            not isinstance(item, str)
+            or not item.strip()
+            or len(item) > 64
+            or "\x00" in item
+            for item in hotwords
+        )
+    ):
+        raise ValueError("hotwords are invalid")
+    _validate_optional_domain(message.get("domain"))
+    recent_context = message.get("recent_context")
+    if recent_context is not None and (
+        not isinstance(recent_context, str)
+        or len(recent_context) > 600
+        or "\x00" in recent_context
+    ):
+        raise ValueError("recent_context is invalid")
+    include_style_profile = message.get("include_style_profile")
+    if include_style_profile is not None and not isinstance(
+        include_style_profile, bool
+    ):
+        raise ValueError("include_style_profile is invalid")
     return message
 
 

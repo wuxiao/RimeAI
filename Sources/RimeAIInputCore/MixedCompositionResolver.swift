@@ -77,6 +77,7 @@ public struct MixedCompositionResolver: Sendable {
     public func resolve(
         rawInput: String,
         personalizedEnglishTokens: Set<String> = [],
+        personalizedCasedTokens: [String: String] = [:],
         candidateLookup: (_ pinyin: String, _ limit: Int) -> [String]
     ) -> MixedCompositionSuggestion? {
         let characters = Array(rawInput)
@@ -105,8 +106,15 @@ public struct MixedCompositionResolver: Sendable {
         {
             return nil
         }
+        var casedLookup: [String: String] = [:]
+        for (key, cased) in personalizedCasedTokens {
+            let lower = key.lowercased()
+            if !lower.isEmpty, cased.lowercased() == lower {
+                casedLookup[lower] = cased
+            }
+        }
         let personalized = Self.normalizedTokens(
-            personalizedEnglishTokens,
+            personalizedEnglishTokens.union(casedLookup.keys),
             minimumLength: 3,
             rejectingPinyinSequences: true
         )
@@ -281,11 +289,14 @@ public struct MixedCompositionResolver: Sendable {
                 let raw = String(
                     characters[occurrence.start ..< occurrence.end]
                 )
+                let hasExplicitUppercase = raw.contains(where: { $0.isUppercase })
+                let rendered = (!hasExplicitUppercase ? casedLookup[raw.lowercased()] : nil)
+                    ?? raw
                 updatedSegments.append(
                     MixedCompositionSegment(
                         kind: .ascii,
                         rawText: raw,
-                        renderedText: raw
+                        renderedText: rendered
                     )
                 )
                 search(

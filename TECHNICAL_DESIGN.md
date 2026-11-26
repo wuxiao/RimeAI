@@ -313,7 +313,9 @@ endpoint；键盘 `inference` 路由只返回 `generate` 或 `abstain`（`contin
 （`VoiceClipboardPaster`，仅非 Secure Input 时生效并恢复原剪贴板）、系统媒体自动静音
 （`VoiceSystemAudioMuter`）、交互提示音（`VoiceSoundEffectsPlayer`）、三源热词合并、
 宿主守卫与本机语音历史/统计（`VoiceHistoryStore`）；helper 持有音频权限、ASR engine
-与服务端状态。语音文本不进入键盘长期历史。上屏后纠错学习
+与服务端状态。语音成稿按 `voiceSharedHistoryEnabled`（默认开启）以 `voice_dictation`
+来源写入共享 `HistoryStore`，供 L2/L3 固化与上下文复用；关闭它或 `voiceHistoryEnabled`
+均不写入。上屏后纠错学习
 （`VoicePostCommitEditTracker` / `VoicePostCommitCorrectionLearner`）、启动闸门
 （`VoiceDictationStartGate`，对安全输入、语音未启用、应用禁用 AI 等逐条给出面向
 用户的原因）与时限口径（`VoiceSessionTiming`）同样位于输入法侧。

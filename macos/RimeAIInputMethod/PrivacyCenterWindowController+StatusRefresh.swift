@@ -250,6 +250,9 @@ extension PrivacyCenterWindowController {
         voiceHistoryToggle.state = settings.voiceHistoryEnabled
             ? .on
             : .off
+        voiceSharedHistoryToggle.state = settings.voiceSharedHistoryEnabled
+            ? .on
+            : .off
         voiceSoundEffectsToggle.state = settings.voiceSoundEffectsEnabled
             ? .on
             : .off
@@ -317,6 +320,7 @@ extension PrivacyCenterWindowController {
             && settings.voiceSmartPolishEnabled
         voiceAutoPasteToggle.isEnabled = voiceOn
         voiceCloudHotwordsToggle.isEnabled = voiceOn
+        voiceSharedHistoryToggle.isEnabled = voiceOn && settings.voiceHistoryEnabled
         voiceSoundEffectsToggle.isEnabled = voiceOn
         voiceMuteSystemAudioToggle.isEnabled = voiceOn
         voiceRimeHotwordToggle.isEnabled = voiceOn && notStrict

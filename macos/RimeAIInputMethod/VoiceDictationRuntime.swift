@@ -117,6 +117,10 @@ final class VoiceDictationRuntime {
     private var activeGeneration: UUID?
     private var activeIntent: VoiceSessionIntent = .dictation
     private var activeHotwords: [String] = []
+    /// 本会话的确定性热词纠错器：会话开始时编译一次，流式更新只做增量索引。
+    private var hotwordCorrector = VoiceHotwordCorrector(hotwords: [])
+    private var activeDomain: String?
+    private var activeRecentContext: String = ""
     private var sessionStartedAt: Date?
     private var recordingDurationMilliseconds: Int = 0
     /// 云端润色/翻译在途：供按键路由判定“空格/回车直接上屏原文”以及右 ⌘ 抢占续录。
@@ -347,8 +351,19 @@ final class VoiceDictationRuntime {
         }
         globalOwner.targetFrontmostPID = frontApp?.processIdentifier
         currentOwner = globalOwner
+        VoicePostCommitEditTracker.shared.settleNowIfMatching(
+            client: nil,
+            reason: .nextDictation,
+            bundleIdentifier: bundleID
+        )
         let anchor = globalAnchorRect()
         let sessionID = "global#\(bundleID)#\(UUID().uuidString)"
+        let domain = RimeAIPhraseBookService.shared.domain(
+            forBundleIdentifier: bundleID
+        )
+        let recentContext = settings.contextPolicy(for: bundleID) != .strict
+            ? RimeAIInputController.contextStore.retainedContext(for: bundleID)
+            : ""
         return start(
             owner: globalOwner,
             client: globalOwner,
@@ -365,7 +380,9 @@ final class VoiceDictationRuntime {
             selection: NSRange(location: NSNotFound, length: 0),
             anchorRect: anchor,
             hasEditableTarget: frontApp != nil,
-            intent: intent
+            intent: intent,
+            domain: domain,
+            recentContext: recentContext
         )
     }
 
@@ -425,10 +442,11 @@ final class VoiceDictationRuntime {
         else {
             return .empty
         }
+        // strict 应用只使用用户亲手维护的热词：自动学习收录的词条是跨应用学到的
+        // 个人数据，与 L1 短语一样不进入。
+        let isStrict = settings.contextPolicy(for: bundleIdentifier) == .strict
         let phraseBookPhrases: [String]
-        if settings.voicePhraseBookHotwordsEnabled,
-           settings.contextPolicy(for: bundleIdentifier) != .strict
-        {
+        if settings.voicePhraseBookHotwordsEnabled, !isStrict {
             phraseBookPhrases = RimeAIPhraseBookService.shared
                 .voiceHotwordCandidates(
                     forBundleIdentifier: bundleIdentifier,
@@ -438,7 +456,9 @@ final class VoiceDictationRuntime {
             phraseBookPhrases = []
         }
         return VoiceHotwordMerger.merge(
-            customPhrases: settings.voiceCustomHotwords,
+            customPhrases: isStrict
+                ? settings.voiceUserCuratedHotwords
+                : settings.voiceCustomHotwords,
             phraseBookPhrases: phraseBookPhrases,
             sessionRimePhrases: []
         )
@@ -502,7 +522,9 @@ final class VoiceDictationRuntime {
         selection: NSRange,
         anchorRect: NSRect,
         hasEditableTarget: Bool = true,
-        intent: VoiceSessionIntent = .dictation
+        intent: VoiceSessionIntent = .dictation,
+        domain: String? = nil,
+        recentContext: String = ""
     ) -> Bool {
         guard currentOwner === owner else {
             return false
@@ -548,6 +570,13 @@ final class VoiceDictationRuntime {
         loggedTransientTargetLoss = false
         activeIntent = intent
         activeHotwords = context.hotwordSnapshot.phrases
+        hotwordCorrector = makeHotwordCorrector()
+        let trimmedDomain = domain?.trimmingCharacters(in: .whitespacesAndNewlines)
+        activeDomain = (trimmedDomain?.isEmpty == false) ? trimmedDomain : nil
+        activeRecentContext = (settings.contextPolicy(for: context.bundleID) != .strict
+            && !IsSecureEventInputEnabled())
+            ? String(recentContext.suffix(600))
+            : ""
         sessionStartedAt = Date()
         recordingDurationMilliseconds = 0
         isTransforming = false
@@ -811,9 +840,10 @@ final class VoiceDictationRuntime {
             finalText,
             allowsNewlines: allowsNewlines
         )
-        if actionKind != .translate {
-            cleanedFinal = applyLearnedCorrectionsIfAllowed(cleanedFinal)
-        }
+        cleanedFinal = applyHotwordAndLearnedCorrections(
+            cleanedFinal,
+            isTranslationOutput: actionKind == .translate
+        )
         let bundleID = targetBundleIdentifier
         let durationMs = recordingDurationMilliseconds
         let autoPasteEnabled = settings.voiceAutoPasteEnabled
@@ -833,19 +863,32 @@ final class VoiceDictationRuntime {
         }
 
         var committed = false
+        var committedViaIMK = false
         var usedCommandV = false
+        var preCommitAnchor: VoicePostCommitAnchor?
         if targetStillEditable,
            let client = savedClient,
            let appSessionID = savedAppSessionID
         {
+            if actionKind != .translate {
+                preCommitAnchor = captureVoicePostCommitAnchor(
+                    text: cleanedFinal,
+                    bundleID: bundleID,
+                    appSessionID: appSessionID,
+                    owner: owner,
+                    client: client,
+                    defaultSelection: savedSelection
+                )
+            }
             if !owner.usesClipboardPasteForCommit {
-                committed = owner.voiceRuntimeCommit(
+                committedViaIMK = owner.voiceRuntimeCommit(
                     cleanedFinal,
                     client: client,
                     appSessionID: appSessionID,
                     selection: savedSelection,
                     anchorRect: savedAnchor
                 )
+                committed = committedViaIMK
             }
             if !committed, autoPasteEnabled || owner.usesClipboardPasteForCommit {
                 let outcome = VoiceClipboardPaster.paste(cleanedFinal)
@@ -864,6 +907,23 @@ final class VoiceDictationRuntime {
             _ = pasteboard.setString(cleanedFinal, forType: .string)
         }
 
+        if committed {
+            if let preCommitAnchor {
+                VoicePostCommitEditTracker.shared.arm(
+                    anchor: preCommitAnchor,
+                    client: committedViaIMK ? savedClient : nil,
+                    anchorRect: savedAnchor.isEmpty
+                        ? fallbackAnchorRect()
+                        : savedAnchor
+                )
+            }
+            recordCommittedVoiceToSharedMemory(
+                text: cleanedFinal,
+                bundleID: bundleID,
+                actionKind: actionKind,
+                committedViaIMK: committedViaIMK
+            )
+        }
         settings.record(.voiceAccepted)
         if actionKind == .polish {
             settings.record(.voicePolished)
@@ -1129,7 +1189,11 @@ final class VoiceDictationRuntime {
         else {
             return
         }
-        let normalizedStable = applyLearnedCorrectionsIfAllowed(stable)
+        let normalizedStable = applyHotwordAndLearnedCorrections(
+            stable,
+            isTranslationOutput: false,
+            isStreamingStableText: true
+        )
         guard let next = incrementalPolish.nextChunkToDispatch(
             stableText: normalizedStable
         ) else {
@@ -1150,8 +1214,16 @@ final class VoiceDictationRuntime {
             targetLanguage: nil,
             hotwords: VoiceCloudHotwordPolicy.cloudHotwords(
                 isEnabled: settings.voiceCloudHotwordsEnabled,
-                activeHotwords: activeHotwords
+                activeHotwords: activeHotwords,
+                transcript: next.chunk,
+                corrector: hotwordCorrector
             ),
+            domain: activeDomain,
+            recentContext: cloudRecentContext(
+                additionalPrefix: incrementalPolish.completedPolishedPrefix
+            ),
+            // 画像摘要与热词同属个人常用语：沿用同一个云端 opt-in。
+            includeStyleProfile: settings.voiceCloudHotwordsEnabled,
             deadlineMilliseconds: VoiceIncrementalPolishPipeline
                 .incrementalDeadlineMilliseconds
         )
@@ -1182,22 +1254,72 @@ final class VoiceDictationRuntime {
 
     // MARK: - Post-Processing (Smart Polish & Translation)
 
-    private func applyLearnedCorrectionsIfAllowed(_ text: String) -> String {
+    /// 用户亲手维护的热词可以按音还原汉字；L1 短语、词库、会话词条与自动学习
+    /// 收录的词条只还原 ASCII 写法，普通词的同音词不会被成片改写。
+    private func makeHotwordCorrector() -> VoiceHotwordCorrector {
+        let curated = Set(settings.voiceUserCuratedHotwords)
+        return VoiceHotwordCorrector(
+            hotwords: activeHotwords.filter { curated.contains($0) },
+            vocabularyHotwords: activeHotwords.filter { !curated.contains($0) }
+        )
+    }
+
+    private func applyHotwordAndLearnedCorrections(
+        _ text: String,
+        isTranslationOutput: Bool = false,
+        isStreamingStableText: Bool = false
+    ) -> String {
         guard !text.isEmpty,
-              !IsSecureEventInputEnabled(),
-              settings.voiceAutoLearnCorrectionsEnabled,
+              !isTranslationOutput,
+              !IsSecureEventInputEnabled()
+        else {
+            return text
+        }
+        // 热词还原与已学纠错同属个人化处理：strict 应用、已关闭 AI 的应用一律不做，
+        // 与 L1 热词在 strict 下不进快照的边界一致。
+        guard settings.aiEnabled,
+              settings.isAIAllowed(for: targetBundleIdentifier),
               settings.contextPolicy(for: targetBundleIdentifier) != .strict
         else {
             return text
         }
-        let corrections = settings.voiceLearnedCorrections
-        guard !corrections.isEmpty else {
-            return text
+        var current = text
+        if !activeHotwords.isEmpty {
+            current = isStreamingStableText
+                ? hotwordCorrector.applyStreaming(to: current)
+                : hotwordCorrector.apply(to: current)
         }
-        return VoiceLearnedCorrectionApplier.apply(
-            text,
-            corrections: corrections
-        )
+        if settings.voiceAutoLearnCorrectionsEnabled {
+            let corrections = settings.voiceLearnedCorrections
+            if !corrections.isEmpty {
+                current = VoiceLearnedCorrectionApplier.apply(
+                    current,
+                    corrections: corrections
+                )
+            }
+        }
+        return current
+    }
+
+    private func cloudRecentContext(additionalPrefix: String? = nil) -> String? {
+        guard settings.contextPolicy(for: targetBundleIdentifier) != .strict,
+              !IsSecureEventInputEnabled()
+        else {
+            return nil
+        }
+        let combined: String
+        if let additionalPrefix, !additionalPrefix.isEmpty {
+            combined = activeRecentContext.isEmpty
+                ? additionalPrefix
+                : activeRecentContext + additionalPrefix
+        } else {
+            combined = activeRecentContext
+        }
+        let trimmed = combined.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return nil
+        }
+        return String(trimmed.suffix(600))
     }
 
     private func beginPostProcessing(
@@ -1206,7 +1328,10 @@ final class VoiceDictationRuntime {
         owner: any VoiceDictationRuntimeOwner,
         generation: UUID
     ) {
-        let normalizedRaw = applyLearnedCorrectionsIfAllowed(rawText)
+        let normalizedRaw = applyHotwordAndLearnedCorrections(
+            rawText,
+            isTranslationOutput: false
+        )
         pendingRawText = normalizedRaw
 
         // 若用户在 finalizing 阶段已经按了右 ⌘ 续录：不等待慢云端，0ms 本地润色上屏后立即开启下一轮。
@@ -1377,11 +1502,16 @@ final class VoiceDictationRuntime {
             text: inputText,
             style: style,
             targetLanguage: targetLanguage,
-            // 热词上下文可能含个人常用语与专有名词：仅在用户显式 opt-in 时发送。
+            // 热词与画像摘要都可能含个人常用语与专有名词：仅在用户显式 opt-in 时发送。
             hotwords: VoiceCloudHotwordPolicy.cloudHotwords(
                 isEnabled: settings.voiceCloudHotwordsEnabled,
-                activeHotwords: activeHotwords
+                activeHotwords: activeHotwords,
+                transcript: inputText,
+                corrector: hotwordCorrector
             ),
+            domain: activeDomain,
+            recentContext: cloudRecentContext(additionalPrefix: polishedPrefix),
+            includeStyleProfile: settings.voiceCloudHotwordsEnabled,
             deadlineMilliseconds: VoiceSessionTiming.cloudTransformDeadline(
                 for: task
             )
@@ -1609,9 +1739,10 @@ final class VoiceDictationRuntime {
             finalText,
             allowsNewlines: allowsNewlines
         )
-        if actionKind != .translate {
-            cleanedFinal = applyLearnedCorrectionsIfAllowed(cleanedFinal)
-        }
+        cleanedFinal = applyHotwordAndLearnedCorrections(
+            cleanedFinal,
+            isTranslationOutput: actionKind == .translate
+        )
 
         guard !cleanedFinal.isEmpty else {
             // 未识别到有效语音内容时安静收起，不弹出空复制窗或报错。
@@ -1772,6 +1903,76 @@ final class VoiceDictationRuntime {
         )
     }
 
+    private func captureVoicePostCommitAnchor(
+        text: String,
+        bundleID: String,
+        appSessionID: String,
+        owner: any VoiceDictationRuntimeOwner,
+        client: AnyObject,
+        defaultSelection: NSRange
+    ) -> VoicePostCommitAnchor? {
+        let inputClient = !owner.usesClipboardPasteForCommit
+            ? (client as? any IMKTextInput)
+            : nil
+        let liveSelection = inputClient?.selectedRange()
+        let anchorSelection = (liveSelection?.location ?? NSNotFound) != NSNotFound
+            ? (liveSelection ?? defaultSelection)
+            : defaultSelection
+        return VoicePostCommitEditTracker.shared.capturePreCommitAnchor(
+            committedText: text,
+            bundleIdentifier: bundleID,
+            appSessionID: appSessionID,
+            client: inputClient,
+            selection: anchorSelection
+        )
+    }
+
+    private func recordCommittedVoiceToSharedMemory(
+        text: String,
+        bundleID: String,
+        actionKind: VoicePostProcessAction,
+        committedViaIMK: Bool
+    ) {
+        guard actionKind != .translate,
+              !text.isEmpty,
+              !IsSecureEventInputEnabled()
+        else {
+            return
+        }
+        if !committedViaIMK,
+           settings.isAIAllowed(for: bundleID),
+           settings.contextPolicy(for: bundleID) != .strict
+        {
+            RimeAIInputController.contextStore
+                .appendCommittedTextIfSessionMatches(text, sessionID: bundleID)
+        }
+        // 语音成稿进入键盘长期历史是独立开关（默认开）：用户关掉它或关掉
+        // 「本机语音历史」时，语音文本只停留在易失的会话上下文里。
+        guard VoiceSharedHistoryPolicy.shouldRecord(
+            isVoiceHistoryEnabled: settings.voiceHistoryEnabled,
+            isSharedHistoryEnabled: settings.voiceSharedHistoryEnabled,
+            isAIAllowed: settings.isAIAllowed(for: bundleID),
+            isCloudHistoryAllowed: settings.shouldCaptureCloudHistory(isSecureInput: false)
+        ) else {
+            return
+        }
+        RimeAIHistoryService.shared.appendAsync(
+            HistoryCommit(
+                bundleIdentifier: bundleID,
+                pinyin: "",
+                committedText: HistoryCommitTextPolicy.textForHistory(text),
+                source: .voiceDictation
+            )
+        ) { [settings] result in
+            switch result {
+            case .success:
+                settings.record(.historyRecorded)
+            case .failure:
+                settings.record(.historyWriteFailed)
+            }
+        }
+    }
+
     // MARK: - Commit & Auto-Paste
 
     private func handleCommit(_ coordinatorText: String, generation: UUID?) -> Bool {
@@ -1824,6 +2025,7 @@ final class VoiceDictationRuntime {
         }
 
         var committed = false
+        var committedViaIMK = false
         var preCommitAnchor: VoicePostCommitAnchor?
         var pasteOutcome: VoiceClipboardPaster.Outcome?
         let commitClientObject = targetClient
@@ -1832,24 +2034,25 @@ final class VoiceDictationRuntime {
            let client = targetClient,
            let appSessionID = targetAppSessionID
         {
+            if actionKind != .translate {
+                preCommitAnchor = captureVoicePostCommitAnchor(
+                    text: finalText,
+                    bundleID: bundleID,
+                    appSessionID: appSessionID,
+                    owner: owner,
+                    client: client,
+                    defaultSelection: targetSelection
+                )
+            }
             if !owner.usesClipboardPasteForCommit {
-                if actionKind != .translate {
-                    preCommitAnchor = VoicePostCommitEditTracker.shared
-                        .capturePreCommitAnchor(
-                            committedText: finalText,
-                            bundleIdentifier: bundleID,
-                            appSessionID: appSessionID,
-                            client: client as? any IMKTextInput,
-                            selection: targetSelection
-                        )
-                }
-                committed = owner.voiceRuntimeCommit(
+                committedViaIMK = owner.voiceRuntimeCommit(
                     finalText,
                     client: client,
                     appSessionID: appSessionID,
                     selection: targetSelection,
                     anchorRect: anchorRect
                 )
+                committed = committedViaIMK
             }
             // 宿主拒绝 IMK insertText、上屏回读发现未真正写入，或全局跨输入法会话
             // （无 IMKTextInput）时，统一走 ⌘V 回退路径。回退结果（仅复制到剪贴板 /
@@ -1864,10 +2067,18 @@ final class VoiceDictationRuntime {
             if let preCommitAnchor {
                 VoicePostCommitEditTracker.shared.arm(
                     anchor: preCommitAnchor,
-                    client: commitClientObject,
-                    anchorRect: savedAnchor
+                    client: committedViaIMK ? commitClientObject : nil,
+                    anchorRect: savedAnchor.isEmpty
+                        ? fallbackAnchorRect()
+                        : savedAnchor
                 )
             }
+            recordCommittedVoiceToSharedMemory(
+                text: finalText,
+                bundleID: bundleID,
+                actionKind: actionKind,
+                committedViaIMK: committedViaIMK
+            )
             settings.record(.voiceAccepted)
             if autoPasteEnabled {
                 settings.record(.voiceAutoPasted)
@@ -2352,6 +2563,9 @@ final class VoiceDictationRuntime {
         loggedTransientTargetLoss = false
         activeIntent = .dictation
         activeHotwords = []
+        hotwordCorrector = VoiceHotwordCorrector(hotwords: [])
+        activeDomain = nil
+        activeRecentContext = ""
         sessionStartedAt = nil
         recordingDurationMilliseconds = 0
         pendingRawText = nil

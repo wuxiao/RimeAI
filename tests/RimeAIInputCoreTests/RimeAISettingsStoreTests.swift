@@ -961,4 +961,79 @@ struct RimeAISettingsStoreTests {
         dest.restoreDefaults()
         #expect(dest.voiceSecondaryShortcut == .rightCommand)
     }
+
+    @Test("voice commits enter keyboard history only behind their own default-on switch")
+    func voiceSharedHistorySwitch() throws {
+        let (store, defaults) = makeStore()
+        #expect(store.voiceSharedHistoryEnabled)
+        store.voiceSharedHistoryEnabled = false
+        #expect(
+            defaults.bool(forKey: RimeAISettingsStore.Keys.voiceSharedHistoryEnabled)
+                == false
+        )
+
+        // The switch travels with the export document.
+        let exported = store.exportSnapshot()
+        #expect(exported.voiceSharedHistoryEnabled == false)
+        let (dest, _) = makeStore()
+        try dest.applyImport(exported, hasCloudCredential: false)
+        #expect(dest.voiceSharedHistoryEnabled == false)
+
+        // A document that predates the switch says nothing about it and
+        // therefore keeps the default (on).
+        var object = try #require(
+            JSONSerialization.jsonObject(
+                with: JSONEncoder().encode(exported)
+            ) as? [String: Any]
+        )
+        object.removeValue(forKey: "voiceSharedHistoryEnabled")
+        try dest.applyImport(
+            JSONSerialization.data(withJSONObject: object),
+            hasCloudCredential: false
+        )
+        #expect(dest.voiceSharedHistoryEnabled)
+
+        dest.voiceSharedHistoryEnabled = false
+        dest.restoreDefaults()
+        #expect(dest.voiceSharedHistoryEnabled)
+    }
+
+    @Test("auto-learned hotwords are told apart from the ones the user typed")
+    func learnedHotwordsAreMarkedUntilTheUserSavesTheList() {
+        let (store, _) = makeStore()
+        store.voiceCustomHotwords = ["王伟"]
+        #expect(store.voiceUserCuratedHotwords == ["王伟"])
+
+        // A word already in the user's list is not marked as auto-learned.
+        store.recordVoiceLearnedCorrection(
+            wrong: "王维",
+            corrected: "王伟",
+            hotword: "王伟"
+        )
+        #expect(store.voiceLearnedHotwords.isEmpty)
+        #expect(store.voiceUserCuratedHotwords == ["王伟"])
+
+        store.recordVoiceLearnedCorrection(
+            wrong: "时间",
+            corrected: "事件",
+            hotword: "事件"
+        )
+        #expect(store.voiceCustomHotwords == ["事件", "王伟"])
+        #expect(store.voiceLearnedHotwords == ["事件"])
+        #expect(store.voiceUserCuratedHotwords == ["王伟"])
+
+        // Saving the list in settings makes every kept word user-curated.
+        store.voiceCustomHotwords = ["事件", "王伟"]
+        #expect(store.voiceLearnedHotwords.isEmpty)
+        #expect(store.voiceUserCuratedHotwords == ["事件", "王伟"])
+
+        store.recordVoiceLearnedCorrection(
+            wrong: "直到",
+            corrected: "知道",
+            hotword: "知道"
+        )
+        store.resetAllProductData()
+        #expect(store.voiceLearnedHotwords.isEmpty)
+        #expect(store.voiceCustomHotwords.isEmpty)
+    }
 }

@@ -445,6 +445,11 @@ public struct CloudVoiceTransformRequest: Codable, Equatable, Sendable {
     public let style: VoicePolishStyle?
     public let targetLanguage: VoiceTranslationLanguage?
     public let hotwords: [String]
+    public let domain: String?
+    public let recentContext: String?
+    /// 语音润色是否携带语言画像摘要。画像与热词同属个人常用语，沿用同一个
+    /// 云端 opt-in；旧客户端不发送该字段时按 `false` 处理。
+    public let includeStyleProfile: Bool?
     public let deadlineMilliseconds: Int
 
     public init(
@@ -457,6 +462,9 @@ public struct CloudVoiceTransformRequest: Codable, Equatable, Sendable {
         style: VoicePolishStyle? = nil,
         targetLanguage: VoiceTranslationLanguage? = nil,
         hotwords: [String] = [],
+        domain: String? = nil,
+        recentContext: String? = nil,
+        includeStyleProfile: Bool? = nil,
         deadlineMilliseconds: Int = 10_000
     ) {
         self.requestID = requestID
@@ -468,6 +476,15 @@ public struct CloudVoiceTransformRequest: Codable, Equatable, Sendable {
         self.style = style
         self.targetLanguage = targetLanguage
         self.hotwords = Array(hotwords.prefix(32))
+        let trimmedDomain = domain?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.domain = (trimmedDomain?.isEmpty == false) ? trimmedDomain : nil
+        let trimmedContext = recentContext?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let trimmedContext, !trimmedContext.isEmpty {
+            self.recentContext = String(trimmedContext.suffix(600))
+        } else {
+            self.recentContext = nil
+        }
+        self.includeStyleProfile = includeStyleProfile
         self.deadlineMilliseconds = min(
             max(deadlineMilliseconds, 1),
             VoiceTransformTextPolicy.maximumDeadlineMilliseconds
@@ -486,6 +503,9 @@ public struct CloudVoiceTransformRequest: Codable, Equatable, Sendable {
         case style
         case targetLanguage = "target_language"
         case hotwords
+        case domain
+        case recentContext = "recent_context"
+        case includeStyleProfile = "include_style_profile"
         case deadlineMilliseconds = "deadline_ms"
     }
 }
@@ -539,6 +559,12 @@ public enum VoiceTransformTextPolicy {
               !request.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               request.text.count <= maximumInputCharacters,
               !request.text.contains("\u{0000}"),
+              (request.domain.map {
+                  !$0.isEmpty && $0.utf8.count <= 64 && !$0.contains("\u{0000}")
+              } ?? true),
+              (request.recentContext.map {
+                  $0.count <= 600 && !$0.contains("\u{0000}")
+              } ?? true),
               (1 ... maximumDeadlineMilliseconds).contains(request.deadlineMilliseconds)
         else {
             return false

@@ -51,11 +51,35 @@ enum VoiceCloudPolishTruncationGuard {
 /// 热词上下文可能包含个人常用语与专有名词：仅在用户显式开启
 /// “允许向云端润色/翻译发送热词上下文”时才随请求发送。
 enum VoiceCloudHotwordPolicy {
+    /// `corrector` 是会话开始时编译好的热词集（含 L1 / 词库来源）；不传时按
+    /// 调用方给的列表即时编译，且全部视为用户手工维护的热词。
     static func cloudHotwords(
         isEnabled: Bool,
-        activeHotwords: [String]
+        activeHotwords: [String],
+        transcript: String = "",
+        corrector: VoiceHotwordCorrector? = nil
     ) -> [String] {
-        isEnabled ? activeHotwords : []
+        guard isEnabled else {
+            return []
+        }
+        return (corrector ?? VoiceHotwordCorrector(hotwords: activeHotwords))
+            .prioritizedForCloud(transcript: transcript, limit: 32)
+    }
+}
+
+/// 语音成稿进入键盘长期历史的闸门：默认开启、可单独关闭；关闭「本机语音历史」
+/// 同样不写入——用户不想留存语音文本时，不应换个库继续存。
+enum VoiceSharedHistoryPolicy {
+    static func shouldRecord(
+        isVoiceHistoryEnabled: Bool,
+        isSharedHistoryEnabled: Bool,
+        isAIAllowed: Bool,
+        isCloudHistoryAllowed: Bool
+    ) -> Bool {
+        isVoiceHistoryEnabled
+            && isSharedHistoryEnabled
+            && isAIAllowed
+            && isCloudHistoryAllowed
     }
 }
 

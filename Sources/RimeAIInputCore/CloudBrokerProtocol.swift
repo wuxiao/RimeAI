@@ -79,6 +79,9 @@ public struct CloudInferenceRequest: Codable, Equatable, Sendable {
     /// protocol identical to before. When present the last segment must
     /// echo `pinyin` exactly.
     public let segments: [PinyinSegment]?
+    /// Caller's resolved domain (e.g. `coding`, `global`); optional so
+    /// existing wire payloads without it continue validating.
+    public let domain: String?
 
     public init(
         requestID: String,
@@ -91,7 +94,8 @@ public struct CloudInferenceRequest: Codable, Equatable, Sendable {
         recentContext: String,
         historySnippets: [CloudHistorySnippet],
         historyGeneration: Int64,
-        segments: [PinyinSegment]? = nil
+        segments: [PinyinSegment]? = nil,
+        domain: String? = nil
     ) {
         self.requestID = requestID
         compositionID = token.compositionID.uuidString
@@ -109,6 +113,8 @@ public struct CloudInferenceRequest: Codable, Equatable, Sendable {
         self.historySnippets = Array(historySnippets.prefix(8))
         self.historyGeneration = historyGeneration
         self.segments = segments
+        let trimmedDomain = domain?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.domain = (trimmedDomain?.isEmpty == false) ? trimmedDomain : nil
     }
 
     public var isValid: Bool {
@@ -135,6 +141,9 @@ public struct CloudInferenceRequest: Codable, Equatable, Sendable {
                     segments!,
                     activePinyin: pinyin
                 ))
+            && (domain.map {
+                !$0.isEmpty && $0.utf8.count <= 64 && !$0.contains("\u{0000}")
+            } ?? true)
             && recentContext.count <= 600
             && historySnippets.count <= 8
             && historySnippets.allSatisfy {
@@ -164,6 +173,7 @@ public struct CloudInferenceRequest: Codable, Equatable, Sendable {
         case historySnippets = "history_snippets"
         case historyGeneration = "history_generation"
         case segments
+        case domain
     }
 }
 

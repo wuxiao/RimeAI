@@ -216,6 +216,39 @@ struct MixedCompositionResolverTests {
         #expect(lookupCount <= 8)
     }
 
+    @Test("personalized cased tokens preserve original casing for lowercase mixed input")
+    func personalizedCasedTokensPreserved() {
+        let resolver = MixedCompositionResolver()
+        let suggestion = resolver.resolve(
+            rawInput: "zhegefastapixuyao",
+            personalizedEnglishTokens: [],
+            personalizedCasedTokens: ["fastapi": "FastAPI"]
+        ) { pinyin, _ in
+            candidates[pinyin] ?? []
+        }
+
+        #expect(suggestion?.text == "这个FastAPI需要")
+        #expect(suggestion?.segments == [
+            MixedCompositionSegment(kind: .pinyin, rawText: "zhege", renderedText: "这个"),
+            MixedCompositionSegment(kind: .ascii, rawText: "fastapi", renderedText: "FastAPI"),
+            MixedCompositionSegment(kind: .pinyin, rawText: "xuyao", renderedText: "需要"),
+        ])
+    }
+
+    @Test("explicit uppercase in raw input keeps caller casing over personalized cased tokens")
+    func explicitUppercaseOverridesPersonalizedCasing() {
+        let resolver = MixedCompositionResolver()
+        let suggestion = resolver.resolve(
+            rawInput: "zhegeFASTAPIxuyao",
+            personalizedEnglishTokens: ["fastapi"],
+            personalizedCasedTokens: ["fastapi": "FastAPI"]
+        ) { pinyin, _ in
+            candidates[pinyin] ?? []
+        }
+
+        #expect(suggestion?.text == "这个FASTAPI需要")
+    }
+
     private func resolve(
         _ rawInput: String,
         personalizedEnglishTokens: Set<String> = []

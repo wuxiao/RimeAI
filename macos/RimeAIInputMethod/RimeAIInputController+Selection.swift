@@ -234,7 +234,7 @@ extension RimeAIInputController {
             learnedEnglishTokens = Set(
                 acceptedMixedSuggestion.segments
                     .filter { $0.kind == .ascii }
-                    .map { $0.rawText.lowercased() }
+                    .map(\.renderedText)
             )
         }
         let rimeCommitResult: String?

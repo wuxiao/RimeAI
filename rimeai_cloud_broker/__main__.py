@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import logging
 import signal
 import sqlite3
@@ -151,6 +152,25 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     return parser
+
+
+def _live_domain_resolver(
+    phrasebook_db: Path,
+) -> Callable[[str], str]:
+    """Stateless bundle→domain lookup (TTL caching lives in CloudModelClient)."""
+
+    def resolve(bundle_id: str) -> str:
+        try:
+            with contextlib.closing(sqlite3.connect(phrasebook_db, timeout=1)) as db:
+                row = db.execute(
+                    "SELECT domain FROM domain_map WHERE bundle_id = ?",
+                    (bundle_id,),
+                ).fetchone()
+            return str(row[0]) if row else "global"
+        except sqlite3.Error:
+            return "global"
+
+    return resolve
 
 
 def _phrasebook_domain_resolver(
@@ -359,19 +379,25 @@ async def _run(
         / "RimeAI"
         / "History"
     )
+    language_profile_root = (
+        Path.home()
+        / "Library"
+        / "Application Support"
+        / "RimeAI"
+        / "language_profile"
+    )
     decision_journal = None
     if decision_journal_enabled:
         decision_journal = DecisionJournal(
-            Path.home()
-            / "Library"
-            / "Application Support"
-            / "RimeAI"
-            / "language_profile"
-            / "cloud-decisions.db"
+            language_profile_root / "cloud-decisions.db"
         )
     ranker = CloudModelClient(
         api_key_loader=_cloud_env_loader,
         decision_journal=decision_journal,
+        profile_store=ProfileStore(language_profile_root),
+        domain_resolver=_live_domain_resolver(
+            language_profile_root / "phrasebook.sqlite3"
+        ),
     )
     # The scheduler owns the idle gate for consolidation; creating it
     # before the server lets every accepted inference/continuation

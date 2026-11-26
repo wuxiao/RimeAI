@@ -34,7 +34,7 @@
    ▼
 L1 短语库   这个人常打的"词"        —— 候选池直通、混输词表
 L2 用户 LM  这个人的接词序列习惯     —— 排序融合、整句打分
-L3 风格画像 这个人"怎么说话"        —— 设置页可见可编辑（不进入推理 prompt）
+L3 风格画像 这个人"怎么说话"        —— 设置页可见可编辑（不进入本地推理 prompt）
 ```
 
 原始历史只保留"未固化滚动窗口"（见 §5 淘汰规则）；长期资产是三层产物，
@@ -174,7 +174,7 @@ entries(
 | 混输 resolver | L1 | 取代个人英文词表，中文/混排片段同权 |
 | 本地排序融合 | L2 | §4.2 插值进 daemon 融合分 |
 | 整句 decoder | L2 | beam 打分用同一融合 LM；L3 风格特征二期再入 |
-| 云请求 | —（2026-10-12 决策） | prompt 只含 pinyin / recent_context 尾部（120 字）/ segments；短语库与画像摘要不进入请求；决策为 generate/abstain（无候选池） |
+| 云请求 | L3 | 2026-11-26 决策（取代 2026-10-12）：键盘云请求的 prompt 在 pinyin / recent_context 尾部（120 字）/ segments 之外附带画像摘要 hint（`style_profile`：各特征有界，register 3 / cn_en_mixing 3 / punctuation_habits 2 / vocabulary_domains 4 / signature_phrases 8 / sentence_templates 3；随 domain 或 bundle 解析，进入决策缓存键；无画像时省略）；语音润色仅在 `voiceCloudHotwordsEnabled` 开启时携带，翻译不携带；L1 短语库仍不进入请求；决策为 generate/abstain（无候选池） |
 
 ## 7. 隐私与安全合同
 

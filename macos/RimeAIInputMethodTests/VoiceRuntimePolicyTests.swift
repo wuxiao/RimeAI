@@ -560,4 +560,35 @@ final class VoiceRuntimePolicyTests: XCTestCase {
             )
         )
     }
+
+    // MARK: - 语音成稿进入键盘历史的闸门
+
+    func testSharedVoiceHistoryNeedsEveryGate() {
+        struct Gates {
+            let voiceHistory: Bool
+            let shared: Bool
+            let ai: Bool
+            let cloud: Bool
+        }
+        // 关掉「本机语音历史」或本开关、应用不允许 AI、未开启云历史：任一不满足都不写入。
+        let cases: [(Gates, Bool)] = [
+            (Gates(voiceHistory: true, shared: true, ai: true, cloud: true), true),
+            (Gates(voiceHistory: false, shared: true, ai: true, cloud: true), false),
+            (Gates(voiceHistory: true, shared: false, ai: true, cloud: true), false),
+            (Gates(voiceHistory: true, shared: true, ai: false, cloud: true), false),
+            (Gates(voiceHistory: true, shared: true, ai: true, cloud: false), false),
+        ]
+
+        for (gates, expected) in cases {
+            XCTAssertEqual(
+                VoiceSharedHistoryPolicy.shouldRecord(
+                    isVoiceHistoryEnabled: gates.voiceHistory,
+                    isSharedHistoryEnabled: gates.shared,
+                    isAIAllowed: gates.ai,
+                    isCloudHistoryAllowed: gates.cloud
+                ),
+                expected
+            )
+        }
+    }
 }

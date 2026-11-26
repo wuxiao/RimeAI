@@ -98,6 +98,7 @@
 		A880A13E1E4552009DCE4A89 /* PrivacyCenterWindowController+UIHelpers.swift in Sources */ = {isa = PBXBuildFile; fileRef = E836C35D5AD52CC967995148 /* PrivacyCenterWindowController+UIHelpers.swift */; };
 		A9A60DF05A01CF10F025D6A3 /* PrivacyCenterWindowController+PhrasebookEditing.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3682B16DB8E49A50DF1B8F65 /* PrivacyCenterWindowController+PhrasebookEditing.swift */; };
 		AB640489720CE759D47DA70D /* VoiceASRArtifactManifest.swift in Sources */ = {isa = PBXBuildFile; fileRef = D95718940B48E81FDC3AF679 /* VoiceASRArtifactManifest.swift */; };
+		AB9645EADE81ADB31753E137 /* VoiceHotwordCorrector.swift in Sources */ = {isa = PBXBuildFile; fileRef = A22F71D70F5875B871386108 /* VoiceHotwordCorrector.swift */; };
 		AB9824F34A839DE4E2906DFD /* VoiceASRArtifactPublisher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 99BD9F5C42F8A1292EB90B8B /* VoiceASRArtifactPublisher.swift */; };
 		ABAF2E32AE700A414578B2EB /* VoiceSettingsPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7833969A7787AF06DBBE5D1 /* VoiceSettingsPresentation.swift */; };
 		AC883CE103A42A2542A1925C /* VoiceDictationCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C025ADB9F27C734395CDBE8 /* VoiceDictationCoordinator.swift */; };
@@ -245,6 +246,7 @@
 		9BB86F219C9E393EC2F8F483 /* PhraseBookStore+Domains.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "PhraseBookStore+Domains.swift"; sourceTree = "<group>"; };
 		9C025ADB9F27C734395CDBE8 /* VoiceDictationCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceDictationCoordinator.swift; sourceTree = "<group>"; };
 		9DA3A6E9B22CBDCCE240E908 /* RimeAIInputMethodTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = RimeAIInputMethodTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		A22F71D70F5875B871386108 /* VoiceHotwordCorrector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceHotwordCorrector.swift; sourceTree = "<group>"; };
 		A68167546E5B3EDB4C6DE24F /* MixedCompositionResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MixedCompositionResolver.swift; sourceTree = "<group>"; };
 		A7C405CED81F4606CCE5ABBC /* VoiceSystemAudioMuterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceSystemAudioMuterTests.swift; sourceTree = "<group>"; };
 		A80C9EBD7A5E847511B38B8D /* CoreAudio.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreAudio.framework; path = System/Library/Frameworks/CoreAudio.framework; sourceTree = SDKROOT; };
@@ -596,6 +598,7 @@
 				EB239A2DF8224D8171C7701A /* VoiceFeatureTypes.swift */,
 				6FF24C5AD952C467E71BBFF2 /* VoiceHistoryStore.swift */,
 				1F2E6A4FF0F04E3B3A07C3A2 /* VoiceHotwordAdmissionState.swift */,
+				A22F71D70F5875B871386108 /* VoiceHotwordCorrector.swift */,
 				B89E6A07D4ED19EAE39C6D0F /* VoicePostCommitCorrectionLearner.swift */,
 				3A6C88B933C5DC9A6F5935B3 /* VoicePreferenceTypes.swift */,
 				92A74F5E685900CDE8BC5440 /* VoiceReleasePolicy.swift */,
@@ -820,6 +823,7 @@
 				1A9CD34E30615CD218E69B9B /* VoiceHistoryStore.swift in Sources */,
 				6F76A6A81D43EAD78E0A8F66 /* VoiceHotKeyManager.swift in Sources */,
 				F1EA9025D51F71409EF8B038 /* VoiceHotwordAdmissionState.swift in Sources */,
+				AB9645EADE81ADB31753E137 /* VoiceHotwordCorrector.swift in Sources */,
 				539D78673F8F702399E58E73 /* VoiceIncrementalPolishPipeline.swift in Sources */,
 				BCDD08BC8A3CC311A104CE7F /* VoicePostCommitCorrectionLearner.swift in Sources */,
 				C5ADA76D7BD0831A2B01FD1F /* VoicePostCommitEditTracker.swift in Sources */,

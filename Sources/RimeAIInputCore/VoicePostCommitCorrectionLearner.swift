@@ -633,7 +633,7 @@ public enum VoicePostCommitCorrectionLearner {
             return nil
         }
 
-        let pinyinKeys = computePinyinKeys(
+        let pinyinKeys = Self.derivePinyinKeys(
             for: correctedText,
             hintedPhrase: hintedRimePhrase,
             hintedPinyin: hintedRimePinyin
@@ -964,6 +964,62 @@ public enum VoicePostCommitCorrectionLearner {
         return syllables
     }
 
+    /// Converts a string's Han characters into toneless lowercase Mandarin syllables,
+    /// transforming each contiguous Han run in phrase context so polyphones (such as
+    /// `重复` or `行长`) match natural context, and falling back per-character if needed.
+    static func contextualMandarinSyllables(for text: String) -> [String] {
+        var result: [String] = []
+        var hanRun: [Character] = []
+
+        func flushHanRun() -> Bool {
+            guard !hanRun.isEmpty else {
+                return true
+            }
+            if hanRun.count > 1,
+               let latin = String(hanRun).applyingTransform(
+                   .mandarinToLatin,
+                   reverse: false
+               ),
+               let stripped = latin.applyingTransform(
+                   .stripDiacritics,
+                   reverse: false
+               )
+            {
+                let tokens = stripped
+                    .split(whereSeparator: \.isWhitespace)
+                    .map { token in
+                        String(token.lowercased().filter { $0 >= "a" && $0 <= "z" })
+                    }
+                    .filter { !$0.isEmpty }
+                if tokens.count == hanRun.count {
+                    result.append(contentsOf: tokens)
+                    hanRun.removeAll(keepingCapacity: true)
+                    return true
+                }
+            }
+            for ch in hanRun {
+                guard let single = mandarinSyllables(for: String(ch)).first else {
+                    return false
+                }
+                result.append(single)
+            }
+            hanRun.removeAll(keepingCapacity: true)
+            return true
+        }
+
+        for ch in text {
+            if isHan(ch) {
+                hanRun.append(ch)
+            } else if !flushHanRun() {
+                return []
+            }
+        }
+        guard flushHanRun() else {
+            return []
+        }
+        return result
+    }
+
     /// Normalizes common Mandarin ASR fuzzy pairs (retroflex zh/ch/sh, n/l,
     /// f/h, -n/-ng) so near-homophone slips still register as phonetic matches.
     static func fuzzyMandarinSkeleton(_ syllable: String) -> String {
@@ -1166,10 +1222,12 @@ public enum VoicePostCommitCorrectionLearner {
         return (48 ... 57).contains(scalar.value)
     }
 
-    private static func computePinyinKeys(
+    /// Derives lowercase toneless pinyin / ASCII letter keys for a phrase, preferring an
+    /// explicit Rime hint when present and otherwise reading contiguous Han runs in context.
+    public static func derivePinyinKeys(
         for phrase: String,
-        hintedPhrase: String?,
-        hintedPinyin: String?
+        hintedPhrase: String? = nil,
+        hintedPinyin: String? = nil
     ) -> String? {
         if let hintedPhrase,
            let hintedPinyin,
@@ -1181,18 +1239,36 @@ public enum VoicePostCommitCorrectionLearner {
             }
         }
         var keys = ""
+        var hanRun: [Character] = []
+
+        func flushHanRun() -> Bool {
+            guard !hanRun.isEmpty else {
+                return true
+            }
+            let syllables = contextualMandarinSyllables(for: String(hanRun))
+            guard syllables.count == hanRun.count else {
+                return false
+            }
+            for syllable in syllables {
+                keys.append(syllable)
+            }
+            hanRun.removeAll(keepingCapacity: true)
+            return true
+        }
+
         for ch in phrase {
             if isHan(ch) {
-                let syllables = mandarinSyllables(for: String(ch))
-                guard let first = syllables.first else {
+                hanRun.append(ch)
+            } else {
+                guard flushHanRun() else {
                     return nil
                 }
-                keys.append(first)
-            } else if isASCIILetter(ch) {
-                keys.append(ch.lowercased())
+                if isASCIILetter(ch) {
+                    keys.append(ch.lowercased())
+                }
             }
         }
-        guard keys.count >= 2 && keys.count <= 64 else {
+        guard flushHanRun(), keys.count >= 2 && keys.count <= 64 else {
             return nil
         }
         return keys
@@ -1208,7 +1284,7 @@ public enum VoicePostCommitCorrectionLearner {
         )
     }
 
-    private static func isHan(_ ch: Character) -> Bool {
+    static func isHan(_ ch: Character) -> Bool {
         guard let scalar = ch.unicodeScalars.first, ch.unicodeScalars.count == 1 else {
             return false
         }

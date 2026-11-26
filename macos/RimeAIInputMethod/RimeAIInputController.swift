@@ -18,6 +18,7 @@ final class RimeAIInputController: IMKInputController,
     var composition = CompositionState(appSessionID: "inactive")
     var pipeline: SemanticSuggestionPipeline!
     var phrasebookEnglishTokens = Set<String>()
+    var phrasebookCasedEnglishTokens: [String: String] = [:]
     var phrasebookEnglishTokensLoaded = false
     var phrasebookEnglishTokensLoading = false
     var phrasebookEnglishTokensGeneration: UInt64 = 0

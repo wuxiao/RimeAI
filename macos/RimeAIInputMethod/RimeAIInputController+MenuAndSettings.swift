@@ -284,6 +284,7 @@ extension RimeAIInputController {
         voiceHotwordAdmission.clear()
         phrasebookEnglishTokensGeneration &+= 1
         phrasebookEnglishTokens = []
+        phrasebookCasedEnglishTokens = [:]
         phrasebookEnglishTokensLoaded = false
         phrasebookEnglishTokensLoading = false
         invalidateCurrentResult()

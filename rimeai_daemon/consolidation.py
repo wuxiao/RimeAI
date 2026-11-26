@@ -22,6 +22,7 @@ import contextlib
 import hashlib
 import json
 import logging
+import re
 import sqlite3
 import threading
 import time
@@ -31,6 +32,82 @@ from pathlib import Path
 from typing import Any
 
 from .user_lm import UserLanguageModel
+
+# Word-boundary anchors must avoid \b because Python treats adjacent Han
+# characters as Unicode \w, which would miss "用RimeAI输入法" or "调FastAPI接口".
+_MIXABLE_ASCII_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9])[A-Za-z][A-Za-z0-9]{2,31}(?![A-Za-z0-9])"
+)
+_COMMON_ENGLISH_STOPWORDS = frozenset({
+    "all", "and", "are", "but", "can", "day", "for", "from", "get", "had",
+    "has", "have", "her", "his", "how", "its", "may", "new", "not", "now",
+    "one", "our", "out", "per", "see", "she", "that", "the", "this", "two",
+    "use", "was", "way", "were", "who", "why", "will", "with", "you", "your",
+})
+_MAX_VOICE_MIXABLE_TOKENS_PER_COMMIT = 16
+# A token spelled in plain lower case or Title Case may just be an ordinary
+# English word ("server", "Today"): it only becomes vocabulary after the same
+# token shows up in this many separate voice commits of one domain. Tokens
+# with a digit or an inner / upper-case letter ("FastAPI", "iOS", "iPhone15")
+# are distinctive enough to be admitted on first sight.
+_MIN_COMMITS_FOR_PLAIN_CASE_TOKEN = 3
+# Inside one ASCII run these characters mark a URL, an e-mail address or a
+# file path ("https://example.com/Users/me", "me@example.com"): nothing in
+# such a run becomes vocabulary.
+_LOCATOR_CHARS = frozenset("/:@")
+_ASCII_RUN_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    "/.:@~-_?=&%+#"
+)
+
+
+@dataclass(frozen=True)
+class MixableToken:
+    token: str
+    needs_confirmation: bool
+
+
+def _ascii_run_bounds(text: str, start: int, end: int) -> tuple[int, int]:
+    """Expands a token match to the surrounding ASCII run (URL, path, domain…)."""
+    left = start
+    while left > 0 and text[left - 1] in _ASCII_RUN_CHARS:
+        left -= 1
+    right = end
+    while right < len(text) and text[right] in _ASCII_RUN_CHARS:
+        right += 1
+    return left, right
+
+
+def _is_distinctive(token: str) -> bool:
+    return any(char.isdigit() for char in token) or any(
+        char.isupper() for char in token[1:]
+    )
+
+
+def _extract_mixable_ascii_tokens(text: str) -> list[MixableToken]:
+    """Extracts mixable technical/English tokens from empty-pinyin commits.
+
+    Tokens inside a URL, e-mail address or path are skipped, common English
+    function words are skipped, and `needs_confirmation` marks plain-case
+    tokens that must recur before they are admitted (see
+    `ConsolidationPipeline._plain_case_token_sightings`)."""
+    extracted: list[MixableToken] = []
+    seen: set[str] = set()
+    for match in _MIXABLE_ASCII_TOKEN_RE.finditer(text):
+        token = match.group(0)
+        if token in seen:
+            continue
+        seen.add(token)
+        left, right = _ascii_run_bounds(text, match.start(), match.end())
+        if _LOCATOR_CHARS.intersection(text[left:right]):
+            continue
+        lowered = token.lower()
+        if not any(char.isupper() for char in token) and lowered in _COMMON_ENGLISH_STOPWORDS:
+            continue
+        extracted.append(MixableToken(token, not _is_distinctive(token)))
+        if len(extracted) >= _MAX_VOICE_MIXABLE_TOKENS_PER_COMMIT:
+            break
+    return extracted
 
 WINDOW_DAYS = 7
 BATCH_LIMIT = 512
@@ -205,7 +282,7 @@ class ConsolidationPipeline:
         """Claims a batch atomically so two processes can never
         double-process the same rows, even if two schedulers are
         misconfigured to run against the same database."""
-        cutoff_ms = int((time.time() - self.window_days * 86_400) * 1000)
+        cutoff_ms = self._cutoff_ms()
         now_ms = int(time.time() * 1000)
         with contextlib.closing(_connect(self.paths.history_db)) as db:
             db.execute("BEGIN IMMEDIATE")
@@ -342,11 +419,17 @@ class ConsolidationPipeline:
         # domain is still cold-start-routed to global — otherwise a
         # slow-trickle domain could never cross the threshold.
         stats_update = dict(mapped)
+        has_voice_commits = any(not commit.pinyin.strip() for commit in batch)
+        sightings = (
+            self._plain_case_token_sightings(effective, self._cutoff_ms())
+            if has_voice_commits
+            else {}
+        )
         with contextlib.closing(_connect(self.paths.phrasebook_db)) as db:
             db.execute("BEGIN IMMEDIATE")
             try:
                 for commit in batch:
-                    self._upsert_phrase(db, commit, effective, now_ms)
+                    self._upsert_phrase(db, commit, effective, now_ms, sightings)
                 for domain, count in stats_update.items():
                     db.execute(
                         """
@@ -370,11 +453,91 @@ class ConsolidationPipeline:
         commit: RawCommit,
         domains: dict[str, str],
         now_ms: int,
+        sightings: dict[str, dict[str, int]] | None = None,
     ) -> None:
         text = commit.committed_text
-        if not text or len(text.encode("utf-8")) > MAX_PHRASE_BYTES:
+        if not text:
             return
         domain = domains.get(commit.bundle_id, "global")
+        pinyin_keys = commit.pinyin.strip().lower()
+        if not pinyin_keys:
+            # Voice dictation & continuation commits carry empty pinyin: extract
+            # mixable ASCII/tech tokens for L1 without inserting un-indexed sentences.
+            domain_sightings = (sightings or {}).get(domain, {})
+            for mixable in _extract_mixable_ascii_tokens(text):
+                if (
+                    mixable.needs_confirmation
+                    and domain_sightings.get(mixable.token, 0)
+                    < _MIN_COMMITS_FOR_PLAIN_CASE_TOKEN
+                ):
+                    continue
+                self._upsert_phrase_row(
+                    db,
+                    domain=domain,
+                    text=mixable.token,
+                    pinyin_keys=mixable.token.lower(),
+                    committed_at_ms=commit.committed_at_ms,
+                    now_ms=now_ms,
+                )
+            return
+        if len(text.encode("utf-8")) > MAX_PHRASE_BYTES:
+            return
+        self._upsert_phrase_row(
+            db,
+            domain=domain,
+            text=text,
+            pinyin_keys=pinyin_keys,
+            committed_at_ms=commit.committed_at_ms,
+            now_ms=now_ms,
+        )
+
+    def _cutoff_ms(self) -> int:
+        """Only commits older than the window are consolidated; the same bound
+        decides which voice commits count as sightings of a plain-case token."""
+        return int((time.time() - self.window_days * 86_400) * 1000)
+
+    def _plain_case_token_sightings(
+        self,
+        domains: dict[str, str],
+        cutoff_ms: int,
+    ) -> dict[str, dict[str, int]]:
+        """Per domain, in how many separate retained voice commits each
+        extracted token occurs.
+
+        Computed on every round on purpose: the pipeline object outlives
+        rounds, so nothing here may be cached on the instance."""
+        try:
+            with contextlib.closing(_connect(self.paths.history_db)) as db:
+                rows = db.execute(
+                    "SELECT bundle_id, committed_text FROM history_commits"
+                    " WHERE pinyin = '' AND committed_at_ms <= ?",
+                    (cutoff_ms,),
+                ).fetchall()
+        except sqlite3.Error:
+            logging.getLogger(__name__).warning(
+                "voice token sightings unavailable; plain-case tokens deferred"
+            )
+            return {}
+        sightings: dict[str, dict[str, int]] = {}
+        for bundle_id, committed_text in rows:
+            domain_counts = sightings.setdefault(
+                domains.get(bundle_id, "global"),
+                {},
+            )
+            for mixable in _extract_mixable_ascii_tokens(committed_text):
+                domain_counts[mixable.token] = domain_counts.get(mixable.token, 0) + 1
+        return sightings
+
+    def _upsert_phrase_row(
+        self,
+        db: sqlite3.Connection,
+        *,
+        domain: str,
+        text: str,
+        pinyin_keys: str,
+        committed_at_ms: int,
+        now_ms: int,
+    ) -> None:
         db.execute(
             """
             INSERT INTO phrasebook_entries(
@@ -390,8 +553,8 @@ class ConsolidationPipeline:
                 phrase_entry_id(domain, text),
                 domain,
                 text,
-                commit.pinyin.lower(),
-                commit.committed_at_ms,
+                pinyin_keys,
+                committed_at_ms,
                 now_ms,
             ),
         )

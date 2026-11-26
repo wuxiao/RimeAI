@@ -114,6 +114,11 @@ final class PrivacyCenterWindowController: NSObject, NSMenuItemValidation {
         target: nil,
         action: nil
     )
+    let voiceSharedHistoryToggle = NSButton(
+        checkboxWithTitle: "",
+        target: nil,
+        action: nil
+    )
     let voiceSoundEffectsToggle = NSButton(
         checkboxWithTitle: "",
         target: nil,

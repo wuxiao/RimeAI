@@ -305,6 +305,93 @@ def test_slow_trickle_domain_graduates_across_batches(tmp_path: Path):
     assert work_entries == 10
 
 
+def test_empty_pinyin_voice_commits_fold_into_l2_l3_and_extract_mixable_ascii_only(
+    tmp_path: Path,
+):
+    paths = make_layout(tmp_path)
+    with sqlite3.connect(paths.phrasebook_db) as db:
+        db.execute(
+            "INSERT INTO domain_map(bundle_id, domain)"
+            " VALUES ('com.example.Code', 'coding')"
+        )
+        db.execute(
+            "INSERT INTO domain_stats(domain, commit_count, updated_at_ms)"
+            " VALUES ('coding', 60, 0)"
+        )
+
+    # Spellings with a digit or an inner / upper-case letter are admitted at
+    # once; plain lower-case or Title-case tokens need three separate voice
+    # commits of the same domain; URL, e-mail and path runs never enter L1.
+    voice_rows = [
+        (
+            "v-0001",
+            "voice_dictation",
+            "今天在群里讨论RimeAI和FastAPI架构，the api用pytorch实现，版本是iOS18。",
+        ),
+        ("v-0002", "voice_dictation", "pytorch的api很好用"),
+        ("v-0003", "voice_dictation", "再把pytorch升级一下"),
+        (
+            "v-0004",
+            "voice_dictation",
+            "打开https://example.com/Users/wangwei然后给zhangsan@example.com发邮件",
+        ),
+    ]
+    with sqlite3.connect(paths.history_db) as db:
+        # The pipeline only consolidates commits older than its window.
+        committed_ms = int(time.time() * 1000) - 8 * DAY_MS
+        for identifier, source, committed_text in voice_rows:
+            db.execute(
+                "INSERT INTO history_commits("
+                "    id, committed_at_ms, bundle_id, pinyin, committed_text, source"
+                ") VALUES (?, ?, ?, '', ?, ?)",
+                (identifier, committed_ms, "com.example.Code", committed_text, source),
+            )
+        db.execute(
+            "INSERT INTO history_commits("
+            "    id, committed_at_ms, bundle_id, pinyin, committed_text, source"
+            ") VALUES (?, ?, ?, '', ?, 'continuation')",
+            ("c-0001", committed_ms, "com.example.Code", "接下来接入TypeScript客户端"),
+        )
+
+    seen: list[RawCommit] = []
+
+    def consolidator(batch: Sequence[RawCommit]) -> bool:
+        seen.extend(batch)
+        return True
+
+    report = ConsolidationPipeline(paths).run_once(
+        semantic_consolidator=consolidator
+    )
+
+    identifiers = ["v-0001", "v-0002", "v-0003", "v-0004", "c-0001"]
+    assert report.statistics_done == len(identifiers)
+    assert report.semantic_done == len(identifiers)
+    assert [item.id for item in seen] == identifiers
+
+    model = UserLanguageModel.load(paths.user_lm)
+    assert "coding" in model.domains()
+
+    with sqlite3.connect(paths.phrasebook_db) as db:
+        rows = db.execute(
+            "SELECT text, pinyin_keys FROM phrasebook_entries WHERE domain = 'coding'"
+        ).fetchall()
+    by_text = dict(rows)
+    assert voice_rows[0][2] not in by_text
+    assert "接下来接入TypeScript客户端" not in by_text
+    assert by_text["RimeAI"] == "rimeai"
+    assert by_text["FastAPI"] == "fastapi"
+    assert by_text["iOS18"] == "ios18"
+    assert by_text["TypeScript"] == "typescript"
+    # Three sightings in retained voice history: admitted.
+    assert by_text["pytorch"] == "pytorch"
+    # Only two sightings: an ordinary lower-case word stays out …
+    assert "api" not in by_text
+    assert "the" not in by_text
+    # … and so does everything inside URLs, e-mail addresses and paths.
+    for fragment in ("https", "example", "com", "Users", "wangwei", "zhangsan"):
+        assert fragment not in by_text
+
+
 def test_warm_domain_keeps_its_own_artifacts(tmp_path: Path):
     paths = make_layout(tmp_path)
     with sqlite3.connect(paths.phrasebook_db) as db:

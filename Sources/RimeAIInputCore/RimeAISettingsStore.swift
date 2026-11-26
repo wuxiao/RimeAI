@@ -114,6 +114,7 @@ public struct RimeAISettingsExport: Codable, Equatable, Sendable {
         case voiceLearnedCorrections
         case voiceLearnedCorrectionsOrder
         case voiceHistoryEnabled
+        case voiceSharedHistoryEnabled
         case voiceSmartPolishEnabled
         case voicePolishStyle
         case voiceTranslateShortcut
@@ -154,6 +155,9 @@ public struct RimeAISettingsExport: Codable, Equatable, Sendable {
     /// 因此必须与映射一起导出 / 导入，否则导入后新学词条会被字母序淘汰。
     public let voiceLearnedCorrectionsOrder: [String]
     public let voiceHistoryEnabled: Bool
+    /// 语音成稿是否同时计入键盘长期历史（用于上下文联想、语言画像与云端建议）。
+    /// 默认开启；关闭它或 `voiceHistoryEnabled` 都不写入。
+    public let voiceSharedHistoryEnabled: Bool
     public let voiceSmartPolishEnabled: Bool
     public let voicePolishStyle: VoicePolishStyle
     public let voiceTranslateShortcut: VoiceDictationShortcut
@@ -192,6 +196,7 @@ public struct RimeAISettingsExport: Codable, Equatable, Sendable {
         voiceLearnedCorrections: [String: String] = [:],
         voiceLearnedCorrectionsOrder: [String] = [],
         voiceHistoryEnabled: Bool = true,
+        voiceSharedHistoryEnabled: Bool = true,
         voiceSmartPolishEnabled: Bool = true,
         voicePolishStyle: VoicePolishStyle = .concise,
         voiceTranslateShortcut: VoiceDictationShortcut = .defaultTranslate,
@@ -230,6 +235,7 @@ public struct RimeAISettingsExport: Codable, Equatable, Sendable {
         self.voiceLearnedCorrections = voiceLearnedCorrections
         self.voiceLearnedCorrectionsOrder = voiceLearnedCorrectionsOrder
         self.voiceHistoryEnabled = voiceHistoryEnabled
+        self.voiceSharedHistoryEnabled = voiceSharedHistoryEnabled
         self.voiceSmartPolishEnabled = voiceSmartPolishEnabled
         self.voicePolishStyle = voicePolishStyle
         self.voiceTranslateShortcut = voiceTranslateShortcut
@@ -331,6 +337,10 @@ public struct RimeAISettingsExport: Codable, Equatable, Sendable {
         voiceHistoryEnabled = try container.decodeIfPresent(
             Bool.self,
             forKey: .voiceHistoryEnabled
+        ) ?? true
+        voiceSharedHistoryEnabled = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .voiceSharedHistoryEnabled
         ) ?? true
         voiceSmartPolishEnabled = try container.decodeIfPresent(
             Bool.self,
@@ -476,6 +486,9 @@ public final class RimeAISettingsStore: @unchecked Sendable {
         public static let voiceLearnedCorrectionsOrder =
             "RimeAIVoiceLearnedCorrectionsOrder"
         public static let voiceHistoryEnabled = "RimeAIVoiceHistoryEnabled"
+        public static let voiceSharedHistoryEnabled =
+            "RimeAIVoiceSharedHistoryEnabled"
+        public static let voiceLearnedHotwords = "RimeAIVoiceLearnedHotwords"
         public static let voiceSmartPolishEnabled =
             "RimeAIVoiceSmartPolishEnabled"
         public static let voicePolishStyle = "RimeAIVoicePolishStyle"
@@ -792,10 +805,10 @@ public final class RimeAISettingsStore: @unchecked Sendable {
             )
         }
         set {
-            defaults.set(
-                Self.normalizedVoiceCustomHotwords(newValue),
-                forKey: Keys.voiceCustomHotwords
-            )
+            let normalized = Self.normalizedVoiceCustomHotwords(newValue)
+            defaults.set(normalized, forKey: Keys.voiceCustomHotwords)
+            // 用户在设置页保存的列表视为亲手维护：其中的词条不再按 strict 隔离排除。
+            defaults.removeObject(forKey: Keys.voiceLearnedHotwords)
             notifySettingsChanged()
         }
     }
@@ -936,9 +949,19 @@ public final class RimeAISettingsStore: @unchecked Sendable {
             baseOrder: storedVoiceLearnedCorrectionsOrder,
             promoting: normalizedWrong
         )
+        if !hadHotword {
+            noteLearnedVoiceHotword(normalizedHotword)
+        }
         defaults.set(hotwords, forKey: Keys.voiceCustomHotwords)
         notifySettingsChanged()
         return !hadExactMapping || !hadHotword
+    }
+
+    /// 记下一条由学习自动收录的热词；已在用户列表里的词条不标记。
+    private func noteLearnedVoiceHotword(_ hotword: String) {
+        var learned = Set(voiceLearnedHotwords).intersection(voiceCustomHotwords)
+        learned.insert(hotword)
+        voiceLearnedHotwords = learned.sorted()
     }
 
     /// 语音纠错词典上限：超出时淘汰最近最少使用的词条。
@@ -1046,6 +1069,35 @@ public final class RimeAISettingsStore: @unchecked Sendable {
             defaults.set(newValue, forKey: Keys.voiceHistoryEnabled)
             notifySettingsChanged()
         }
+    }
+
+    /// 语音成稿是否同时计入键盘长期历史。默认开启；关闭它或
+    /// `voiceHistoryEnabled` 都不写入。
+    public var voiceSharedHistoryEnabled: Bool {
+        get {
+            guard defaults.object(forKey: Keys.voiceSharedHistoryEnabled) != nil else {
+                return true
+            }
+            return defaults.bool(forKey: Keys.voiceSharedHistoryEnabled)
+        }
+        set {
+            defaults.set(newValue, forKey: Keys.voiceSharedHistoryEnabled)
+            notifySettingsChanged()
+        }
+    }
+
+    /// 由上屏后纠错学习自动收录进 `voiceCustomHotwords` 的词条（不是用户
+    /// 亲手录入的）。strict 上下文策略的应用不使用它们，它们也不作为
+    /// 用户热词进入键盘词表。
+    public var voiceLearnedHotwords: [String] {
+        get { defaults.stringArray(forKey: Keys.voiceLearnedHotwords) ?? [] }
+        set { defaults.set(newValue, forKey: Keys.voiceLearnedHotwords) }
+    }
+
+    /// `voiceCustomHotwords` 中由用户亲手维护的词条。
+    public var voiceUserCuratedHotwords: [String] {
+        let learned = Set(voiceLearnedHotwords)
+        return voiceCustomHotwords.filter { !learned.contains($0) }
     }
 
     /// 智能润色开关：去除口语填充词、修正重复与标点（离线使用本地确定性
@@ -1467,6 +1519,8 @@ extension RimeAISettingsStore {
             Keys.voiceLearnedCorrections,
             Keys.voiceLearnedCorrectionsOrder,
             Keys.voiceHistoryEnabled,
+            Keys.voiceSharedHistoryEnabled,
+            Keys.voiceLearnedHotwords,
             Keys.voiceSmartPolishEnabled,
             Keys.voicePolishStyle,
             Keys.voiceTranslateShortcut,
@@ -1507,6 +1561,7 @@ extension RimeAISettingsStore {
             Keys.voicePhraseBookHotwordsEnabled,
             Keys.voiceAutoLearnCorrectionsEnabled,
             Keys.voiceHistoryEnabled,
+            Keys.voiceSharedHistoryEnabled,
             Keys.voiceSmartPolishEnabled,
             Keys.voicePolishStyle,
             Keys.voiceTranslateShortcut,
@@ -1545,6 +1600,7 @@ extension RimeAISettingsStore {
             voiceLearnedCorrections: voiceLearnedCorrections,
             voiceLearnedCorrectionsOrder: voiceLearnedCorrectionsOrder,
             voiceHistoryEnabled: voiceHistoryEnabled,
+            voiceSharedHistoryEnabled: voiceSharedHistoryEnabled,
             voiceSmartPolishEnabled: voiceSmartPolishEnabled,
             voicePolishStyle: voicePolishStyle,
             voiceTranslateShortcut: voiceTranslateShortcut,
@@ -1700,6 +1756,10 @@ extension RimeAISettingsStore {
         defaults.set(
             snapshot.voiceHistoryEnabled,
             forKey: Keys.voiceHistoryEnabled
+        )
+        defaults.set(
+            snapshot.voiceSharedHistoryEnabled,
+            forKey: Keys.voiceSharedHistoryEnabled
         )
         defaults.set(
             snapshot.voiceSmartPolishEnabled,

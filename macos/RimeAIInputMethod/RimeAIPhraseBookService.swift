@@ -33,12 +33,24 @@ final class RimeAIPhraseBookService: @unchecked Sendable {
         /// wrapped for fusion. Queried with the same domain rule as
         /// learned entries: caller's domain or `global`.
         let lexiconEntries: [PhraseBookEntry]
+        /// User-curated voice hotwords joined in memory from settings. They are
+        /// never written to `phrasebook_entries`: settings stay their single
+        /// source of truth, so removing a hotword removes it everywhere and the
+        /// L1 capacity / decay rules (LP-010) stay untouched.
+        let hotwordEntries: [PhraseBookEntry]
+        let orderedEnglishTokens: [String]
+        let englishTokens: Set<String>
+        let casedEnglishTokens: [String: String]
         let loadedAt: TimeInterval
 
         static let cold = ReadSnapshot(
             domainMappings: [:],
             entries: [],
             lexiconEntries: [],
+            hotwordEntries: [],
+            orderedEnglishTokens: [],
+            englishTokens: [],
+            casedEnglishTokens: [:],
             loadedAt: -.infinity
         )
     }
@@ -109,8 +121,14 @@ final class RimeAIPhraseBookService: @unchecked Sendable {
                     || entry.pinyinKeys.hasPrefix(trimmed))
         }
         let matched = snap.entries.filter(matches)
+            + snap.hotwordEntries.filter(matches)
             + snap.lexiconEntries.filter(matches)
-        return Array(matched.sorted(by: precedes).prefix(5))
+        // The same text may exist both as a learned row and as a hotword.
+        var seenTexts = Set<String>()
+        let unique = matched.sorted(by: precedes).filter {
+            seenTexts.insert($0.text).inserted
+        }
+        return Array(unique.prefix(5))
     }
 
     /// Current bundle→domain mapping from the in-memory snapshot
@@ -391,6 +409,15 @@ final class RimeAIPhraseBookService: @unchecked Sendable {
                     limit: Self.snapshotLexiconEntryLimit
                 )
             } ?? []
+        let hotwordEntries = Self.makeHotwordEntries(
+            RimeAISettingsStore.shared.voiceUserCuratedHotwords
+        )
+        let vocabulary = Self.buildEnglishVocabulary(
+            entries: entries,
+            hotwordEntries: hotwordEntries,
+            lexiconEntries: lexiconEntries,
+            limit: Self.englishTokenLimit
+        )
         lock.lock()
         snapshot = ReadSnapshot(
             domainMappings: Dictionary(
@@ -399,9 +426,91 @@ final class RimeAIPhraseBookService: @unchecked Sendable {
             ),
             entries: entries,
             lexiconEntries: lexiconEntries,
+            hotwordEntries: hotwordEntries,
+            orderedEnglishTokens: vocabulary.orderedTokens,
+            englishTokens: Set(vocabulary.orderedTokens),
+            casedEnglishTokens: vocabulary.casedTokens,
             loadedAt: ProcessInfo.processInfo.systemUptime
         )
         lock.unlock()
+    }
+
+    /// Rebuilds the read snapshot after the voice hotword list changed.
+    /// Hotwords are joined in memory (`makeHotwordEntries`), so nothing is
+    /// written: the settings list is the only copy.
+    func reloadVoiceHotwordsAsync() {
+        refreshQueue.async { [weak self] in
+            self?.refreshSnapshotNow()
+        }
+    }
+
+    /// Joins user-curated voice hotwords into the read model as protected
+    /// `global` phrases. Pure: no database access.
+    static func makeHotwordEntries(_ hotwords: [String]) -> [PhraseBookEntry] {
+        let now = Date()
+        return RimeAISettingsStore.normalizedVoiceCustomHotwords(hotwords)
+            .compactMap { hotword in
+                guard let keys = hotwordPinyinKeys(for: hotword) else {
+                    return nil
+                }
+                return PhraseBookEntry(
+                    id: "voice-hotword:\(hotword)",
+                    domain: PhraseBookDomain.global,
+                    text: hotword,
+                    pinyinKeys: keys,
+                    count: 1,
+                    firstSeenAt: now,
+                    lastUsedAt: now,
+                    source: .user,
+                    isProtected: true
+                )
+            }
+    }
+
+    /// Keys for a hotword: contextual Mandarin readings for Han runs,
+    /// lowercase letters for ASCII, alphanumerics as a last resort.
+    private static func hotwordPinyinKeys(for hotword: String) -> String? {
+        if let derived = VoicePostCommitCorrectionLearner.derivePinyinKeys(
+            for: hotword
+        ) {
+            return derived
+        }
+        let alphanumerics = hotword.lowercased().filter { character in
+            ("a" ... "z").contains(character) || ("0" ... "9").contains(character)
+        }
+        return (2 ... 64).contains(alphanumerics.count) ? alphanumerics : nil
+    }
+
+    /// Records the word the user chose after replacing a just-committed keyboard
+    /// candidate, as an auto-learned phrase of the caller's domain. Count-based
+    /// like every other learned phrase, so LP-010 decay and capacity apply.
+    func recordKeyboardPreferenceAsync(
+        text: String,
+        pinyinKeys: String,
+        bundleIdentifier: String
+    ) {
+        let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedPinyin = pinyinKeys
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard (2 ... 32).contains(trimmedText.count),
+              (2 ... 64).contains(trimmedPinyin.count)
+        else {
+            return
+        }
+        let targetDomain = domain(forBundleIdentifier: bundleIdentifier)
+            ?? PhraseBookDomain.global
+        refreshQueue.async { [weak self] in
+            guard let self, let store = self.activeStore() else {
+                return
+            }
+            try? store.recordAutoPhrase(
+                text: trimmedText,
+                pinyinKeys: trimmedPinyin,
+                domain: targetDomain
+            )
+            self.refreshSnapshotNow()
+        }
     }
 
     func refreshSnapshotAsync() {

@@ -203,19 +203,26 @@ extension RimeAIInputController {
         else {
             return nil
         }
-        // 混输个人词表由 L1 短语库承担（LP-006）：取代原 settings +
-        // history 的 256 词机制。
+        // 混输个人词表由 L1 短语库承担（LP-006）：同时读取大小写保留词形。
         var personalized = Set<String>()
+        var personalizedCased: [String: String] = [:]
         if settings.contextPolicy(for: currentBundleIdentifier) != .strict {
-            // 预热完成前读进程内快照（冷启动时为空集），绝不在主线程
-            // 触发 SQLite 查询。
-            personalized = phrasebookEnglishTokensLoaded
-                ? phrasebookEnglishTokens
-                : RimeAIPhraseBookService.shared.allEnglishTokens()
+            // 服务快照为纯内存读取；当本会话已触发预热后直接从最新快照读取，
+            // 使设置页新增热词和语音新学会词形无需切应用即可生效。
+            if phrasebookEnglishTokensLoaded {
+                let liveTokens = RimeAIPhraseBookService.shared.allEnglishTokens()
+                personalized = liveTokens.isEmpty ? phrasebookEnglishTokens : liveTokens
+                let liveCased = RimeAIPhraseBookService.shared.casedEnglishTokens()
+                personalizedCased = liveCased.isEmpty ? phrasebookCasedEnglishTokens : liveCased
+            } else {
+                personalized = RimeAIPhraseBookService.shared.allEnglishTokens()
+                personalizedCased = RimeAIPhraseBookService.shared.casedEnglishTokens()
+            }
         }
         return mixedCompositionResolver.resolve(
             rawInput: rawInput,
-            personalizedEnglishTokens: personalized
+            personalizedEnglishTokens: personalized,
+            personalizedCasedTokens: personalizedCased
         ) { pinyin, limit in
             RimeEngine.shared.candidates(for: pinyin, limit: limit)
         }
@@ -252,6 +259,7 @@ extension RimeAIInputController {
             // 预热结果，而不是等下一次后台刷新。
             RimeAIPhraseBookService.shared.refreshSnapshotNow()
             let tokens = RimeAIPhraseBookService.shared.allEnglishTokens()
+            let casedTokens = RimeAIPhraseBookService.shared.casedEnglishTokens()
             DispatchQueue.main.async { [weak self] in
                 guard let self,
                       self.phrasebookEnglishTokensGeneration == generation
@@ -259,6 +267,7 @@ extension RimeAIInputController {
                     return
                 }
                 self.phrasebookEnglishTokens = tokens
+                self.phrasebookCasedEnglishTokens = casedTokens
                 self.phrasebookEnglishTokensLoaded = true
                 self.phrasebookEnglishTokensLoading = false
             }
@@ -304,6 +313,20 @@ extension RimeAIInputController {
             isSecureInput: composition.isSecureInput
                 || IsSecureEventInputEnabled()
         )
+        let tracker = VoicePostCommitEditTracker.shared
+        // 键盘上屏的观察只靠按键信号。先做纯设置判断：学习条件不满足时
+        // 不触碰任何 IMK 客户端接口（选区、文档、光标矩形都是同步跨进程调用）。
+        let shouldTrackKeyboardEdit = source != .rawPinyin
+            && !tracker.hasPendingUserEdits
+            && tracker.canLearn(for: bundleIdentifier)
+        var keyboardCommitAnchor: VoicePostCommitAnchor?
+        if shouldTrackKeyboardEdit {
+            keyboardCommitAnchor = tracker.makeKeyboardCommitAnchor(
+                committedText: text,
+                bundleIdentifier: bundleIdentifier,
+                appSessionID: applicationSessionID(for: client)
+            )
+        }
         client.insertText(text, replacementRange: notFoundRange)
         guard !composition.isSecureInput,
               !IsSecureEventInputEnabled()
@@ -311,11 +334,16 @@ extension RimeAIInputController {
             enterSecureInput(client: client)
             return false
         }
-        VoicePostCommitEditTracker.shared.noteKeyboardCommit(
-            text: text,
-            pinyin: pinyin,
-            client: client as AnyObject
-        )
+        if let keyboardCommitAnchor {
+            tracker.armKeyboardCommit(anchor: keyboardCommitAnchor)
+        } else {
+            tracker.noteKeyboardCommit(
+                text: text,
+                pinyin: pinyin,
+                client: client as AnyObject,
+                bundleIdentifier: bundleIdentifier
+            )
+        }
         recordCommitSideEffects(
             text: text,
             pinyin: pinyin,

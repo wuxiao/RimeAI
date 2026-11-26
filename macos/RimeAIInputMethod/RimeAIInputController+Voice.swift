@@ -131,7 +131,8 @@ extension RimeAIInputController {
         }
         VoicePostCommitEditTracker.shared.settleNowIfMatching(
             client: clientObject,
-            reason: .nextDictation
+            reason: .nextDictation,
+            bundleIdentifier: bundleIdentifier
         )
         let selection = client.selectedRange()
         let hasEditableSelection = selection.location != NSNotFound
@@ -143,6 +144,15 @@ extension RimeAIInputController {
             : nil
         let hasEditableTarget = hasEditableSelection && caretAnchor != nil
         let anchor = caretAnchor ?? fallbackVoiceAnchorRect()
+        let isSecure = composition.isSecureInput || IsSecureEventInputEnabled()
+        let domain = RimeAIPhraseBookService.shared.domain(
+            forBundleIdentifier: bundleIdentifier
+        )
+        let recentContext = (!isSecure
+            && settings.isAIAllowed(for: bundleIdentifier)
+            && settings.contextPolicy(for: bundleIdentifier) != .strict)
+            ? Self.contextStore.retainedContext(for: bundleIdentifier)
+            : ""
         candidatePanel.hide()
         let started = runtime.start(
             owner: self,
@@ -161,7 +171,9 @@ extension RimeAIInputController {
             selection: selection,
             anchorRect: anchor,
             hasEditableTarget: hasEditableTarget,
-            intent: intent
+            intent: intent,
+            domain: domain,
+            recentContext: recentContext
         )
         return started
     }
@@ -214,10 +226,11 @@ extension RimeAIInputController {
         let sessionPhrases = voiceHotwordAdmission.snapshot(
             session: session
         ).phrases
+        // strict 应用只使用用户亲手维护的热词：自动学习收录的词条是跨应用学到的
+        // 个人数据，与 L1 短语一样不进入。
+        let isStrict = settings.contextPolicy(for: bundleIdentifier) == .strict
         let phraseBookPhrases: [String]
-        if settings.voicePhraseBookHotwordsEnabled,
-           settings.contextPolicy(for: bundleIdentifier) != .strict
-        {
+        if settings.voicePhraseBookHotwordsEnabled, !isStrict {
             phraseBookPhrases = RimeAIPhraseBookService.shared
                 .voiceHotwordCandidates(
                     forBundleIdentifier: bundleIdentifier,
@@ -227,7 +240,9 @@ extension RimeAIInputController {
             phraseBookPhrases = []
         }
         return VoiceHotwordMerger.merge(
-            customPhrases: settings.voiceCustomHotwords,
+            customPhrases: isStrict
+                ? settings.voiceUserCuratedHotwords
+                : settings.voiceCustomHotwords,
             phraseBookPhrases: phraseBookPhrases,
             sessionRimePhrases: sessionPhrases
         )
@@ -421,8 +436,8 @@ extension RimeAIInputController {
            settings.isAIAllowed(for: currentBundleIdentifier),
            settings.contextPolicy(for: currentBundleIdentifier) != .strict
         {
-            // 只进入易失的当前应用上下文；语音文本不写入长期历史。
             Self.contextStore.appendCommittedText(text)
+            armContinuationAfterCommit(committedText: text, client: inputClient)
         } else {
             Self.contextStore.deactivate()
         }

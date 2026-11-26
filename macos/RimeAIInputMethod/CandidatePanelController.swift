@@ -453,7 +453,7 @@ private extension CandidatePanelController {
                 semanticTitle = "✦ 续写：\(text)"
             case .phraseBook:
                 semanticTitle = "✦ 个人短语：\(text)"
-            case .rimeMain, .localSemantic, .rawPinyin:
+            case .rimeMain, .localSemantic, .rawPinyin, .voiceDictation:
                 semanticTitle = neuralLateApplied
                     ? "✦ 本地模型：\(text)"
                     : presentation.title

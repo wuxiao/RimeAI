@@ -4,8 +4,10 @@ import Carbon
 import Foundation
 import InputMethodKit
 
-/// 语音上屏后的短窗口编辑观察器：
-/// - 优先通过 IMK (`IMKTextInput.attributedSubstring`) 读取光标附近文本，无需额外权限；
+/// 语音或键盘上屏后的短窗口编辑观察器：
+/// - 键盘来源的会话只凭按键信号（退格 + 重新上屏的词与拼音），不读取选区或文档，
+///   学到的偏好只回灌领域内短语库，不进入语音纠错映射与热词；
+/// - 语音来源优先通过 IMK (`IMKTextInput.attributedSubstring`) 读取光标附近文本，无需额外权限；
 /// - 若宿主不支持 IMK 回读，只有在用户显式开启“通过辅助功能读取光标周边文本”
 ///   （默认关闭）且进程已获得辅助功能权限时，才降级为只读 `AXUIElement` 回读
 ///   （绝不弹窗申请权限）；
@@ -28,6 +30,7 @@ final class VoicePostCommitEditTracker {
         let anchor: VoicePostCommitAnchor
         weak var clientObject: AnyObject?
         let anchorRect: NSRect
+        var isKeyboardOriginated: Bool = false
         var hasUserEdited: Bool = false
         var tailEditTrackable: Bool = true
         var trailingBackspaces: Int = 0
@@ -35,7 +38,12 @@ final class VoicePostCommitEditTracker {
         var lastRimeCommittedPinyin: String?
     }
 
+    typealias PhraseRecorder = (String, String, String) -> Void
+
     private let settings: RimeAISettingsStore
+    private let phraseRecorder: PhraseRecorder
+    /// 键盘改选学到的偏好：只进领域内短语库。
+    private let keyboardPreferenceRecorder: PhraseRecorder
     private var activeSession: ActiveSession?
     private var debounceWorkItem: DispatchWorkItem?
     private var expiryWorkItem: DispatchWorkItem?
@@ -44,11 +52,43 @@ final class VoicePostCommitEditTracker {
 
     private init() {
         settings = .shared
+        phraseRecorder = { text, pinyin, bundleIdentifier in
+            RimeAIPhraseBookService.shared.recordVoiceLearnedPhraseAsync(
+                text: text,
+                pinyinKeys: pinyin,
+                bundleIdentifier: bundleIdentifier
+            )
+        }
+        keyboardPreferenceRecorder = { text, pinyin, bundleIdentifier in
+            RimeAIPhraseBookService.shared.recordKeyboardPreferenceAsync(
+                text: text,
+                pinyinKeys: pinyin,
+                bundleIdentifier: bundleIdentifier
+            )
+        }
     }
 
-    /// 测试注入独立设置存储。
-    init(settings: RimeAISettingsStore) {
+    /// 测试注入独立设置存储与可选短语记录回调（避免测试写入用户真实数据库）。
+    init(
+        settings: RimeAISettingsStore,
+        phraseRecorder: @escaping PhraseRecorder = { text, pinyin, bundleIdentifier in
+            RimeAIPhraseBookService.shared.recordVoiceLearnedPhraseAsync(
+                text: text,
+                pinyinKeys: pinyin,
+                bundleIdentifier: bundleIdentifier
+            )
+        },
+        keyboardPreferenceRecorder: @escaping PhraseRecorder = { text, pinyin, bundleIdentifier in
+            RimeAIPhraseBookService.shared.recordKeyboardPreferenceAsync(
+                text: text,
+                pinyinKeys: pinyin,
+                bundleIdentifier: bundleIdentifier
+            )
+        }
+    ) {
         self.settings = settings
+        self.phraseRecorder = phraseRecorder
+        self.keyboardPreferenceRecorder = keyboardPreferenceRecorder
     }
 
     /// AX 回读是否放行。读取光标周边文本属于额外的隐私边界：必须是
@@ -124,11 +164,49 @@ final class VoicePostCommitEditTracker {
         )
     }
 
-    /// 语音成功上屏后启动观察窗口（仅限非翻译听写、非安全输入且允许学习时）。
+    var hasPendingUserEdits: Bool {
+        activeSession?.hasUserEdited ?? false
+    }
+
+    /// 键盘上屏的观察锚点：只记上屏文本与归属，不读取选区、文档或辅助功能。
+    /// 不满足学习条件（含语音未开启）时返回 nil，调用方不得再做任何客户端访问。
+    func makeKeyboardCommitAnchor(
+        committedText: String,
+        bundleIdentifier: String,
+        appSessionID: String
+    ) -> VoicePostCommitAnchor? {
+        guard canLearn(for: bundleIdentifier),
+              committedText.count >= 2,
+              committedText.count <= VoicePostCommitCorrectionLearner
+                .maximumTrackedCommittedCharacters,
+              !committedText.contains("\n"),
+              !committedText.contains("\r")
+        else {
+            return nil
+        }
+        return VoicePostCommitAnchor(
+            committedText: committedText,
+            bundleIdentifier: bundleIdentifier,
+            appSessionID: appSessionID
+        )
+    }
+
+    /// 键盘上屏后启动观察窗口：学习结果只回灌键盘短语库。
+    func armKeyboardCommit(anchor: VoicePostCommitAnchor) {
+        arm(
+            anchor: anchor,
+            client: nil,
+            anchorRect: .zero,
+            isKeyboardOriginated: true
+        )
+    }
+
+    /// 语音或输入法成功上屏后启动观察窗口（非翻译、非安全输入且允许学习时）。
     func arm(
         anchor: VoicePostCommitAnchor,
         client: AnyObject?,
-        anchorRect: NSRect
+        anchorRect: NSRect,
+        isKeyboardOriginated: Bool = false
     ) {
         guard canLearn(for: anchor.bundleIdentifier) else {
             disarm()
@@ -143,7 +221,8 @@ final class VoicePostCommitEditTracker {
         activeSession = ActiveSession(
             anchor: anchor,
             clientObject: client,
-            anchorRect: anchorRect
+            anchorRect: anchorRect,
+            isKeyboardOriginated: isKeyboardOriginated
         )
 
         let expiry = DispatchWorkItem { [weak self] in
@@ -158,8 +237,11 @@ final class VoicePostCommitEditTracker {
         )
     }
 
-    /// 无组合态的 Backspace：记录可能发生在语音上屏末尾的回删。
-    func noteUncomposedBackspace(client: AnyObject?) {
+    /// 无组合态的 Backspace：记录可能发生在语音或输入法上屏末尾的回删。
+    func noteUncomposedBackspace(
+        client: AnyObject?,
+        bundleIdentifier: String? = nil
+    ) {
         guard var session = activeSession else {
             return
         }
@@ -167,7 +249,11 @@ final class VoicePostCommitEditTracker {
             cancelForSecureInput()
             return
         }
-        if let tracked = session.clientObject, let client, tracked !== client {
+        guard matchesSession(
+            session,
+            client: client,
+            bundleIdentifier: bundleIdentifier
+        ) else {
             return
         }
         session.hasUserEdited = true
@@ -187,7 +273,8 @@ final class VoicePostCommitEditTracker {
     func noteKeyboardCommit(
         text: String,
         pinyin: String,
-        client: AnyObject?
+        client: AnyObject?,
+        bundleIdentifier: String? = nil
     ) {
         guard var session = activeSession else {
             return
@@ -196,7 +283,11 @@ final class VoicePostCommitEditTracker {
             cancelForSecureInput()
             return
         }
-        if let tracked = session.clientObject, let client, tracked !== client {
+        guard matchesSession(
+            session,
+            client: client,
+            bundleIdentifier: bundleIdentifier
+        ) else {
             return
         }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -213,7 +304,8 @@ final class VoicePostCommitEditTracker {
     /// 任意其他编辑动作（方向键移动光标、选区覆盖、⌘V 粘贴、英文直输等）。
     func noteDocumentActivity(
         client: AnyObject?,
-        invalidatesTailTracking: Bool
+        invalidatesTailTracking: Bool,
+        bundleIdentifier: String? = nil
     ) {
         guard var session = activeSession else {
             return
@@ -222,7 +314,11 @@ final class VoicePostCommitEditTracker {
             cancelForSecureInput()
             return
         }
-        if let tracked = session.clientObject, let client, tracked !== client {
+        guard matchesSession(
+            session,
+            client: client,
+            bundleIdentifier: bundleIdentifier
+        ) else {
             return
         }
         session.hasUserEdited = true
@@ -236,12 +332,17 @@ final class VoicePostCommitEditTracker {
     /// 立即结算当前活跃会话（如按 Enter 发送消息前、或开始下一次听写前）。
     func settleNowIfMatching(
         client: AnyObject?,
-        reason: SettleReason
+        reason: SettleReason,
+        bundleIdentifier: String? = nil
     ) {
         guard let session = activeSession else {
             return
         }
-        if let tracked = session.clientObject, let client, tracked !== client {
+        guard matchesSession(
+            session,
+            client: client,
+            bundleIdentifier: bundleIdentifier
+        ) else {
             return
         }
         settleActiveSession(reason: reason)
@@ -294,12 +395,9 @@ final class VoicePostCommitEditTracker {
         // 若窗口内未观测到任何编辑动作：
         // - 在 debounce / nextDictation / returnKey 时直接撤防（如果窗口结束仍无编辑也撤防）；
         // - 但若用户用鼠标/外设编辑绕过了 IMK 键事件，允许在 returnKey/deactivated/sessionSwitched/windowExpired 时做一次低成本回读检查。
+        // 键盘来源的会话没有文档可读：只有观测到过按键编辑才结算。
         let shouldAttemptReadback = session.hasUserEdited
-            || reason == .returnKey
-            || reason == .nextDictation
-            || reason == .sessionSwitched
-            || reason == .deactivated
-            || reason == .windowExpired
+            || (reason != .debounce && !session.isKeyboardOriginated)
 
         guard shouldAttemptReadback else {
             return
@@ -310,7 +408,8 @@ final class VoicePostCommitEditTracker {
             persistAndNotify(
                 corrections,
                 bundleIdentifier: session.anchor.bundleIdentifier,
-                anchorRect: session.anchorRect
+                anchorRect: session.anchorRect,
+                isKeyboardOriginated: session.isKeyboardOriginated
             )
             disarm()
             return
@@ -326,6 +425,10 @@ final class VoicePostCommitEditTracker {
     private func extractCorrections(
         for session: ActiveSession
     ) -> [VoiceLearnedCorrection] {
+        if session.isKeyboardOriginated {
+            return keyboardTailEditCorrection(for: session)
+        }
+
         let anchor = session.anchor
 
         // 1. 优先尝试 IMK 局部回读
@@ -379,11 +482,16 @@ final class VoicePostCommitEditTracker {
     private func persistAndNotify(
         _ corrections: [VoiceLearnedCorrection],
         bundleIdentifier: String,
-        anchorRect: NSRect
+        anchorRect: NSRect,
+        isKeyboardOriginated: Bool
     ) {
         guard !IsSecureEventInputEnabled(),
               canLearn(for: bundleIdentifier)
         else {
+            return
+        }
+        if isKeyboardOriginated {
+            recordKeyboardPreferences(corrections, bundleIdentifier: bundleIdentifier)
             return
         }
         var newlyLearned: [VoiceLearnedCorrection] = []
@@ -394,11 +502,7 @@ final class VoicePostCommitEditTracker {
                 hotword: correction.hotword
             )
             if let pinyin = correction.pinyinKeys, !pinyin.isEmpty {
-                RimeAIPhraseBookService.shared.recordVoiceLearnedPhraseAsync(
-                    text: correction.hotword,
-                    pinyinKeys: pinyin,
-                    bundleIdentifier: bundleIdentifier
-                )
+                phraseRecorder(correction.hotword, pinyin, bundleIdentifier)
             }
             if changed {
                 settings.record(.voiceCorrectionLearned)
@@ -410,6 +514,44 @@ final class VoicePostCommitEditTracker {
         }
     }
 
+    /// 键盘来源只凭按键：回删了几格 + 用户重新上屏的词与拼音。
+    private func keyboardTailEditCorrection(
+        for session: ActiveSession
+    ) -> [VoiceLearnedCorrection] {
+        guard session.tailEditTrackable,
+              session.trailingBackspaces > 0,
+              let phrase = session.lastRimeCommittedPhrase
+        else {
+            return []
+        }
+        let tailEdit = VoicePostCommitTailEdit(
+            deletedTrailingCharacters: session.trailingBackspaces,
+            replacementText: phrase,
+            replacementPinyin: session.lastRimeCommittedPinyin
+        )
+        let correction = VoicePostCommitCorrectionLearner.extractCorrectionFromTailEdit(
+            committedText: session.anchor.committedText,
+            tailEdit: tailEdit
+        )
+        return correction.map { [$0] } ?? []
+    }
+
+    /// 键盘改选的偏好只进领域内短语库：不写语音纠错映射，不动热词，不提示。
+    private func recordKeyboardPreferences(
+        _ corrections: [VoiceLearnedCorrection],
+        bundleIdentifier: String
+    ) {
+        for correction in corrections {
+            if let pinyin = correction.pinyinKeys, !pinyin.isEmpty {
+                keyboardPreferenceRecorder(
+                    correction.hotword,
+                    pinyin,
+                    bundleIdentifier
+                )
+            }
+        }
+    }
+
     private func disarm() {
         debounceWorkItem?.cancel()
         debounceWorkItem = nil
@@ -418,7 +560,22 @@ final class VoicePostCommitEditTracker {
         activeSession = nil
     }
 
-    private func canLearn(for bundleIdentifier: String) -> Bool {
+    private func matchesSession(
+        _ session: ActiveSession,
+        client: AnyObject?,
+        bundleIdentifier: String?
+    ) -> Bool {
+        if let tracked = session.clientObject, let client {
+            return tracked === client
+        }
+        if let bundleIdentifier, !bundleIdentifier.isEmpty {
+            return session.anchor.bundleIdentifier == bundleIdentifier
+        }
+        return true
+    }
+
+    /// 语音子功能只在语音总开关开启后生效；纯设置判断，不访问任何客户端。
+    func canLearn(for bundleIdentifier: String) -> Bool {
         !IsSecureEventInputEnabled()
             && settings.aiEnabled
             && settings.voiceEnabled

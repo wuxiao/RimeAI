@@ -10,6 +10,7 @@ public enum HistoryCommitSource: String, Codable, Sendable {
     case cloudGenerated = "cloud_generated"
     case rawPinyin = "raw_pinyin"
     case continuation = "continuation"
+    case voiceDictation = "voice_dictation"
 }
 
 public struct HistoryCommit: Codable, Equatable, Sendable {
@@ -34,6 +35,30 @@ public struct HistoryCommit: Codable, Equatable, Sendable {
         self.pinyin = pinyin
         self.committedText = committedText
         self.source = source
+    }
+}
+
+/// Bounds a committed text to what the store accepts, cutting on a Character
+/// boundary so an over-long dictation is recorded truncated instead of rejected.
+public enum HistoryCommitTextPolicy {
+    public static let maximumUTF8Bytes = 16_384
+
+    public static func textForHistory(_ text: String) -> String {
+        guard text.utf8.count > maximumUTF8Bytes else {
+            return text
+        }
+        var result = ""
+        result.reserveCapacity(maximumUTF8Bytes)
+        var usedBytes = 0
+        for character in text {
+            let width = character.utf8.count
+            if usedBytes + width > maximumUTF8Bytes {
+                break
+            }
+            result.append(character)
+            usedBytes += width
+        }
+        return result
     }
 }
 

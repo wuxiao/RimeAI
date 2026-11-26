@@ -135,7 +135,8 @@ extension SemanticSuggestionPipeline {
             recentContext: historySnapshot?.recentText ?? "",
             historySnippets: historySnapshot?.relevantSnippets ?? [],
             historyGeneration: historySnapshot?.generation ?? 0,
-            segments: seed.segments
+            segments: seed.segments,
+            domain: dependencies.domainForBundle(seed.bundleIdentifier)
         )
         return (request, apiKey)
     }
