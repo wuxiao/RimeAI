@@ -29,6 +29,7 @@ final class RimeAIInputController: IMKInputController,
     let settings = RimeAISettingsStore.shared
     var voiceHotKeyRegistrationFailed = false
     var voiceHotKeyIsRegistered = false
+    var voiceSecondaryHotKeyIsRegistered = false
     var voiceTranslateHotKeyIsRegistered = false
     var voiceModifierTapDetector = VoiceModifierTapDetector()
     var voiceTranslateModifierTapDetector = VoiceModifierTapDetector()
@@ -270,6 +271,7 @@ final class RimeAIInputController: IMKInputController,
         )
         VoiceHotKeyManager.shared.deactivate(owner: self)
         voiceHotKeyIsRegistered = false
+        voiceSecondaryHotKeyIsRegistered = false
         voiceTranslateHotKeyIsRegistered = false
         resetVoiceModifierTapDetectors()
         continuationCoordinator.cancel(.secureInput)
@@ -298,6 +300,7 @@ final class RimeAIInputController: IMKInputController,
             )
             VoiceHotKeyManager.shared.deactivate(owner: self)
             voiceHotKeyIsRegistered = false
+            voiceSecondaryHotKeyIsRegistered = false
             voiceTranslateHotKeyIsRegistered = false
             resetVoiceModifierTapDetectors()
             continuationCoordinator.cancel(.secureInput)

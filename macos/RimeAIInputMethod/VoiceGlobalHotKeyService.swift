@@ -26,8 +26,10 @@ final class VoiceGlobalHotKeyService {
     private var serviceStateObserver: NSObjectProtocol?
     private var secureInputRecoveryTimer: DispatchSourceTimer?
     private var dictationModifierTapDetector = VoiceModifierTapDetector()
+    private var secondaryDictationModifierTapDetector = VoiceModifierTapDetector()
     private var translateModifierTapDetector = VoiceModifierTapDetector()
     private var dictationPointerGuard = VoiceModifierTapPointerGuard()
+    private var secondaryDictationPointerGuard = VoiceModifierTapPointerGuard()
     private var translatePointerGuard = VoiceModifierTapPointerGuard()
     private var modifierDeduplicator = VoiceModifierEventDeduplicator()
     private var isStarted = false
@@ -148,14 +150,48 @@ final class VoiceGlobalHotKeyService {
             }
             hotKeyRegistrationFailed = true
         }
+        reconcileSecondaryHotKey()
         reconcileTranslationHotKey()
+    }
+
+    private func reconcileSecondaryHotKey() {
+        let plan = VoiceSecondaryHotKeyPlan.plan(
+            secondaryShortcut: settings.voiceSecondaryShortcut,
+            primaryShortcut: settings.voiceShortcut
+        )
+        switch plan {
+        case .deactivate:
+            VoiceHotKeyManager.shared.deactivateSecondary(owner: self)
+        case let .activate(secondaryShortcut):
+            do {
+                try VoiceHotKeyManager.shared.activateSecondary(
+                    owner: self,
+                    shortcut: secondaryShortcut,
+                    onPressed: { [weak self] in
+                        self?.handleTriggeredShortcut(
+                            intent: .dictation,
+                            isToggleShortcut: false
+                        )
+                    },
+                    onReleased: { [weak self] in
+                        self?.handleReleasedHoldShortcut()
+                    },
+                    onSecureInputDetected: { [weak self] in
+                        self?.handleSecureInputDetected()
+                    }
+                )
+            } catch {
+                // activateSecondary 已记录 .failed 状态并发出通知，保留供设置页展示。
+            }
+        }
     }
 
     private func reconcileTranslationHotKey() {
         let translateShortcut = settings.voiceTranslateShortcut
         let plan = VoiceTranslationHotKeyPlan.plan(
             translateShortcut: translateShortcut,
-            dictationShortcut: settings.voiceShortcut
+            dictationShortcut: settings.voiceShortcut,
+            secondaryDictationShortcut: settings.voiceSecondaryShortcut
         )
         switch plan {
         case .deactivate:
@@ -189,15 +225,19 @@ final class VoiceGlobalHotKeyService {
     /// 任意非修饰键按下（IMK 路径、全局监控或本地监控均可调用）：立即取消待确认的右 `⌘` 点按。
     func noteNonModifierKeyDown() {
         dictationModifierTapDetector.handleOtherKeyDown()
+        secondaryDictationModifierTapDetector.handleOtherKeyDown()
         translateModifierTapDetector.handleOtherKeyDown()
         dictationPointerGuard.reset()
+        secondaryDictationPointerGuard.reset()
         translatePointerGuard.reset()
     }
 
     func resetModifierTapDetectors() {
         dictationModifierTapDetector.reset()
+        secondaryDictationModifierTapDetector.reset()
         translateModifierTapDetector.reset()
         dictationPointerGuard.reset()
+        secondaryDictationPointerGuard.reset()
         translatePointerGuard.reset()
         modifierDeduplicator.reset()
     }
@@ -229,6 +269,7 @@ final class VoiceGlobalHotKeyService {
         }
 
         let dictationShortcut = settings.voiceShortcut
+        let secondaryShortcut = settings.voiceSecondaryShortcut
         let translateShortcut = settings.voiceTranslateShortcut
 
         let dictationTriggered = dictationShortcut.isModifierTap
@@ -241,8 +282,27 @@ final class VoiceGlobalHotKeyService {
                 shortcut: dictationShortcut
             )
             : false
+        let secondaryTriggered: Bool
+        if let secondaryShortcut,
+           secondaryShortcut.isModifierTap,
+           secondaryShortcut != dictationShortcut
+        {
+            secondaryTriggered = evaluateModifierTap(
+                detector: &secondaryDictationModifierTapDetector,
+                pointerGuard: &secondaryDictationPointerGuard,
+                keyCode: keyCode,
+                modifiers: modifiers,
+                timestamp: timestamp,
+                shortcut: secondaryShortcut
+            )
+        } else {
+            secondaryDictationModifierTapDetector.reset()
+            secondaryDictationPointerGuard.reset()
+            secondaryTriggered = false
+        }
         let translateTriggered = translateShortcut.isModifierTap
             && translateShortcut != dictationShortcut
+            && translateShortcut != secondaryShortcut
             ? evaluateModifierTap(
                 detector: &translateModifierTapDetector,
                 pointerGuard: &translatePointerGuard,
@@ -253,7 +313,7 @@ final class VoiceGlobalHotKeyService {
             )
             : false
 
-        guard dictationTriggered || translateTriggered else {
+        guard dictationTriggered || secondaryTriggered || translateTriggered else {
             return
         }
 

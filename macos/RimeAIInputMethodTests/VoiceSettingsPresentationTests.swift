@@ -25,6 +25,45 @@ final class VoiceSettingsPresentationTests: XCTestCase {
         XCTAssertFalse(VoicePrivacyCopy.phraseBookHotwordsCheckbox.contains("L1"))
     }
 
+    func testDualShortcutCopyCoversTapHoldAndMixedCombinations() throws {
+        let holdPrimary = try XCTUnwrap(VoiceDictationShortcut(
+            keyCode: 9,
+            modifiers: [.control, .shift]
+        ))
+        let holdSecondary = try XCTUnwrap(VoiceDictationShortcut(
+            keyCode: 0,
+            modifiers: [.option, .shift]
+        ))
+
+        let dualTapTitle = VoicePrivacyCopy.voiceToggleTitle(
+            shortcuts: [.function, .rightCommand]
+        )
+        XCTAssertEqual(dualTapTitle, "启用语音输入（按一下 Fn / 右 ⌘ 启动/结束）")
+        let dualTapInstruction = VoicePrivacyCopy.dictationInstruction(
+            shortcuts: [.function, .rightCommand]
+        )
+        XCTAssertTrue(dualTapInstruction.contains("按一下 Fn 或 右 ⌘ 启动录音"))
+
+        let dualHoldTitle = VoicePrivacyCopy.voiceToggleTitle(
+            shortcuts: [holdPrimary, holdSecondary]
+        )
+        XCTAssertEqual(dualHoldTitle, "启用按住说话（⌃⇧V / ⌥⇧A）")
+        let dualHoldInstruction = VoicePrivacyCopy.dictationInstruction(
+            shortcuts: [holdPrimary, holdSecondary]
+        )
+        XCTAssertTrue(dualHoldInstruction.contains("按住 ⌃⇧V 或 ⌥⇧A 录音"))
+
+        let mixedTitle = VoicePrivacyCopy.voiceToggleTitle(
+            shortcuts: [.function, holdPrimary]
+        )
+        XCTAssertEqual(mixedTitle, "启用语音输入（Fn / ⌃⇧V）")
+        let mixedInstruction = VoicePrivacyCopy.dictationInstruction(
+            shortcuts: [.function, holdPrimary]
+        )
+        XCTAssertTrue(mixedInstruction.contains("按一下 Fn 启动/结束录音"))
+        XCTAssertTrue(mixedInstruction.contains("按住 ⌃⇧V 录音"))
+    }
+
     func testSettingsTabsUseStableIdentifiers() {
         XCTAssertEqual(PrivacyCenterWindowController.TabIdentifier.voice, "settings.tab.voice")
         XCTAssertEqual(PrivacyCenterWindowController.TabIdentifier.voiceHistory, "settings.tab.voice-history")

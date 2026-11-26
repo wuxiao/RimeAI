@@ -65,6 +65,7 @@ extension PrivacyCenterWindowController {
         addFilling(voiceInstructionLabel, to: content)
 
         buildVoiceShortcutRow(into: content)
+        buildVoiceSecondaryShortcutRow(into: content)
         buildVoiceTranslationRows(into: content)
     }
 
@@ -76,6 +77,10 @@ extension PrivacyCenterWindowController {
             isCapturing in
             guard let self else {
                 return
+            }
+            if isCapturing {
+                self.voiceSecondaryShortcutCaptureButton.cancelCapture()
+                self.voiceTranslateShortcutCaptureButton.cancelCapture()
             }
             self.voiceShortcutCancelButton.isEnabled = isCapturing
             if isCapturing {
@@ -130,6 +135,90 @@ extension PrivacyCenterWindowController {
         addFilling(voiceShortcutStatusLabel, to: content)
     }
 
+    private func buildVoiceSecondaryShortcutRow(into content: NSStackView) {
+        voiceSecondaryShortcutCaptureButton.identifier =
+            NSUserInterfaceItemIdentifier(
+                "settings.voice-secondary-shortcut.capture"
+            )
+        voiceSecondaryShortcutCaptureButton.setAccessibilityLabel(
+            "编辑备用语音听写快捷键"
+        )
+        voiceSecondaryShortcutCaptureButton.onCaptureStateChanged = { [weak self]
+            isCapturing in
+            guard let self else {
+                return
+            }
+            if isCapturing {
+                self.voiceShortcutCaptureButton.cancelCapture()
+                self.voiceTranslateShortcutCaptureButton.cancelCapture()
+            }
+            self.voiceSecondaryShortcutCancelButton.isEnabled = isCapturing
+            if isCapturing {
+                self.voiceSecondaryShortcutStatusLabel.stringValue =
+                    "正在等待备用快捷键组合；"
+                    + VoiceDictationShortcut.validationFailureDescription
+                self.voiceSecondaryShortcutStatusLabel.textColor =
+                    .controlAccentColor
+            }
+        }
+        voiceSecondaryShortcutCaptureButton.onKeyEvent = { [weak self]
+            keyCode,
+            modifierFlags in
+            self?.captureVoiceSecondaryShortcut(
+                keyCode: keyCode,
+                modifierFlags: modifierFlags
+            )
+        }
+        voiceSecondaryShortcutCaptureButton.onCancel = { [weak self] in
+            self?.refreshVoiceSecondaryShortcutStatus()
+        }
+        voiceSecondaryShortcutCancelButton.target = self
+        voiceSecondaryShortcutCancelButton.action = #selector(
+            cancelVoiceSecondaryShortcutEdit(_:)
+        )
+        voiceSecondaryShortcutCancelButton.isEnabled = false
+
+        voiceSecondaryShortcutPresetButton.target = self
+        voiceSecondaryShortcutPresetButton.action = #selector(
+            usePresetSecondaryVoiceShortcut(_:)
+        )
+        voiceSecondaryShortcutPresetButton.identifier =
+            NSUserInterfaceItemIdentifier(
+                "settings.voice-secondary-shortcut.preset"
+            )
+        voiceSecondaryShortcutPresetButton.setAccessibilityHelp(
+            "一键将另一常用修饰键设为备用听写快捷键（例如外接键盘用右 ⌘、内置键盘用 Fn）。"
+        )
+
+        voiceSecondaryShortcutClearButton.target = self
+        voiceSecondaryShortcutClearButton.action = #selector(
+            clearSecondaryVoiceShortcut(_:)
+        )
+        voiceSecondaryShortcutClearButton.identifier =
+            NSUserInterfaceItemIdentifier(
+                "settings.voice-secondary-shortcut.clear"
+            )
+        voiceSecondaryShortcutClearButton.setAccessibilityHelp(
+            "清除备用语音听写快捷键，仅保留主快捷键。"
+        )
+
+        content.addArrangedSubview(labeledRow("备用听写快捷键", [
+            voiceSecondaryShortcutCaptureButton,
+            voiceSecondaryShortcutCancelButton,
+            voiceSecondaryShortcutPresetButton,
+            voiceSecondaryShortcutClearButton,
+        ]))
+        configureWrapping(voiceSecondaryShortcutStatusLabel)
+        voiceSecondaryShortcutStatusLabel.identifier =
+            NSUserInterfaceItemIdentifier(
+                "settings.voice-secondary-shortcut.status"
+            )
+        voiceSecondaryShortcutStatusLabel.setAccessibilityLabel(
+            "备用语音快捷键状态"
+        )
+        addFilling(voiceSecondaryShortcutStatusLabel, to: content)
+    }
+
     private func buildVoiceTranslationRows(into content: NSStackView) {
         addNote(
             "按下翻译快捷键直接启动语音翻译：松开后自动识别并翻译为目标语言，"
@@ -147,6 +236,10 @@ extension PrivacyCenterWindowController {
             isCapturing in
             guard let self else {
                 return
+            }
+            if isCapturing {
+                self.voiceShortcutCaptureButton.cancelCapture()
+                self.voiceSecondaryShortcutCaptureButton.cancelCapture()
             }
             self.voiceTranslateShortcutCancelButton.isEnabled = isCapturing
             if isCapturing {

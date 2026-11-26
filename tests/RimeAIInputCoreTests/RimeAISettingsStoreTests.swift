@@ -825,4 +825,140 @@ struct RimeAISettingsStoreTests {
         #expect(dest.voiceSoundEffectsEnabled)
         #expect(dest.voiceMuteSystemAudioEnabled)
     }
+
+    @Test("secondary voice shortcut persists, deduplicates against primary, and round-trips export/import")
+    func secondaryVoiceShortcutLifecycle() throws {
+        let (store, defaults) = makeStore()
+        #expect(store.voiceShortcut == .function)
+        #expect(store.voiceSecondaryShortcut == .rightCommand)
+        #expect(store.voiceShortcuts == [.function, .rightCommand])
+
+        // A custom secondary shortcut alongside the Fn primary persists
+        let custom = try #require(
+            VoiceDictationShortcut(keyCode: 9, modifiers: [.option, .shift])
+        )
+        store.voiceSecondaryShortcut = custom
+        let reloaded = RimeAISettingsStore(defaults: defaults)
+        #expect(reloaded.voiceSecondaryShortcut == custom)
+        #expect(reloaded.voiceShortcuts == [.function, custom])
+
+        // Export / import preserves secondary shortcut
+        let exported = reloaded.exportSnapshot()
+        #expect(exported.voiceSecondaryShortcut == custom)
+        #expect(!exported.voiceSecondaryShortcutDisabled)
+        let (dest, _) = makeStore()
+        try dest.applyImport(exported, hasCloudCredential: false)
+        #expect(dest.voiceSecondaryShortcut == custom)
+        #expect(dest.exportSnapshot() == exported)
+
+        // Setting primary to match secondary unbinds the duplicate instead of
+        // falling back to the default Right Command
+        dest.voiceShortcut = custom
+        #expect(dest.voiceSecondaryShortcut == nil)
+        #expect(dest.voiceShortcuts == [custom])
+        // Switching primary away afterwards must not resurrect the old secondary
+        // or surface the default one
+        dest.voiceShortcut = .function
+        #expect(dest.voiceSecondaryShortcut == nil)
+
+        // Attempting to bind secondary identical to primary is ignored and
+        // leaves the current configuration untouched
+        dest.voiceSecondaryShortcut = .rightCommand
+        dest.voiceSecondaryShortcut = .function
+        #expect(dest.voiceSecondaryShortcut == .rightCommand)
+
+        // Unsafe secondary shortcut in an import document is rejected atomically
+        dest.voiceSecondaryShortcut = .rightCommand
+        let before = dest.exportSnapshot()
+        var object = try #require(
+            JSONSerialization.jsonObject(
+                with: JSONEncoder().encode(before)
+            ) as? [String: Any]
+        )
+        object["voiceSecondaryShortcut"] = ["keyCode": 49, "modifiers": 6]
+        let unsafeData = try JSONSerialization.data(withJSONObject: object)
+        #expect(throws: RimeAISettingsImportError.invalidDocument) {
+            try dest.applyImport(unsafeData, hasCloudCredential: false)
+        }
+        #expect(dest.exportSnapshot() == before)
+
+        // restoreDefaults and resetAllProductData return to the default pair
+        dest.restoreDefaults()
+        #expect(dest.voiceSecondaryShortcut == .rightCommand)
+
+        dest.voiceSecondaryShortcut = nil
+        dest.resetAllProductData()
+        #expect(dest.voiceSecondaryShortcut == .rightCommand)
+    }
+
+    @Test("secondary voice shortcut defaults to Right Command beside the Fn primary")
+    func secondaryVoiceShortcutDefaultsToRightCommand() throws {
+        let (store, defaults) = makeStore()
+        #expect(store.voiceShortcut == .function)
+        #expect(store.voiceSecondaryShortcut == .rightCommand)
+        #expect(store.voiceShortcuts == [.function, .rightCommand])
+
+        // The default is exported as the effective shortcut, so restoring the
+        // snapshot reproduces the same pair even where the secondary was cleared
+        let reloaded = RimeAISettingsStore(defaults: defaults)
+        let exported = reloaded.exportSnapshot()
+        #expect(exported.voiceSecondaryShortcut == .rightCommand)
+        #expect(!exported.voiceSecondaryShortcutDisabled)
+        let (dest, _) = makeStore()
+        dest.voiceSecondaryShortcut = nil
+        try dest.applyImport(exported, hasCloudCredential: false)
+        #expect(dest.voiceSecondaryShortcut == .rightCommand)
+        #expect(dest.exportSnapshot() == exported)
+
+        // The default yields to a Right Command primary and returns with Fn
+        store.voiceShortcut = .rightCommand
+        #expect(store.voiceSecondaryShortcut == nil)
+        #expect(store.voiceShortcuts == [.rightCommand])
+        store.voiceShortcut = .function
+        #expect(store.voiceSecondaryShortcut == .rightCommand)
+    }
+
+    @Test("clearing the secondary voice shortcut stays unbound instead of falling back to the default")
+    func clearedSecondaryVoiceShortcutStaysUnbound() throws {
+        let (store, defaults) = makeStore()
+        store.voiceSecondaryShortcut = nil
+        #expect(store.voiceSecondaryShortcut == nil)
+        #expect(store.voiceShortcuts == [.function])
+
+        // Reloading and changing the primary never restore the default
+        let reloaded = RimeAISettingsStore(defaults: defaults)
+        #expect(reloaded.voiceSecondaryShortcut == nil)
+        reloaded.voiceShortcut = .rightCommand
+        #expect(reloaded.voiceSecondaryShortcut == nil)
+        reloaded.voiceShortcut = .function
+        #expect(reloaded.voiceSecondaryShortcut == nil)
+
+        // The snapshot records the explicit clear and import preserves it
+        let exported = reloaded.exportSnapshot()
+        #expect(exported.voiceSecondaryShortcut == nil)
+        #expect(exported.voiceSecondaryShortcutDisabled)
+        let (dest, _) = makeStore()
+        try dest.applyImport(exported, hasCloudCredential: false)
+        #expect(dest.voiceSecondaryShortcut == nil)
+        #expect(dest.exportSnapshot() == exported)
+
+        // A document that predates the secondary shortcut says nothing about
+        // it and therefore keeps the default
+        var object = try #require(
+            JSONSerialization.jsonObject(
+                with: JSONEncoder().encode(exported)
+            ) as? [String: Any]
+        )
+        object.removeValue(forKey: "voiceSecondaryShortcut")
+        object.removeValue(forKey: "voiceSecondaryShortcutDisabled")
+        let legacyData = try JSONSerialization.data(withJSONObject: object)
+        try dest.applyImport(legacyData, hasCloudCredential: false)
+        #expect(dest.voiceSecondaryShortcut == .rightCommand)
+        try dest.applyImport(exported, hasCloudCredential: false)
+        #expect(dest.voiceSecondaryShortcut == nil)
+
+        // Only restoring defaults returns to the default pair
+        dest.restoreDefaults()
+        #expect(dest.voiceSecondaryShortcut == .rightCommand)
+    }
 }

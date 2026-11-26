@@ -218,10 +218,10 @@ extension PrivacyCenterWindowController {
             )
             return
         }
-        guard shortcut != settings.voiceShortcut else {
+        guard !settings.voiceShortcuts.contains(shortcut) else {
             voiceTranslateShortcutCaptureButton.showValidationFailure()
             voiceTranslateShortcutStatusLabel.stringValue =
-                "不能与语音听写快捷键（\(settings.voiceShortcut.displayName)）相同"
+                "不能与语音听写快捷键（\(shortcut.displayName)）相同"
             voiceTranslateShortcutStatusLabel.textColor = .systemRed
             updateSettingsActionStatus(
                 .failure,
@@ -394,6 +394,87 @@ extension PrivacyCenterWindowController {
                 + (shortcut.isModifierTap ? "（按一下开始，再按一下结束）" : "")
         )
         refreshVoiceShortcutStatus()
+    }
+
+    func captureVoiceSecondaryShortcut(
+        keyCode: UInt16,
+        modifierFlags: NSEvent.ModifierFlags
+    ) {
+        guard let shortcut = VoiceHotKeyManager.makeShortcut(
+            keyCode: keyCode,
+            modifierFlags: modifierFlags
+        ) else {
+            voiceSecondaryShortcutCaptureButton.showValidationFailure()
+            let previousName = settings.voiceSecondaryShortcut?.displayName ?? "未设置"
+            voiceSecondaryShortcutStatusLabel.stringValue =
+                "组合不可用；原备用快捷键（\(previousName)）仍已保留"
+            voiceSecondaryShortcutStatusLabel.textColor = .systemRed
+            updateSettingsActionStatus(
+                .failure,
+                "备用快捷键未更改："
+                    + VoiceDictationShortcut.validationFailureDescription
+            )
+            return
+        }
+        guard shortcut != settings.voiceShortcut else {
+            voiceSecondaryShortcutCaptureButton.showValidationFailure()
+            voiceSecondaryShortcutStatusLabel.stringValue =
+                "不能与主语音听写快捷键（\(settings.voiceShortcut.displayName)）相同"
+            voiceSecondaryShortcutStatusLabel.textColor = .systemRed
+            updateSettingsActionStatus(
+                .failure,
+                "备用快捷键不能与主语音听写快捷键重复"
+            )
+            return
+        }
+        settings.voiceSecondaryShortcut = shortcut
+        VoiceGlobalHotKeyService.shared.resetModifierTapDetectors()
+        voiceSecondaryShortcutCaptureButton.finishCapture(
+            displayName: shortcut.displayName
+        )
+        voiceSecondaryShortcutCancelButton.isEnabled = false
+        updateSettingsActionStatus(
+            .success,
+            "备用语音快捷键已更改为 \(shortcut.displayName)"
+                + (shortcut.isModifierTap ? "（按一下开始，再按一下结束）" : "")
+        )
+        refreshVoiceSecondaryShortcutStatus()
+    }
+
+    @objc func cancelVoiceSecondaryShortcutEdit(_ sender: Any?) {
+        voiceSecondaryShortcutCaptureButton.cancelCapture()
+        voiceSecondaryShortcutCancelButton.isEnabled = false
+        refreshVoiceSecondaryShortcutStatus()
+    }
+
+    @objc func usePresetSecondaryVoiceShortcut(_ sender: Any?) {
+        let preset: VoiceDictationShortcut =
+            settings.voiceShortcut == .rightCommand
+            ? .function
+            : .rightCommand
+        settings.voiceSecondaryShortcut = preset
+        VoiceGlobalHotKeyService.shared.resetModifierTapDetectors()
+        voiceSecondaryShortcutCaptureButton.finishCapture(
+            displayName: preset.displayName
+        )
+        voiceSecondaryShortcutCancelButton.isEnabled = false
+        updateSettingsActionStatus(
+            .success,
+            "备用语音快捷键已设为 \(preset.displayName)（按一下开始，再按一下结束）"
+        )
+        refreshVoiceSecondaryShortcutStatus()
+    }
+
+    @objc func clearSecondaryVoiceShortcut(_ sender: Any?) {
+        settings.voiceSecondaryShortcut = nil
+        VoiceGlobalHotKeyService.shared.resetModifierTapDetectors()
+        voiceSecondaryShortcutCaptureButton.finishCapture(displayName: nil)
+        voiceSecondaryShortcutCancelButton.isEnabled = false
+        updateSettingsActionStatus(
+            .success,
+            "已清除备用语音快捷键"
+        )
+        refreshVoiceSecondaryShortcutStatus()
     }
 
     @objc func openMicrophonePrivacy(_ sender: Any?) {

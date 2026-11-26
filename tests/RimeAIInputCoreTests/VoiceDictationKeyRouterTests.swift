@@ -559,6 +559,52 @@ struct VoiceDictationKeyRouterTests {
         #expect(!feed(63, [], 26.0))
     }
 
+    @Test("dual modifier-tap shortcuts (Fn + Right Command) trigger independently without cross-firing")
+    func dualModifierTapDetectorsForFnAndRightCommand() {
+        let primary = VoiceDictationShortcut.function
+        let secondary = VoiceDictationShortcut.rightCommand
+        #expect(VoiceDictationShortcut.displaySummary([primary]) == "Fn")
+        #expect(VoiceDictationShortcut.displaySummary([primary, secondary]) == "Fn / 右 ⌘")
+
+        var primaryDetector = VoiceModifierTapDetector()
+        var secondaryDetector = VoiceModifierTapDetector()
+
+        func feed(
+            _ keyCode: UInt16,
+            _ modifiers: VoiceDictationKeyModifiers,
+            _ timestamp: TimeInterval
+        ) -> (primary: Bool, secondary: Bool) {
+            (
+                primaryDetector.handleFlagsChanged(
+                    keyCode: keyCode,
+                    modifiers: modifiers,
+                    timestamp: timestamp,
+                    shortcut: primary
+                ),
+                secondaryDetector.handleFlagsChanged(
+                    keyCode: keyCode,
+                    modifiers: modifiers,
+                    timestamp: timestamp,
+                    shortcut: secondary
+                )
+            )
+        }
+
+        // Clean Fn tap triggers only primary
+        #expect(feed(63, [.function], 30.0) == (false, false))
+        #expect(feed(63, [], 30.10) == (true, false))
+
+        // Clean Right Command tap triggers only secondary
+        #expect(feed(54, [.command], 31.0) == (false, false))
+        #expect(feed(54, [], 31.12) == (false, true))
+
+        // Pressing Fn + Right Command together cancels both detectors
+        #expect(feed(63, [.function], 32.0) == (false, false))
+        #expect(feed(54, [.function, .command], 32.05) == (false, false))
+        #expect(feed(54, [.function], 32.10) == (false, false))
+        #expect(feed(63, [], 32.15) == (false, false))
+    }
+
     // MARK: - Commit raw text while a cloud transform is still running
 
     @Test(arguments: [UInt16(49), 36, 76])

@@ -67,6 +67,16 @@ extension PrivacyCenterWindowController {
                 self?.refreshVoiceShortcutStatus()
             }
         }
+        voiceSecondaryShortcutStatusObserver = NotificationCenter.default
+            .addObserver(
+                forName: .rimeAIVoiceSecondaryHotKeyRegistrationDidChange,
+                object: VoiceHotKeyManager.shared,
+                queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.refreshVoiceSecondaryShortcutStatus()
+                }
+            }
         voiceTranslateShortcutStatusObserver = NotificationCenter.default
             .addObserver(
                 forName: .rimeAIVoiceTranslateHotKeyRegistrationDidChange,
@@ -177,16 +187,15 @@ extension PrivacyCenterWindowController {
         voiceToggle.state = settings.voiceEnabled ? .on : .off
         voiceToggle.isEnabled = settings.aiEnabled
             && !lifecycleCoordinator.isReconciling
-        let voiceShortcut = settings.voiceShortcut
+        let voiceShortcuts = settings.voiceShortcuts
         // 只陈述可验证的事实：输入法侧无法确认 helper 当前使用的识别引擎，
         // 不再宣称 “Qwen3-ASR MLX 实时流式”。
         voiceInstructionLabel.stringValue = VoicePrivacyCopy.dictationInstruction(
-            shortcutName: voiceShortcut.displayName,
-            isModifierTap: voiceShortcut.isModifierTap
+            shortcuts: voiceShortcuts
         )
-        voiceToggle.title = voiceShortcut.isModifierTap
-            ? "启用语音输入（按一下 \(voiceShortcut.displayName) 启动/结束）"
-            : "启用按住说话（\(voiceShortcut.displayName)）"
+        voiceToggle.title = VoicePrivacyCopy.voiceToggleTitle(
+            shortcuts: voiceShortcuts
+        )
         voiceDisabledBannerLabel.isHidden = settings.voiceEnabled
     }
 
@@ -196,6 +205,16 @@ extension PrivacyCenterWindowController {
         voiceShortcutCancelButton.isEnabled =
             voiceShortcutCaptureButton.isCapturing
         refreshVoiceShortcutStatus()
+
+        let secondaryShortcut = settings.voiceSecondaryShortcut
+        voiceSecondaryShortcutCaptureButton.showShortcut(
+            secondaryShortcut?.displayName
+        )
+        voiceSecondaryShortcutCancelButton.isEnabled =
+            voiceSecondaryShortcutCaptureButton.isCapturing
+        voiceSecondaryShortcutPresetButton.title =
+            voiceShortcut == .rightCommand ? "设为 Fn" : "设为右 ⌘"
+        refreshVoiceSecondaryShortcutStatus()
     }
 
     private func refreshVoiceTranslationControls() {
@@ -287,6 +306,10 @@ extension PrivacyCenterWindowController {
         let voiceOn = settings.aiEnabled && settings.voiceEnabled
         let notStrict = settings.contextPolicy != .strict
         voiceShortcutCaptureButton.isEnabled = voiceOn
+        voiceSecondaryShortcutCaptureButton.isEnabled = voiceOn
+        voiceSecondaryShortcutPresetButton.isEnabled = voiceOn
+        voiceSecondaryShortcutClearButton.isEnabled = voiceOn
+            && settings.voiceSecondaryShortcut != nil
         voiceTranslateShortcutCaptureButton.isEnabled = voiceOn
         voiceTranslateLanguagePopup.isEnabled = voiceOn
         voiceSmartPolishToggle.isEnabled = voiceOn
@@ -598,6 +621,80 @@ extension PrivacyCenterWindowController {
         )
     }
 
+    func refreshVoiceSecondaryShortcutStatus() {
+        guard !voiceSecondaryShortcutCaptureButton.isCapturing else {
+            return
+        }
+        let message: String
+        let color: NSColor
+        guard let configured = settings.voiceSecondaryShortcut else {
+            message =
+                "未绑定备用快捷键；可再绑定一个键（例如内置键盘用 Fn、外接键盘用 右 ⌘），两者均可随时触发听写"
+            color = .secondaryLabelColor
+            if voiceSecondaryShortcutStatusLabel.stringValue != message
+                || voiceSecondaryShortcutStatusLabel.textColor != color
+            {
+                voiceSecondaryShortcutStatusLabel.stringValue = message
+                voiceSecondaryShortcutStatusLabel.textColor = color
+                voiceSecondaryShortcutStatusLabel.setAccessibilityValue(message)
+                NSAccessibility.post(
+                    element: voiceSecondaryShortcutStatusLabel,
+                    notification: .valueChanged
+                )
+            }
+            return
+        }
+        switch VoiceHotKeyManager.shared.secondaryRegistrationStatus {
+        case .inactive:
+            if settings.aiEnabled, settings.voiceEnabled {
+                message =
+                    "已保存 \(configured.displayName)；"
+                    + "将在非安全输入状态下全局注册（任意应用与输入法可用）"
+            } else {
+                message =
+                    "已保存 \(configured.displayName)；语音启用后将全局注册"
+            }
+            color = .secondaryLabelColor
+        case let .registered(shortcut):
+            if shortcut == configured {
+                let globeHint = shortcut == .function
+                    ? "；如系统触发输入法切换或表情，请在系统设置 → 键盘将「按下 🌐 键以」设为无操作"
+                    : ""
+                message = "已全局注册 \(shortcut.displayName)（任意应用与输入法均可触发\(globeHint)）"
+                color = .systemGreen
+            } else {
+                message =
+                    "正在从 \(shortcut.displayName) 切换到 "
+                    + configured.displayName
+                color = .systemOrange
+            }
+        case let .failed(shortcut, kind, code, registrationMessage):
+            let failureKind = kind == .conflict ? "快捷键冲突" : "系统注册失败"
+            message =
+                "\(failureKind)：\(registrationMessage)"
+                + "（\(shortcut.displayName)，OSStatus \(code)）"
+            color = .systemRed
+            if shortcut == configured {
+                updateSettingsActionStatus(
+                    .failure,
+                    "备用快捷键 \(configured.displayName) 已保存，但当前无法注册；请更换快捷键"
+                )
+            }
+        }
+        guard voiceSecondaryShortcutStatusLabel.stringValue != message
+                || voiceSecondaryShortcutStatusLabel.textColor != color
+        else {
+            return
+        }
+        voiceSecondaryShortcutStatusLabel.stringValue = message
+        voiceSecondaryShortcutStatusLabel.textColor = color
+        voiceSecondaryShortcutStatusLabel.setAccessibilityValue(message)
+        NSAccessibility.post(
+            element: voiceSecondaryShortcutStatusLabel,
+            notification: .valueChanged
+        )
+    }
+
     func refreshVoiceTranslateShortcutStatus() {
         guard !voiceTranslateShortcutCaptureButton.isCapturing else {
             return
@@ -605,7 +702,7 @@ extension PrivacyCenterWindowController {
         let configured = settings.voiceTranslateShortcut
         let message: String
         let color: NSColor
-        if configured == settings.voiceShortcut {
+        if settings.voiceShortcuts.contains(configured) {
             message = "与语音听写快捷键相同，请更换为不同组合以启用一键翻译"
             color = .systemOrange
         } else {

@@ -169,8 +169,7 @@ extension RimeAIInputController {
         let voiceDecision = VoiceDictationKeyRouter.decision(
             keyCode: event.keyCode,
             isExactVoiceShortcut: isVoiceShortcut(event),
-            shortcutRegistered: voiceHotKeyIsRegistered
-                || voiceTranslateHotKeyIsRegistered,
+            shortcutRegistered: isRegisteredVoiceShortcut(event),
             hasActiveSession: voiceRuntime.isActive(owner: self),
             pendingConfirmation: voiceRuntime.isPendingConfirmation(owner: self),
             isTransforming: voiceRuntime.isTransforming,

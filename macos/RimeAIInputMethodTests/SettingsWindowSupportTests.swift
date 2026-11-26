@@ -276,6 +276,29 @@ final class SettingsWindowSupportTests: XCTestCase {
         XCTAssertEqual(button.accessibilityValue() as? String, "⌃⇧V")
     }
 
+    func testShortcutCaptureButtonShowsAndRestoresEmptySecondaryShortcut() {
+        let button = SettingsShortcutCaptureButton()
+
+        button.showShortcut(nil)
+        XCTAssertEqual(button.title, "添加备用快捷键…")
+        XCTAssertEqual(button.accessibilityValue() as? String, "未设置")
+
+        button.beginCapture()
+        button.cancelCapture()
+        XCTAssertFalse(button.isCapturing)
+        XCTAssertEqual(button.title, "添加备用快捷键…")
+        XCTAssertEqual(button.accessibilityValue() as? String, "未设置")
+
+        button.beginCapture()
+        button.finishCapture(displayName: "右 ⌘")
+        XCTAssertEqual(button.title, "更改…（当前 右 ⌘）")
+        XCTAssertEqual(button.accessibilityValue() as? String, "右 ⌘")
+
+        button.finishCapture(displayName: nil)
+        XCTAssertEqual(button.title, "添加备用快捷键…")
+        XCTAssertEqual(button.accessibilityValue() as? String, "未设置")
+    }
+
     func testSettingsDocumentRejectsFilesLargerThanTheStoreLimit() {
         let oversized = Data(
             repeating: 0,

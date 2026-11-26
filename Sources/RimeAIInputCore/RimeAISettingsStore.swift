@@ -105,6 +105,8 @@ public struct RimeAISettingsExport: Codable, Equatable, Sendable {
         case cloudModelID
         case voiceEnabled
         case voiceShortcut
+        case voiceSecondaryShortcut
+        case voiceSecondaryShortcutDisabled
         case voiceRimeHotwordsEnabled
         case voicePhraseBookHotwordsEnabled
         case voiceCustomHotwords
@@ -138,6 +140,10 @@ public struct RimeAISettingsExport: Codable, Equatable, Sendable {
     public let cloudModelID: String
     public let voiceEnabled: Bool
     public let voiceShortcut: VoiceDictationShortcut
+    public let voiceSecondaryShortcut: VoiceDictationShortcut?
+    /// 备用听写快捷键是否被用户显式清除。与 `voiceSecondaryShortcut == nil` 同时成立
+    /// 表示「保持未绑定」；两者皆无表示「沿用默认值（右 ⌘）」。
+    public let voiceSecondaryShortcutDisabled: Bool
     public let voiceRimeHotwordsEnabled: Bool
     public let voicePhraseBookHotwordsEnabled: Bool
     public let voiceCustomHotwords: [String]
@@ -177,6 +183,8 @@ public struct RimeAISettingsExport: Codable, Equatable, Sendable {
         cloudModelID: String = RimeAICloudConfiguration.defaultRankingModelID,
         voiceEnabled: Bool = false,
         voiceShortcut: VoiceDictationShortcut = .default,
+        voiceSecondaryShortcut: VoiceDictationShortcut? = nil,
+        voiceSecondaryShortcutDisabled: Bool = false,
         voiceRimeHotwordsEnabled: Bool = false,
         voicePhraseBookHotwordsEnabled: Bool = true,
         voiceCustomHotwords: [String] = [],
@@ -209,6 +217,12 @@ public struct RimeAISettingsExport: Codable, Equatable, Sendable {
         self.cloudModelID = cloudModelID
         self.voiceEnabled = voiceEnabled
         self.voiceShortcut = voiceShortcut
+        self.voiceSecondaryShortcut =
+            voiceSecondaryShortcut == voiceShortcut
+            ? nil
+            : voiceSecondaryShortcut
+        self.voiceSecondaryShortcutDisabled =
+            self.voiceSecondaryShortcut == nil && voiceSecondaryShortcutDisabled
         self.voiceRimeHotwordsEnabled = voiceRimeHotwordsEnabled
         self.voicePhraseBookHotwordsEnabled = voicePhraseBookHotwordsEnabled
         self.voiceCustomHotwords = voiceCustomHotwords
@@ -276,6 +290,20 @@ public struct RimeAISettingsExport: Codable, Equatable, Sendable {
                 forKey: .voiceShortcut
             )
         }
+        let decodedSecondaryShortcut = try container.decodeIfPresent(
+            VoiceDictationShortcut.self,
+            forKey: .voiceSecondaryShortcut
+        )
+        voiceSecondaryShortcut = decodedSecondaryShortcut == voiceShortcut
+            ? nil
+            : decodedSecondaryShortcut
+        // 旧版本文档没有该字段：视为「沿用默认值」。
+        let decodedSecondaryDisabled = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .voiceSecondaryShortcutDisabled
+        ) ?? false
+        voiceSecondaryShortcutDisabled =
+            voiceSecondaryShortcut == nil && decodedSecondaryDisabled
         voiceRimeHotwordsEnabled = try container.decode(
             Bool.self,
             forKey: .voiceRimeHotwordsEnabled
@@ -432,6 +460,10 @@ public final class RimeAISettingsStore: @unchecked Sendable {
         public static let cloudModelID = "RimeAICloudModelID"
         public static let voiceEnabled = "RimeAIVoiceEnabled"
         public static let voiceShortcut = "RimeAIVoiceShortcut"
+        public static let voiceSecondaryShortcut =
+            "RimeAIVoiceSecondaryShortcut"
+        public static let voiceSecondaryShortcutDisabled =
+            "RimeAIVoiceSecondaryShortcutDisabled"
         public static let voiceRimeHotwordsEnabled =
             "RimeAIVoiceRimeHotwordsEnabled"
         public static let voicePhraseBookHotwordsEnabled =
@@ -647,8 +679,80 @@ public final class RimeAISettingsStore: @unchecked Sendable {
                 return
             }
             defaults.set(data, forKey: Keys.voiceShortcut)
+            if let secondaryData = defaults.data(
+                forKey: Keys.voiceSecondaryShortcut
+            ),
+               let storedSecondary = try? JSONDecoder().decode(
+                   VoiceDictationShortcut.self,
+                   from: secondaryData
+               ),
+               storedSecondary == newValue
+            {
+                // 已绑定的备用键与新主快捷键重复：保持「未绑定」，
+                // 不回落到默认的右 ⌘。
+                defaults.removeObject(forKey: Keys.voiceSecondaryShortcut)
+                defaults.set(true, forKey: Keys.voiceSecondaryShortcutDisabled)
+            }
             notifySettingsChanged()
         }
+    }
+
+    /// 可选的第二（备用）语音听写快捷键（例如 Mac 内置键盘用 Fn、外接键盘用右 ⌘）。
+    ///
+    /// 三种状态：
+    /// - 从未设置：返回默认值 `VoiceDictationShortcut.defaultSecondary`（右 ⌘）；
+    /// - 用户已清除：返回 nil，直到重新绑定或恢复默认；
+    /// - 已绑定：返回该快捷键。
+    /// 任何状态下与主快捷键重复都视为未绑定（返回 nil）。
+    public var voiceSecondaryShortcut: VoiceDictationShortcut? {
+        get {
+            if let data = defaults.data(forKey: Keys.voiceSecondaryShortcut),
+               let shortcut = try? JSONDecoder().decode(
+                   VoiceDictationShortcut.self,
+                   from: data
+               )
+            {
+                return shortcut == voiceShortcut ? nil : shortcut
+            }
+            if isVoiceSecondaryShortcutDisabled {
+                return nil
+            }
+            let defaultShortcut = VoiceDictationShortcut.defaultSecondary
+            return defaultShortcut == voiceShortcut ? nil : defaultShortcut
+        }
+        set {
+            guard let newValue else {
+                // 显式清除：记录「已停用」，避免回落到默认的右 ⌘。
+                defaults.removeObject(forKey: Keys.voiceSecondaryShortcut)
+                defaults.set(true, forKey: Keys.voiceSecondaryShortcutDisabled)
+                notifySettingsChanged()
+                return
+            }
+            guard newValue != voiceShortcut else {
+                // 与主快捷键重复的绑定请求被忽略，现有配置保持不变。
+                return
+            }
+            guard let data = try? JSONEncoder().encode(newValue) else {
+                assertionFailure("Voice secondary shortcut encoding must not fail.")
+                return
+            }
+            defaults.set(data, forKey: Keys.voiceSecondaryShortcut)
+            defaults.removeObject(forKey: Keys.voiceSecondaryShortcutDisabled)
+            notifySettingsChanged()
+        }
+    }
+
+    /// 备用听写快捷键是否被用户显式清除（区别于「从未设置 → 沿用默认值」）。
+    private var isVoiceSecondaryShortcutDisabled: Bool {
+        defaults.bool(forKey: Keys.voiceSecondaryShortcutDisabled)
+    }
+
+    /// 所有生效的语音听写快捷键（主快捷键在前，若已绑定不重复的备用快捷键则追加其后）。
+    public var voiceShortcuts: [VoiceDictationShortcut] {
+        if let secondary = voiceSecondaryShortcut, secondary != voiceShortcut {
+            return [voiceShortcut, secondary]
+        }
+        return [voiceShortcut]
     }
 
     /// 独立于语音总开关的明示策略。开启后只允许使用当前焦点会话中用户
@@ -1354,6 +1458,8 @@ extension RimeAISettingsStore {
             Keys.cloudModelID,
             Keys.voiceEnabled,
             Keys.voiceShortcut,
+            Keys.voiceSecondaryShortcut,
+            Keys.voiceSecondaryShortcutDisabled,
             Keys.voiceRimeHotwordsEnabled,
             Keys.voicePhraseBookHotwordsEnabled,
             Keys.voiceCustomHotwords,
@@ -1395,6 +1501,8 @@ extension RimeAISettingsStore {
             Keys.cloudModelID,
             Keys.voiceEnabled,
             Keys.voiceShortcut,
+            Keys.voiceSecondaryShortcut,
+            Keys.voiceSecondaryShortcutDisabled,
             Keys.voiceRimeHotwordsEnabled,
             Keys.voicePhraseBookHotwordsEnabled,
             Keys.voiceAutoLearnCorrectionsEnabled,
@@ -1427,6 +1535,9 @@ extension RimeAISettingsStore {
             cloudModelID: cloudModelID,
             voiceEnabled: voiceEnabled,
             voiceShortcut: voiceShortcut,
+            voiceSecondaryShortcut: voiceSecondaryShortcut,
+            voiceSecondaryShortcutDisabled:
+                voiceSecondaryShortcut == nil && isVoiceSecondaryShortcutDisabled,
             voiceRimeHotwordsEnabled: voiceRimeHotwordsEnabled,
             voicePhraseBookHotwordsEnabled: voicePhraseBookHotwordsEnabled,
             voiceCustomHotwords: voiceCustomHotwords,
@@ -1518,6 +1629,13 @@ extension RimeAISettingsStore {
             throw RimeAISettingsImportError.applicationPolicyLimitExceeded
         }
         let encodedShortcut = try JSONEncoder().encode(snapshot.voiceShortcut)
+        let normalizedSecondary =
+            snapshot.voiceSecondaryShortcut == snapshot.voiceShortcut
+            ? nil
+            : snapshot.voiceSecondaryShortcut
+        let encodedSecondaryShortcut = try normalizedSecondary.map {
+            try JSONEncoder().encode($0)
+        }
         let encodedTranslateShortcut = try JSONEncoder().encode(
             snapshot.voiceTranslateShortcut
         )
@@ -1543,6 +1661,22 @@ extension RimeAISettingsStore {
             encodedShortcut,
             forKey: Keys.voiceShortcut
         )
+        if let encodedSecondaryShortcut {
+            defaults.set(
+                encodedSecondaryShortcut,
+                forKey: Keys.voiceSecondaryShortcut
+            )
+            defaults.set(false, forKey: Keys.voiceSecondaryShortcutDisabled)
+        } else {
+            defaults.removeObject(forKey: Keys.voiceSecondaryShortcut)
+            if snapshot.voiceSecondaryShortcutDisabled {
+                // 导出时已明确清除：保持未绑定，不回落到默认的右 ⌘。
+                defaults.set(true, forKey: Keys.voiceSecondaryShortcutDisabled)
+            } else {
+                // 导出未提及备用键（旧版本文档或沿用默认值）：继续沿用默认值。
+                defaults.removeObject(forKey: Keys.voiceSecondaryShortcutDisabled)
+            }
+        }
         defaults.set(
             snapshot.voiceRimeHotwordsEnabled,
             forKey: Keys.voiceRimeHotwordsEnabled

@@ -58,7 +58,8 @@ final class SettingsShortcutCaptureButton: NSButton {
     var onCaptureStateChanged: ((Bool) -> Void)?
 
     private(set) var isCapturing = false
-    private var currentDisplayName = ""
+    private var currentDisplayName: String?
+    private var emptyShortcutTitle = "添加备用快捷键…"
     private var eventMonitor: Any?
     private var showsValidationError = false
     private var errorResetWorkItem: DispatchWorkItem?
@@ -95,13 +96,22 @@ final class SettingsShortcutCaptureButton: NSButton {
         fatalError("init(coder:) has not been implemented")
     }
 
-    func showShortcut(_ displayName: String) {
+    func showShortcut(
+        _ displayName: String?,
+        emptyTitle: String = "添加备用快捷键…"
+    ) {
         currentDisplayName = displayName
+        emptyShortcutTitle = emptyTitle
         guard !isCapturing else {
             return
         }
-        title = "更改…（当前 \(displayName)）"
-        setAccessibilityValue(displayName)
+        if let displayName, !displayName.isEmpty {
+            title = "更改…（当前 \(displayName)）"
+            setAccessibilityValue(displayName)
+        } else {
+            title = emptyTitle
+            setAccessibilityValue("未设置")
+        }
     }
 
     func beginCapture() {
@@ -129,11 +139,11 @@ final class SettingsShortcutCaptureButton: NSButton {
         flashValidationError()
     }
 
-    func finishCapture(displayName: String) {
+    func finishCapture(displayName: String?) {
         removeEventMonitor()
         isCapturing = false
         clearValidationError()
-        showShortcut(displayName)
+        showShortcut(displayName, emptyTitle: emptyShortcutTitle)
         onCaptureStateChanged?(false)
         NSAccessibility.post(element: self, notification: .valueChanged)
     }
@@ -145,7 +155,7 @@ final class SettingsShortcutCaptureButton: NSButton {
         removeEventMonitor()
         isCapturing = false
         clearValidationError()
-        showShortcut(currentDisplayName)
+        showShortcut(currentDisplayName, emptyTitle: emptyShortcutTitle)
         onCaptureStateChanged?(false)
         onCancel?()
         NSAccessibility.post(element: self, notification: .valueChanged)

@@ -39,6 +39,168 @@ final class VoiceIntegrationSmokeTests: XCTestCase {
         manager.deactivate(owner: owner)
     }
 
+    func testSecondaryModifierTapActivatesAlongsidePrimaryWithoutCarbonRegistration() throws {
+        var registerCount = 0
+        let registrar = VoiceHotKeyRegistrar(
+            register: { _ in
+                registerCount += 1
+                return .init(status: noErr, reference: nil)
+            },
+            unregister: { _ in noErr }
+        )
+        let manager = VoiceHotKeyManager(testingRegistrar: registrar)
+        let owner = NSObject()
+
+        try manager.activate(
+            owner: owner,
+            shortcut: .function,
+            onPressed: {},
+            onReleased: {},
+            onSecureInputDetected: {}
+        )
+        try manager.activateSecondary(
+            owner: owner,
+            shortcut: .rightCommand,
+            onPressed: {},
+            onReleased: {}
+        )
+
+        XCTAssertEqual(registerCount, 0)
+        XCTAssertEqual(manager.registrationStatus, .registered(.function))
+        XCTAssertEqual(
+            manager.secondaryRegistrationStatus,
+            .registered(.rightCommand)
+        )
+        manager.deactivate(owner: owner)
+        XCTAssertEqual(manager.registrationStatus, .inactive)
+        XCTAssertEqual(manager.secondaryRegistrationStatus, .inactive)
+    }
+
+    func testSecondaryCarbonHotKeyRegistersWithDistinctSignatureAndRoutesIndependently()
+        throws
+    {
+        let primaryRef = try XCTUnwrap(EventHotKeyRef(bitPattern: 31))
+        let secondaryRef = try XCTUnwrap(EventHotKeyRef(bitPattern: 32))
+        let secondaryShortcut = try XCTUnwrap(VoiceDictationShortcut(
+            keyCode: 0,
+            modifiers: [.option, .shift]
+        ))
+        var requests: [VoiceHotKeyRegistrar.Request] = []
+        var unregistered: [EventHotKeyRef] = []
+        let registrar = VoiceHotKeyRegistrar(
+            register: { request in
+                requests.append(request)
+                let ref = request.identifier.signature
+                    == VoiceHotKeyManager.secondaryEventSignature
+                    ? secondaryRef
+                    : primaryRef
+                return .init(status: noErr, reference: ref)
+            },
+            unregister: { ref in
+                unregistered.append(ref)
+                return noErr
+            }
+        )
+        let manager = VoiceHotKeyManager(testingRegistrar: registrar)
+        let owner = NSObject()
+        var primaryPressed = 0
+        var secondaryPressed = 0
+        var secondaryReleased = 0
+
+        try manager.activate(
+            owner: owner,
+            shortcut: carbonDictationShortcut,
+            onPressed: { primaryPressed += 1 },
+            onReleased: {},
+            onSecureInputDetected: {}
+        )
+        try manager.activateSecondary(
+            owner: owner,
+            shortcut: secondaryShortcut,
+            onPressed: { secondaryPressed += 1 },
+            onReleased: { secondaryReleased += 1 }
+        )
+
+        XCTAssertEqual(requests.count, 2)
+        XCTAssertEqual(
+            requests.last?.identifier.signature,
+            VoiceHotKeyManager.secondaryEventSignature
+        )
+        XCTAssertEqual(
+            manager.secondaryRegistrationStatus,
+            .registered(secondaryShortcut)
+        )
+        let secondaryID = try XCTUnwrap(requests.last).identifier.id
+        manager.handleSecondaryFromCarbon(
+            eventKind: UInt32(kEventHotKeyPressed),
+            registrationID: secondaryID
+        )
+        manager.handleSecondaryFromCarbon(
+            eventKind: UInt32(kEventHotKeyReleased),
+            registrationID: secondaryID
+        )
+
+        XCTAssertEqual(primaryPressed, 0)
+        XCTAssertEqual(secondaryPressed, 1)
+        XCTAssertEqual(secondaryReleased, 1)
+
+        manager.deactivate(owner: owner)
+        XCTAssertTrue(unregistered.contains(primaryRef))
+        XCTAssertTrue(unregistered.contains(secondaryRef))
+        XCTAssertEqual(manager.secondaryRegistrationStatus, .inactive)
+    }
+
+    func testSecondaryConflictLeavesPrimaryRegisteredAndReportsFailure() throws {
+        let primaryRef = try XCTUnwrap(EventHotKeyRef(bitPattern: 41))
+        let secondaryShortcut = try XCTUnwrap(VoiceDictationShortcut(
+            keyCode: 0,
+            modifiers: [.option, .shift]
+        ))
+        let registrar = VoiceHotKeyRegistrar(
+            register: { request in
+                if request.identifier.signature
+                    == VoiceHotKeyManager.secondaryEventSignature
+                {
+                    return .init(
+                        status: OSStatus(eventHotKeyExistsErr),
+                        reference: nil
+                    )
+                }
+                return .init(status: noErr, reference: primaryRef)
+            },
+            unregister: { _ in noErr }
+        )
+        let manager = VoiceHotKeyManager(testingRegistrar: registrar)
+        let owner = NSObject()
+
+        try manager.activate(
+            owner: owner,
+            shortcut: carbonDictationShortcut,
+            onPressed: {},
+            onReleased: {},
+            onSecureInputDetected: {}
+        )
+        XCTAssertThrowsError(try manager.activateSecondary(
+            owner: owner,
+            shortcut: secondaryShortcut,
+            onPressed: {},
+            onReleased: {}
+        ))
+        XCTAssertEqual(
+            manager.registrationStatus,
+            .registered(carbonDictationShortcut)
+        )
+        guard case let .failed(shortcut, kind, code, _) =
+            manager.secondaryRegistrationStatus
+        else {
+            return XCTFail("Expected conflict status for secondary shortcut.")
+        }
+        XCTAssertEqual(shortcut, secondaryShortcut)
+        XCTAssertEqual(kind, .conflict)
+        XCTAssertEqual(code, OSStatus(eventHotKeyExistsErr))
+        manager.deactivate(owner: owner)
+    }
+
     func testHotKeyRegistrationRequestsExclusiveCarbonOwnership() throws {
         let reference = try XCTUnwrap(EventHotKeyRef(bitPattern: 1))
         var requests: [VoiceHotKeyRegistrar.Request] = []

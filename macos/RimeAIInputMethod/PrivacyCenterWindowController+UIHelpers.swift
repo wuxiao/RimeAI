@@ -228,6 +228,56 @@ enum VoicePrivacyCopy {
             + "（可关闭或清空），麦克风权限由 RimeAI Voice Helper 持有。"
     }
 
+    /// 支持同时绑定主/备用两个语音快捷键时的说明文案。
+    static func dictationInstruction(
+        shortcuts: [VoiceDictationShortcut]
+    ) -> String {
+        guard !shortcuts.isEmpty else {
+            return dictationInstruction(
+                shortcutName: VoiceDictationShortcut.default.displayName,
+                isModifierTap: VoiceDictationShortcut.default.isModifierTap
+            )
+        }
+        if shortcuts.count == 1, let only = shortcuts.first {
+            return dictationInstruction(
+                shortcutName: only.displayName,
+                isModifierTap: only.isModifierTap
+            )
+        }
+        let tapShortcuts = shortcuts.filter(\.isModifierTap)
+        let holdShortcuts = shortcuts.filter { !$0.isModifierTap }
+        let trigger: String
+        if holdShortcuts.isEmpty {
+            let names = tapShortcuts.map(\.displayName).joined(separator: " 或 ")
+            trigger = "按一下 \(names) 启动录音，再按一下结束并等待最终文本；"
+        } else if tapShortcuts.isEmpty {
+            let names = holdShortcuts.map(\.displayName).joined(separator: " 或 ")
+            trigger = "按住 \(names) 录音，松开后等待最终文本；"
+        } else {
+            let tapNames = tapShortcuts.map(\.displayName).joined(separator: " / ")
+            let holdNames = holdShortcuts.map(\.displayName).joined(separator: " / ")
+            trigger = "按一下 \(tapNames) 启动/结束录音，或按住 \(holdNames) 录音松开后等待最终文本；"
+        }
+        return trigger
+            + "Space 或回车确认上屏，Esc 取消。音频只在独立的本地 helper "
+            + "进程内存中离线识别，不写入录音；识别文本默认保存在本机语音历史"
+            + "（可关闭或清空），麦克风权限由 RimeAI Voice Helper 持有。"
+    }
+
+    static func voiceToggleTitle(
+        shortcuts: [VoiceDictationShortcut]
+    ) -> String {
+        let effective = shortcuts.isEmpty ? [VoiceDictationShortcut.default] : shortcuts
+        let summary = VoiceDictationShortcut.displaySummary(effective)
+        if effective.allSatisfy(\.isModifierTap) {
+            return "启用语音输入（按一下 \(summary) 启动/结束）"
+        }
+        if effective.allSatisfy({ !$0.isModifierTap }) {
+            return "启用按住说话（\(summary)）"
+        }
+        return "启用语音输入（\(summary)）"
+    }
+
     static let voiceDisabledBanner = "语音输入未启用：启用后以下选项才会生效。"
     static let historyCheckbox =
         "在本机保存语音听写与翻译历史（本地数据库，默认开启，不上传；可在「语音历史」页检索、复制或清空）"

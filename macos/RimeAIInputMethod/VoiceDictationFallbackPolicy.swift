@@ -310,19 +310,41 @@ enum VoicePanelFormatting {
     }
 }
 
-// MARK: - 翻译热键注册计划
+// MARK: - 备用听写与翻译热键注册计划
 
-/// 纯逻辑：一键翻译快捷键是否需要独立注册。与听写快捷键相同（含同为
-/// 右 ⌘ 点按）时不单独注册，由听写热键统一处理。
+/// 纯逻辑：备用语音听写快捷键是否需要独立注册。未设置或与主听写快捷键相同时不单独注册。
+enum VoiceSecondaryHotKeyPlan: Equatable {
+    case activate(VoiceDictationShortcut)
+    case deactivate
+
+    static func plan(
+        secondaryShortcut: VoiceDictationShortcut?,
+        primaryShortcut: VoiceDictationShortcut
+    ) -> VoiceSecondaryHotKeyPlan {
+        guard let secondaryShortcut, secondaryShortcut != primaryShortcut else {
+            return .deactivate
+        }
+        return .activate(secondaryShortcut)
+    }
+}
+
+/// 纯逻辑：一键翻译快捷键是否需要独立注册。与任一听写快捷键相同（含同为
+/// Fn / 右 ⌘ 点按）时不单独注册，由听写热键统一处理。
 enum VoiceTranslationHotKeyPlan: Equatable {
     case activate
     case deactivate
 
     static func plan(
         translateShortcut: VoiceDictationShortcut,
-        dictationShortcut: VoiceDictationShortcut
+        dictationShortcut: VoiceDictationShortcut,
+        secondaryDictationShortcut: VoiceDictationShortcut? = nil
     ) -> VoiceTranslationHotKeyPlan {
-        translateShortcut != dictationShortcut ? .activate : .deactivate
+        guard translateShortcut != dictationShortcut,
+              translateShortcut != secondaryDictationShortcut
+        else {
+            return .deactivate
+        }
+        return .activate
     }
 }
 

@@ -7,11 +7,46 @@ import InputMethodKit
 extension RimeAIInputController {
     func isVoiceShortcut(_ event: NSEvent) -> Bool {
         let modifiers = voiceKeyModifiers(event.modifierFlags)
-        if VoiceDictationKeyRouter.isExactVoiceShortcut(
-            keyCode: event.keyCode,
-            modifiers: modifiers,
-            shortcut: settings.voiceShortcut
-        ) {
+        if settings.voiceShortcuts.contains(where: {
+            VoiceDictationKeyRouter.isExactVoiceShortcut(
+                keyCode: event.keyCode,
+                modifiers: modifiers,
+                shortcut: $0
+            )
+        }) {
+            return true
+        }
+        if voiceTranslateHotKeyIsRegistered,
+           VoiceDictationKeyRouter.isExactVoiceShortcut(
+               keyCode: event.keyCode,
+               modifiers: modifiers,
+               shortcut: settings.voiceTranslateShortcut
+           )
+        {
+            return true
+        }
+        return false
+    }
+
+    func isRegisteredVoiceShortcut(_ event: NSEvent) -> Bool {
+        let modifiers = voiceKeyModifiers(event.modifierFlags)
+        if voiceHotKeyIsRegistered,
+           VoiceDictationKeyRouter.isExactVoiceShortcut(
+               keyCode: event.keyCode,
+               modifiers: modifiers,
+               shortcut: settings.voiceShortcut
+           )
+        {
+            return true
+        }
+        if voiceSecondaryHotKeyIsRegistered,
+           let secondary = settings.voiceSecondaryShortcut,
+           VoiceDictationKeyRouter.isExactVoiceShortcut(
+               keyCode: event.keyCode,
+               modifiers: modifiers,
+               shortcut: secondary
+           )
+        {
             return true
         }
         if voiceTranslateHotKeyIsRegistered,
@@ -227,7 +262,7 @@ extension RimeAIInputController {
     func releaseModifierTapDictationIfRecording() {
         let runtime = VoiceDictationRuntime.shared
         guard VoiceModifierTapPolicy.shouldReleaseOnDeactivate(
-            isModifierTap: settings.voiceShortcut.isModifierTap,
+            isModifierTap: settings.voiceShortcuts.contains(where: \.isModifierTap),
             phase: runtime.phase
         ) else {
             return
@@ -284,6 +319,11 @@ extension RimeAIInputController {
             voiceHotKeyRegistrationFailed = false
         } else {
             voiceHotKeyIsRegistered = false
+        }
+        if case .registered = VoiceHotKeyManager.shared.secondaryRegistrationStatus {
+            voiceSecondaryHotKeyIsRegistered = true
+        } else {
+            voiceSecondaryHotKeyIsRegistered = false
         }
         if case .registered = VoiceHotKeyManager.shared.translateRegistrationStatus {
             voiceTranslateHotKeyIsRegistered = true
@@ -386,6 +426,7 @@ extension RimeAIInputController {
     func voiceRuntimeDidBecomeUnavailable() {
         VoiceHotKeyManager.shared.deactivate(owner: self)
         voiceHotKeyIsRegistered = false
+        voiceSecondaryHotKeyIsRegistered = false
         voiceTranslateHotKeyIsRegistered = false
     }
 

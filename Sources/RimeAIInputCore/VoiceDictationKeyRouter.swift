@@ -118,6 +118,10 @@ public struct VoiceDictationShortcut: Codable, Equatable, Sendable {
         modifiers: [.command]
     )!
 
+    /// 备用（第二）听写快捷键的出厂默认值：外接键盘用右 ⌘，与主快捷键的默认值 Fn
+    /// 分别对应外接键盘与内置键盘；与当前主快捷键重复时视为未绑定。
+    public static let defaultSecondary = rightCommand
+
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let keyCode = try container.decode(UInt16.self, forKey: .keyCode)
@@ -163,6 +167,12 @@ public struct VoiceDictationShortcut: Codable, Equatable, Sendable {
         }
         result += Self.keyNames[keyCode]!
         return result
+    }
+
+    public static func displaySummary(
+        _ shortcuts: [VoiceDictationShortcut]
+    ) -> String {
+        shortcuts.map(\.displayName).joined(separator: " / ")
     }
 
     public func matches(

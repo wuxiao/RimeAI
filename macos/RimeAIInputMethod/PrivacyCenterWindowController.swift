@@ -89,6 +89,11 @@ final class PrivacyCenterWindowController: NSObject, NSMenuItemValidation {
     let voiceShortcutCaptureButton = SettingsShortcutCaptureButton()
     let voiceShortcutCancelButton = NSButton(title: "取消编辑", target: nil, action: nil)
     let voiceShortcutStatusLabel = NSTextField(labelWithString: "")
+    let voiceSecondaryShortcutCaptureButton = SettingsShortcutCaptureButton()
+    let voiceSecondaryShortcutCancelButton = NSButton(title: "取消编辑", target: nil, action: nil)
+    let voiceSecondaryShortcutPresetButton = NSButton(title: "设为右 ⌘", target: nil, action: nil)
+    let voiceSecondaryShortcutClearButton = NSButton(title: "清除", target: nil, action: nil)
+    let voiceSecondaryShortcutStatusLabel = NSTextField(labelWithString: "")
     let voiceTranslateShortcutCaptureButton = SettingsShortcutCaptureButton()
     let voiceTranslateShortcutCancelButton = NSButton(title: "取消编辑", target: nil, action: nil)
     let voiceTranslateShortcutStatusLabel = NSTextField(labelWithString: "")
@@ -168,6 +173,7 @@ final class PrivacyCenterWindowController: NSObject, NSMenuItemValidation {
     var diagnosticsObserver: NSObjectProtocol?
     var settingsActionStatusObserver: NSObjectProtocol?
     var voiceShortcutStatusObserver: NSObjectProtocol?
+    var voiceSecondaryShortcutStatusObserver: NSObjectProtocol?
     var voiceTranslateShortcutStatusObserver: NSObjectProtocol?
     var voiceHistoryObserver: NSObjectProtocol?
     var voiceServiceStateObserver: NSObjectProtocol?
@@ -334,6 +340,8 @@ extension PrivacyCenterWindowController: NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         voiceShortcutCaptureButton.cancelCapture()
         voiceShortcutCancelButton.isEnabled = false
+        voiceSecondaryShortcutCaptureButton.cancelCapture()
+        voiceSecondaryShortcutCancelButton.isEnabled = false
         voiceTranslateShortcutCaptureButton.cancelCapture()
         voiceTranslateShortcutCancelButton.isEnabled = false
     }

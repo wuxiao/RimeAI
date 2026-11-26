@@ -61,6 +61,30 @@ final class VoiceRuntimePolicyTests: XCTestCase {
         ))
     }
 
+    func testSecondaryHotKeyPlanActivatesOnlyDistinctSecondaryShortcut() {
+        XCTAssertEqual(
+            VoiceSecondaryHotKeyPlan.plan(
+                secondaryShortcut: nil,
+                primaryShortcut: .function
+            ),
+            .deactivate
+        )
+        XCTAssertEqual(
+            VoiceSecondaryHotKeyPlan.plan(
+                secondaryShortcut: .function,
+                primaryShortcut: .function
+            ),
+            .deactivate
+        )
+        XCTAssertEqual(
+            VoiceSecondaryHotKeyPlan.plan(
+                secondaryShortcut: .rightCommand,
+                primaryShortcut: .function
+            ),
+            .activate(.rightCommand)
+        )
+    }
+
     func testTranslationHotKeyIsDeactivatedWheneverShortcutsMatch() {
         XCTAssertEqual(
             VoiceTranslationHotKeyPlan.plan(translateShortcut: .defaultTranslate, dictationShortcut: .default),
@@ -73,6 +97,22 @@ final class VoiceRuntimePolicyTests: XCTestCase {
         XCTAssertEqual(
             VoiceTranslationHotKeyPlan.plan(translateShortcut: .function, dictationShortcut: .function),
             .deactivate
+        )
+        XCTAssertEqual(
+            VoiceTranslationHotKeyPlan.plan(
+                translateShortcut: .rightCommand,
+                dictationShortcut: .function,
+                secondaryDictationShortcut: .rightCommand
+            ),
+            .deactivate
+        )
+        XCTAssertEqual(
+            VoiceTranslationHotKeyPlan.plan(
+                translateShortcut: .defaultTranslate,
+                dictationShortcut: .function,
+                secondaryDictationShortcut: .rightCommand
+            ),
+            .activate
         )
     }
 
