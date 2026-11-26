@@ -9,6 +9,36 @@ import XCTest
 
 @MainActor
 final class VoiceIntegrationSmokeTests: XCTestCase {
+    private let carbonDictationShortcut = VoiceDictationShortcut(
+        keyCode: 9,
+        modifiers: [.control, .shift]
+    )!
+
+    func testDefaultFunctionShortcutActivatesAsModifierTapWithoutCarbonRegistration() throws {
+        var registerCount = 0
+        let registrar = VoiceHotKeyRegistrar(
+            register: { _ in
+                registerCount += 1
+                return .init(status: noErr, reference: nil)
+            },
+            unregister: { _ in noErr }
+        )
+        let manager = VoiceHotKeyManager(testingRegistrar: registrar)
+        let owner = NSObject()
+
+        try manager.activate(
+            owner: owner,
+            shortcut: .default,
+            onPressed: {},
+            onReleased: {},
+            onSecureInputDetected: {}
+        )
+
+        XCTAssertEqual(registerCount, 0)
+        XCTAssertEqual(manager.registrationStatus, .registered(.function))
+        manager.deactivate(owner: owner)
+    }
+
     func testHotKeyRegistrationRequestsExclusiveCarbonOwnership() throws {
         let reference = try XCTUnwrap(EventHotKeyRef(bitPattern: 1))
         var requests: [VoiceHotKeyRegistrar.Request] = []
@@ -24,7 +54,7 @@ final class VoiceIntegrationSmokeTests: XCTestCase {
 
         try manager.activate(
             owner: owner,
-            shortcut: .default,
+            shortcut: carbonDictationShortcut,
             onPressed: {},
             onReleased: {},
             onSecureInputDetected: {}
@@ -32,7 +62,10 @@ final class VoiceIntegrationSmokeTests: XCTestCase {
 
         let request = try XCTUnwrap(requests.first)
         XCTAssertEqual(request.options, OptionBits(kEventHotKeyExclusive))
-        XCTAssertEqual(manager.registrationStatus, .registered(.default))
+        XCTAssertEqual(
+            manager.registrationStatus,
+            .registered(carbonDictationShortcut)
+        )
         manager.deactivate(owner: owner)
     }
 
@@ -51,7 +84,7 @@ final class VoiceIntegrationSmokeTests: XCTestCase {
 
         XCTAssertThrowsError(try manager.activate(
             owner: owner,
-            shortcut: .default,
+            shortcut: carbonDictationShortcut,
             onPressed: {},
             onReleased: {},
             onSecureInputDetected: {}
@@ -66,7 +99,7 @@ final class VoiceIntegrationSmokeTests: XCTestCase {
         else {
             return XCTFail("Expected a conflict registration status.")
         }
-        XCTAssertEqual(shortcut, .default)
+        XCTAssertEqual(shortcut, carbonDictationShortcut)
         XCTAssertEqual(kind, .conflict)
         XCTAssertEqual(code, OSStatus(eventHotKeyExistsErr))
     }
@@ -84,7 +117,7 @@ final class VoiceIntegrationSmokeTests: XCTestCase {
 
         XCTAssertThrowsError(try manager.activate(
             owner: owner,
-            shortcut: .default,
+            shortcut: carbonDictationShortcut,
             onPressed: {},
             onReleased: {},
             onSecureInputDetected: {}
@@ -111,7 +144,7 @@ final class VoiceIntegrationSmokeTests: XCTestCase {
 
         XCTAssertThrowsError(try manager.activate(
             owner: owner,
-            shortcut: .default,
+            shortcut: carbonDictationShortcut,
             onPressed: {},
             onReleased: {},
             onSecureInputDetected: {}
@@ -159,7 +192,7 @@ final class VoiceIntegrationSmokeTests: XCTestCase {
 
         try manager.activate(
             owner: owner,
-            shortcut: .default,
+            shortcut: carbonDictationShortcut,
             onPressed: { pressCount += 1 },
             onReleased: { releaseCount += 1 },
             onSecureInputDetected: {}
@@ -234,7 +267,7 @@ final class VoiceIntegrationSmokeTests: XCTestCase {
 
         try manager.activate(
             owner: owner,
-            shortcut: .default,
+            shortcut: carbonDictationShortcut,
             onPressed: { dictationPressed += 1 },
             onReleased: {},
             onSecureInputDetected: {}

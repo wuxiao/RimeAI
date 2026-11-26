@@ -55,6 +55,7 @@ final class VoiceGlobalHotKeyService {
         ) { [weak self] _ in
             MainActor.assumeIsolated {
                 self?.hotKeyRegistrationFailed = false
+                self?.resetModifierTapDetectors()
                 self?.reconcileHotKeys()
             }
         }
@@ -430,15 +431,16 @@ final class VoiceGlobalHotKeyService {
         )
         var semantic = modifiers
         semantic.remove([.capsLock, .numericPad])
-        if keyCode == shortcut.keyCode, semantic == [.command] {
-            if shortcut.isModifierTap {
-                pointerGuard.armed(
-                    lastPointerActivityAt: VoicePointerActivity
-                        .lastPointerEventTimestamp(),
-                    lastKeyDownActivityAt: VoicePointerActivity
-                        .lastKeyDownEventTimestamp()
-                )
-            }
+        if shortcut.isModifierTap,
+           keyCode == shortcut.keyCode,
+           semantic == shortcut.modifiers
+        {
+            pointerGuard.armed(
+                lastPointerActivityAt: VoicePointerActivity
+                    .lastPointerEventTimestamp(),
+                lastKeyDownActivityAt: VoicePointerActivity
+                    .lastKeyDownEventTimestamp()
+            )
             return false
         }
         guard triggered else {

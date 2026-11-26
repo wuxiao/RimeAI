@@ -560,7 +560,10 @@ extension PrivacyCenterWindowController {
             color = .secondaryLabelColor
         case let .registered(shortcut):
             if shortcut == configured {
-                message = "已全局注册 \(shortcut.displayName)（任意应用与输入法均可触发）"
+                let globeHint = shortcut == .function
+                    ? "；如系统触发输入法切换或表情，请在系统设置 → 键盘将「按下 🌐 键以」设为无操作"
+                    : ""
+                message = "已全局注册 \(shortcut.displayName)（任意应用与输入法均可触发\(globeHint)）"
                 color = .systemGreen
             } else {
                 message =

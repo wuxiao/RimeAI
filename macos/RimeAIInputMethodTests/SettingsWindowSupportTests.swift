@@ -354,6 +354,106 @@ final class SettingsWindowSupportTests: XCTestCase {
         XCTAssertEqual(button.title, "更改…（当前 ⌃⇧V）")
     }
 
+    func testShortcutCaptureButtonCapturesFnAndRightCommandFlagsChanged() throws {
+        let button = SettingsShortcutCaptureButton()
+        var captured: [(UInt16, NSEvent.ModifierFlags)] = []
+        button.onKeyEvent = { keyCode, flags in
+            captured.append((keyCode, flags))
+        }
+        button.beginCapture()
+        defer { button.cancelCapture() }
+
+        let fnEvent = try XCTUnwrap(NSEvent.keyEvent(
+            with: .flagsChanged,
+            location: .zero,
+            modifierFlags: [.function],
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            characters: "",
+            charactersIgnoringModifiers: "",
+            isARepeat: false,
+            keyCode: VoiceDictationShortcut.functionKeyCode
+        ))
+        let fnWithCapsLock = try XCTUnwrap(NSEvent.keyEvent(
+            with: .flagsChanged,
+            location: .zero,
+            modifierFlags: [.function, .capsLock],
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            characters: "",
+            charactersIgnoringModifiers: "",
+            isARepeat: false,
+            keyCode: VoiceDictationShortcut.functionKeyCode
+        ))
+        let rightCmdEvent = try XCTUnwrap(NSEvent.keyEvent(
+            with: .flagsChanged,
+            location: .zero,
+            modifierFlags: [.command],
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            characters: "",
+            charactersIgnoringModifiers: "",
+            isARepeat: false,
+            keyCode: VoiceDictationShortcut.rightCommandKeyCode
+        ))
+        let leftCmdEvent = try XCTUnwrap(NSEvent.keyEvent(
+            with: .flagsChanged,
+            location: .zero,
+            modifierFlags: [.command],
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            characters: "",
+            charactersIgnoringModifiers: "",
+            isARepeat: false,
+            keyCode: 55
+        ))
+        let fnShiftEvent = try XCTUnwrap(NSEvent.keyEvent(
+            with: .flagsChanged,
+            location: .zero,
+            modifierFlags: [.function, .shift],
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            characters: "",
+            charactersIgnoringModifiers: "",
+            isARepeat: false,
+            keyCode: VoiceDictationShortcut.functionKeyCode
+        ))
+
+        button.flagsChanged(with: fnEvent)
+        button.flagsChanged(with: fnWithCapsLock)
+        button.flagsChanged(with: rightCmdEvent)
+        button.flagsChanged(with: leftCmdEvent)
+        button.flagsChanged(with: fnShiftEvent)
+
+        XCTAssertEqual(captured.count, 3)
+        XCTAssertEqual(
+            VoiceHotKeyManager.makeShortcut(
+                keyCode: captured[0].0,
+                modifierFlags: captured[0].1
+            ),
+            .function
+        )
+        XCTAssertEqual(
+            VoiceHotKeyManager.makeShortcut(
+                keyCode: captured[1].0,
+                modifierFlags: captured[1].1
+            ),
+            .function
+        )
+        XCTAssertEqual(
+            VoiceHotKeyManager.makeShortcut(
+                keyCode: captured[2].0,
+                modifierFlags: captured[2].1
+            ),
+            .rightCommand
+        )
+    }
+
     func testSettingsActionStatusChangePostsNotification() {
         let center = SettingsActionStatusCenter.shared
         center.update(SettingsActionStatus(

@@ -4,16 +4,18 @@ import Testing
 
 @Suite("Voice dictation key routing")
 struct VoiceDictationKeyRouterTests {
-    @Test("voice shortcut defaults to Control-Shift-V")
+    @Test("voice shortcut defaults to Fn modifier tap")
     func defaultShortcut() {
         #expect(
             VoiceDictationShortcut.default
                 == VoiceDictationShortcut(
-                    keyCode: 9,
-                    modifiers: [.control, .shift]
+                    keyCode: VoiceDictationShortcut.functionKeyCode,
+                    modifiers: [.function]
                 )
         )
-        #expect(VoiceDictationShortcut.default.displayName == "⌃⇧V")
+        #expect(VoiceDictationShortcut.default == .function)
+        #expect(VoiceDictationShortcut.default.isModifierTap)
+        #expect(VoiceDictationShortcut.default.displayName == "Fn")
     }
 
     @Test("unsafe shortcuts are rejected before registration")
@@ -176,6 +178,7 @@ struct VoiceDictationKeyRouterTests {
 
         #expect(guidance.contains("仅支持 Control-Shift 或 Option-Shift"))
         #expect(guidance.contains("字母、数字或标点键"))
+        #expect(guidance.contains("Fn"))
         #expect(guidance.contains("VoiceOver"))
         #expect(guidance.contains("系统或编辑命令"))
     }
@@ -495,6 +498,65 @@ struct VoiceDictationKeyRouterTests {
         // Holding too long (> 0.65s) does not trigger a tap
         #expect(!feed(54, [.command], 14.0))
         #expect(!feed(54, [], 15.0))
+    }
+
+    @Test("Fn modifier tap shortcut is valid and triggers only on clean single tap")
+    func functionKeyShortcutAndTapDetector() throws {
+        let fnKey = try #require(
+            VoiceDictationShortcut(keyCode: 63, modifiers: [.function])
+        )
+        #expect(fnKey == .function)
+        #expect(fnKey == .default)
+        #expect(fnKey.isModifierTap)
+        #expect(fnKey.displayName == "Fn")
+        #expect(VoiceDictationShortcut(keyCode: 63, modifiers: []) == nil)
+        #expect(VoiceDictationShortcut(keyCode: 63, modifiers: [.function, .shift]) == nil)
+        #expect(VoiceDictationShortcut(keyCode: 0, modifiers: [.function]) == nil)
+
+        // Codable round-trip
+        let encoded = try JSONEncoder().encode(fnKey)
+        let decoded = try JSONDecoder().decode(VoiceDictationShortcut.self, from: encoded)
+        #expect(decoded == fnKey)
+
+        var detector = VoiceModifierTapDetector()
+        func feed(
+            _ keyCode: UInt16,
+            _ modifiers: VoiceDictationKeyModifiers,
+            _ timestamp: TimeInterval
+        ) -> Bool {
+            detector.handleFlagsChanged(
+                keyCode: keyCode,
+                modifiers: modifiers,
+                timestamp: timestamp,
+                shortcut: fnKey
+            )
+        }
+
+        // Clean single tap triggers on release
+        #expect(!feed(63, [.function], 20.0))
+        #expect(feed(63, [], 20.12))
+
+        // Works when Caps Lock is toggled on
+        #expect(!feed(63, [.function, .capsLock], 21.0))
+        #expect(feed(63, [.capsLock], 21.10))
+
+        // Right Command never triggers Fn shortcut
+        #expect(!feed(54, [.command], 22.0))
+        #expect(!feed(54, [], 22.1))
+
+        // Fn + another key (e.g. Fn + Backspace / Fn + E) cancels tap
+        #expect(!feed(63, [.function], 23.0))
+        detector.handleOtherKeyDown()
+        #expect(!feed(63, [], 23.15))
+
+        // Fn + Shift cancels tap
+        #expect(!feed(63, [.function], 24.0))
+        #expect(!feed(56, [.function, .shift], 24.05))
+        #expect(!feed(63, [], 24.15))
+
+        // Holding too long (> 0.65s) does not trigger a tap
+        #expect(!feed(63, [.function], 25.0))
+        #expect(!feed(63, [], 26.0))
     }
 
     // MARK: - Commit raw text while a cloud transform is still running

@@ -56,27 +56,36 @@ public struct VoiceDictationShortcut: Codable, Equatable, Sendable {
     ]
 
     public static let rightCommandKeyCode: UInt16 = 54
+    public static let functionKeyCode: UInt16 = 63
 
     public let keyCode: UInt16
     public let modifiers: VoiceDictationKeyModifiers
     public static let validationFailureDescription =
         "语音快捷键仅支持 Control-Shift 或 Option-Shift 搭配字母、数字或标点键，"
-        + "或单独点按右侧 Command（右 ⌘）；其他组合可能占用 VoiceOver、macOS 系统或编辑命令。"
+        + "或单独点按 Fn、右侧 Command（右 ⌘）；其他组合可能占用 VoiceOver、macOS 系统或编辑命令。"
 
-    /// 是否为单修饰键点按切换模式（如右侧 Command：按一下开始、再按一下结束）。
+    public static func isAllowedModifierTap(
+        keyCode: UInt16,
+        modifiers: VoiceDictationKeyModifiers
+    ) -> Bool {
+        (keyCode == rightCommandKeyCode && modifiers == [.command])
+            || (keyCode == functionKeyCode && modifiers == [.function])
+    }
+
+    /// 是否为单修饰键点按切换模式（Fn 或右侧 Command：按一下开始、再按一下结束）。
     public var isModifierTap: Bool {
-        keyCode == Self.rightCommandKeyCode && modifiers == [.command]
+        Self.isAllowedModifierTap(keyCode: keyCode, modifiers: modifiers)
     }
 
     /// 快捷键修饰键接受精确的 Control-Shift / Option-Shift + 普通键，
-    /// 或单独点按右侧 Command（keyCode 54，切换开始/结束）。
+    /// 或单独点按 Fn（keyCode 63）/ 右侧 Command（keyCode 54，切换开始/结束）。
     /// 左侧 Command、VoiceOver Control-Option、单修饰键组合与三修饰键空间整体保留，
     /// 避免依赖会随系统版本扩张的 Apple 快捷键枚举。
     public init?(
         keyCode: UInt16,
         modifiers: VoiceDictationKeyModifiers
     ) {
-        if keyCode == Self.rightCommandKeyCode && modifiers == [.command] {
+        if Self.isAllowedModifierTap(keyCode: keyCode, modifiers: modifiers) {
             self.keyCode = keyCode
             self.modifiers = modifiers
             return
@@ -91,10 +100,12 @@ public struct VoiceDictationShortcut: Codable, Equatable, Sendable {
         self.modifiers = modifiers
     }
 
-    public static let `default` = Self(
-        keyCode: 9,
-        modifiers: [.control, .shift]
+    public static let function = Self(
+        keyCode: functionKeyCode,
+        modifiers: [.function]
     )!
+
+    public static let `default` = function
 
     /// 一键语音翻译默认快捷键：Control-Shift-T（T = Translate）。
     public static let defaultTranslate = Self(
@@ -131,7 +142,10 @@ public struct VoiceDictationShortcut: Codable, Equatable, Sendable {
     }
 
     public var displayName: String {
-        if isModifierTap {
+        if keyCode == Self.functionKeyCode && modifiers == [.function] {
+            return "Fn"
+        }
+        if keyCode == Self.rightCommandKeyCode && modifiers == [.command] {
             return "右 ⌘"
         }
         var result = ""
@@ -343,8 +357,8 @@ public enum VoiceDictationKeyRouter {
     }
 }
 
-/// 纯逻辑状态机：识别“单独点按右侧 Command 键（按一下松开，期间未按其他键或修饰键）”。
-/// 用于切换式语音听写（按一下启动，再按一下结束），不干扰 `右⌘+C/V` 等组合快捷键。
+/// 纯逻辑状态机：识别“单独点按目标修饰键（Fn 或右侧 Command，按一下松开，期间未按其他键或修饰键）”。
+/// 用于切换式语音听写（按一下启动，再按一下结束），不干扰 `Fn+F1` / `右⌘+C/V` 等组合快捷键。
 public struct VoiceModifierTapDetector: Equatable, Sendable {
     public static let maximumTapDurationSeconds: TimeInterval = 0.65
 
@@ -356,12 +370,12 @@ public struct VoiceModifierTapDetector: Equatable, Sendable {
         armedTimestamp = nil
     }
 
-    /// 处理任意非修饰键按下（如 `右⌘+C`），立即取消待触发态。
+    /// 处理任意非修饰键按下（如 `右⌘+C`、`Fn+Backspace`），立即取消待触发态。
     public mutating func handleOtherKeyDown() {
         armedTimestamp = nil
     }
 
-    /// 处理 `flagsChanged` 事件；返回 `true` 表示完成一次干净的右 Command 点按。
+    /// 处理 `flagsChanged` 事件；返回 `true` 表示完成一次干净的单修饰键点按。
     public mutating func handleFlagsChanged(
         keyCode: UInt16,
         modifiers: VoiceDictationKeyModifiers,
@@ -381,8 +395,8 @@ public struct VoiceModifierTapDetector: Equatable, Sendable {
             return false
         }
 
-        if semantic == [.command] {
-            // 右 Command 单独按下，进入待确认点按态
+        if semantic == shortcut.modifiers {
+            // 目标修饰键单独按下，进入待确认点按态
             armedTimestamp = timestamp
             return false
         }
@@ -393,7 +407,7 @@ public struct VoiceModifierTapDetector: Equatable, Sendable {
             return elapsed >= 0 && elapsed <= Self.maximumTapDurationSeconds
         }
 
-        // 组合了其他修饰键（如 右⌘+⇧）
+        // 组合了其他修饰键（如 Fn+⇧ 或 右⌘+⇧）
         armedTimestamp = nil
         return false
     }

@@ -230,6 +230,7 @@ extension PrivacyCenterWindowController {
             return
         }
         settings.voiceTranslateShortcut = shortcut
+        VoiceGlobalHotKeyService.shared.resetModifierTapDetectors()
         voiceTranslateShortcutCaptureButton.finishCapture(
             displayName: shortcut.displayName
         )
@@ -250,6 +251,7 @@ extension PrivacyCenterWindowController {
     @objc func restoreDefaultVoiceTranslateShortcut(_ sender: Any?) {
         let shortcut = VoiceDictationShortcut.defaultTranslate
         settings.voiceTranslateShortcut = shortcut
+        VoiceGlobalHotKeyService.shared.resetModifierTapDetectors()
         voiceTranslateShortcutCaptureButton.finishCapture(
             displayName: shortcut.displayName
         )
@@ -344,6 +346,7 @@ extension PrivacyCenterWindowController {
             return
         }
         settings.voiceShortcut = shortcut
+        VoiceGlobalHotKeyService.shared.resetModifierTapDetectors()
         voiceShortcutCaptureButton.finishCapture(
             displayName: shortcut.displayName
         )
@@ -351,6 +354,7 @@ extension PrivacyCenterWindowController {
         updateSettingsActionStatus(
             .success,
             "语音快捷键已更改为 \(shortcut.displayName)"
+                + (shortcut.isModifierTap ? "（按一下开始，再按一下结束）" : "")
         )
         refreshVoiceShortcutStatus()
     }
@@ -364,6 +368,7 @@ extension PrivacyCenterWindowController {
     @objc func useRightCommandVoiceShortcut(_ sender: Any?) {
         let shortcut = VoiceDictationShortcut.rightCommand
         settings.voiceShortcut = shortcut
+        VoiceGlobalHotKeyService.shared.resetModifierTapDetectors()
         voiceShortcutCaptureButton.finishCapture(
             displayName: shortcut.displayName
         )
@@ -378,6 +383,7 @@ extension PrivacyCenterWindowController {
     @objc func restoreDefaultVoiceShortcut(_ sender: Any?) {
         let shortcut = VoiceDictationShortcut.default
         settings.voiceShortcut = shortcut
+        VoiceGlobalHotKeyService.shared.resetModifierTapDetectors()
         voiceShortcutCaptureButton.finishCapture(
             displayName: shortcut.displayName
         )
@@ -385,6 +391,7 @@ extension PrivacyCenterWindowController {
         updateSettingsActionStatus(
             .success,
             "语音快捷键已恢复为 \(shortcut.displayName)"
+                + (shortcut.isModifierTap ? "（按一下开始，再按一下结束）" : "")
         )
         refreshVoiceShortcutStatus()
     }

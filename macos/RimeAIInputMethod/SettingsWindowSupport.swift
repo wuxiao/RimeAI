@@ -78,7 +78,7 @@ final class SettingsShortcutCaptureButton: NSButton {
         widthAnchor.constraint(equalToConstant: Self.keycapWidth).isActive = true
         heightAnchor.constraint(equalToConstant: Self.keycapHeight).isActive = true
         setAccessibilityLabel("编辑语音快捷键")
-        setAccessibilityHelp("点击后按下新的快捷键或右侧 Command 键；按 Esc 取消。")
+        setAccessibilityHelp("点击后按下新的快捷键、Fn 或右侧 Command 键；按 Esc 取消。")
         refreshKeycapColors()
     }
 
@@ -217,6 +217,17 @@ final class SettingsShortcutCaptureButton: NSButton {
 
     // MARK: - 录制
 
+    private static func isCapturableModifierTap(_ event: NSEvent) -> Bool {
+        var semantic = event.modifierFlags.intersection(
+            .deviceIndependentFlagsMask
+        )
+        semantic.remove([.capsLock, .numericPad])
+        return (event.keyCode == VoiceDictationShortcut.rightCommandKeyCode
+            && semantic == [.command])
+            || (event.keyCode == VoiceDictationShortcut.functionKeyCode
+                && semantic == [.function])
+    }
+
     private func installEventMonitor() {
         removeEventMonitor()
         eventMonitor = NSEvent.addLocalMonitorForEvents(
@@ -226,12 +237,7 @@ final class SettingsShortcutCaptureButton: NSButton {
                 return event
             }
             if event.type == .flagsChanged {
-                let semantic = event.modifierFlags.intersection(
-                    .deviceIndependentFlagsMask
-                )
-                if event.keyCode == VoiceDictationShortcut.rightCommandKeyCode,
-                   semantic == [.command]
-                {
+                if Self.isCapturableModifierTap(event) {
                     self.onKeyEvent?(event.keyCode, event.modifierFlags)
                     return nil
                 }
@@ -270,12 +276,7 @@ final class SettingsShortcutCaptureButton: NSButton {
             super.flagsChanged(with: event)
             return
         }
-        let semantic = event.modifierFlags.intersection(
-            .deviceIndependentFlagsMask
-        )
-        if event.keyCode == VoiceDictationShortcut.rightCommandKeyCode,
-           semantic == [.command]
-        {
+        if Self.isCapturableModifierTap(event) {
             onKeyEvent?(event.keyCode, event.modifierFlags)
             return
         }

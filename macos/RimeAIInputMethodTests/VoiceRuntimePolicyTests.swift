@@ -70,6 +70,10 @@ final class VoiceRuntimePolicyTests: XCTestCase {
             VoiceTranslationHotKeyPlan.plan(translateShortcut: .rightCommand, dictationShortcut: .rightCommand),
             .deactivate
         )
+        XCTAssertEqual(
+            VoiceTranslationHotKeyPlan.plan(translateShortcut: .function, dictationShortcut: .function),
+            .deactivate
+        )
     }
 
     // MARK: - 启动闸门
