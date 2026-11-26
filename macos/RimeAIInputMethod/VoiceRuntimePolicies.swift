@@ -273,6 +273,82 @@ enum VoiceSessionTargetRecoveryPolicy {
     }
 }
 
+// MARK: - 同一输入框证据
+
+/// 「还是开始听写的那个输入框」的文本证据：记下光标前（光标在文首时改取光标后）
+/// 一小段文字的绝对位置与内容，提交前原样回读比对。
+///
+/// 只凭 IMK 会话与光标存在与否，无法区分同一客户端里的另一个输入框（Electron 同一
+/// 网页的多个输入框共用一个 client）；把光标坐标锁死又会被滚动与重排误伤。文字证据
+/// 两头兼顾：滚动、重排、在同一输入框内移动光标，都不改变被记录位置上的文字。
+struct VoiceTargetFingerprint: Equatable {
+    struct Probe: Equatable {
+        let offset: Int
+        let length: Int
+        let text: String
+    }
+
+    /// 光标前最多取这么多 UTF-16 单元。
+    static let probeLength = 16
+    /// 光标在文首时改取光标后的文字；范围越界时宿主可能返回 nil，逐级缩短。
+    static let suffixProbeLengths = [16, 8, 4, 2, 1]
+
+    let probes: [Probe]
+
+    /// 没有任何文字证据时（空输入框，或宿主不支持回读），调用方须改用光标矩形判定。
+    var hasTextEvidence: Bool {
+        probes.contains { !$0.text.isEmpty }
+    }
+
+    static func capture(
+        caretLocation: Int,
+        selectionLength: Int,
+        read: (NSRange) -> String?
+    ) -> VoiceTargetFingerprint {
+        var probes: [Probe] = []
+        if caretLocation > 0 {
+            let length = min(probeLength, caretLocation)
+            let range = NSRange(location: caretLocation - length, length: length)
+            if let text = read(range), !text.isEmpty {
+                probes.append(Probe(offset: range.location, length: length, text: text))
+            }
+        }
+        if probes.isEmpty {
+            let offset = caretLocation + max(0, selectionLength)
+            for length in suffixProbeLengths {
+                if let text = read(NSRange(location: offset, length: length)), !text.isEmpty {
+                    probes.append(Probe(offset: offset, length: length, text: text))
+                    break
+                }
+            }
+        }
+        return VoiceTargetFingerprint(probes: probes)
+    }
+
+    /// 记录位置上的文字必须逐条原样读回；读不到视为不匹配。
+    func matches(_ read: (NSRange) -> String?) -> Bool {
+        hasTextEvidence
+            && probes.allSatisfy { probe in
+                read(NSRange(location: probe.offset, length: probe.length)) == probe.text
+            }
+    }
+}
+
+/// 没有文字证据时的兜底：上屏前复核光标还在原处（各边与尺寸都在容差内）。
+/// 滚动与重排会让它误判，所以只用于空输入框、或宿主不支持文字回读的情形。
+enum VoiceCaretRectMatch {
+    static func isSameCaretRect(
+        _ lhs: NSRect,
+        _ rhs: NSRect,
+        tolerance: CGFloat = 8
+    ) -> Bool {
+        abs(lhs.minX - rhs.minX) <= tolerance
+            && abs(lhs.minY - rhs.minY) <= tolerance
+            && abs(lhs.size.width - rhs.size.width) <= tolerance
+            && abs(lhs.size.height - rhs.size.height) <= tolerance
+    }
+}
+
 // MARK: - 宿主 markedRange 判定
 
 /// 部分宿主（Electron / Chromium / 断联 XPC proxy）在没有未上屏组合文本时

@@ -45,6 +45,7 @@
 		488FF0D2FB1DF343E11B144B /* SettingsWindowSupportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 728BDF2AAFE33421B770D171 /* SettingsWindowSupportTests.swift */; };
 		489F24969495F7BABD18BC50 /* RimeAIHistoryService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64023B873D5239CA90E90BD8 /* RimeAIHistoryService.swift */; };
 		4A809CCB408FBBB72B467B1D /* PrivacyCenterWindowController+LanguageProfile.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B62C41430F2B8EBCF6D238B /* PrivacyCenterWindowController+LanguageProfile.swift */; };
+		4B27A461D43DB74BDFF75BE1 /* VoiceTargetFingerprintTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3193B20EF3AAB0E09E087BBE /* VoiceTargetFingerprintTests.swift */; };
 		4BCFACC68833479F7F59BDDC /* InputPreferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = B669BD4BE42CB74D63FCE3F6 /* InputPreferences.swift */; };
 		4D693F3F8ABABC62D25DFDDC /* CloudConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 69AC052D01A6D52A26EBA745 /* CloudConfiguration.swift */; };
 		4E3F788E070DF43AA5B28A4D /* VoiceEngineDescriptor.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4CA066DB6CCCE72D026DE8B /* VoiceEngineDescriptor.swift */; };
@@ -182,6 +183,7 @@
 		2E3DB447A7851D1DB1F70C8E /* VoiceIntegrationSmokeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceIntegrationSmokeTests.swift; sourceTree = "<group>"; };
 		2EAD2AB4D84CD263997D93D8 /* CloudBrokerClientContinuationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudBrokerClientContinuationTests.swift; sourceTree = "<group>"; };
 		2EB2AE233DB00280E0861F61 /* SemanticSuggestionPipeline+Schedule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SemanticSuggestionPipeline+Schedule.swift"; sourceTree = "<group>"; };
+		3193B20EF3AAB0E09E087BBE /* VoiceTargetFingerprintTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceTargetFingerprintTests.swift; sourceTree = "<group>"; };
 		337CF70FCBE1BAEA8B01CE26 /* DomainLexiconStore+SQLite.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "DomainLexiconStore+SQLite.swift"; sourceTree = "<group>"; };
 		339EB0642B5467FEFE04BC78 /* CloudBrokerProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudBrokerProtocol.swift; sourceTree = "<group>"; };
 		348BD796A393233937883B3E /* RimeEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RimeEngine.swift; sourceTree = "<group>"; };
@@ -342,6 +344,7 @@
 				D74D40010A5BC89A6A93ECD4 /* VoiceSettingsPresentationTests.swift */,
 				0635F60A121274479CD80E09 /* VoiceSoundEffectsPlayerTests.swift */,
 				A7C405CED81F4606CCE5ABBC /* VoiceSystemAudioMuterTests.swift */,
+				3193B20EF3AAB0E09E087BBE /* VoiceTargetFingerprintTests.swift */,
 				572AB92CE3080A3607395BC5 /* VoiceUIAndRuntimeTests.swift */,
 			);
 			path = RimeAIInputMethodTests;
@@ -855,6 +858,7 @@
 				8BB896357ECD32A52D4BDF6A /* VoiceSettingsPresentationTests.swift in Sources */,
 				E146BFD01587972542D89588 /* VoiceSoundEffectsPlayerTests.swift in Sources */,
 				FEA67D9ABAD836D98E3CD409 /* VoiceSystemAudioMuterTests.swift in Sources */,
+				4B27A461D43DB74BDFF75BE1 /* VoiceTargetFingerprintTests.swift in Sources */,
 				3DECAD8A366A999172E52A39 /* VoiceUIAndRuntimeTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

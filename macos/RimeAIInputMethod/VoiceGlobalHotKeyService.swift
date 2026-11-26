@@ -19,7 +19,7 @@ final class VoiceGlobalHotKeyService {
     static let shared = VoiceGlobalHotKeyService()
 
     private let settings = RimeAISettingsStore.shared
-    private weak var activeIMKController: RimeAIInputController?
+    private(set) weak var activeIMKController: RimeAIInputController?
     private var globalEventMonitor: Any?
     private var localEventMonitor: Any?
     private var settingsObserver: NSObjectProtocol?

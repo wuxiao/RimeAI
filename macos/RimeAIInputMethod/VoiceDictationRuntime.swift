@@ -42,6 +42,24 @@ protocol VoiceDictationRuntimeOwner: AnyObject {
 
 extension VoiceDictationRuntimeOwner {
     var usesClipboardPasteForCommit: Bool { false }
+
+    /// 会话启动时「同一输入框」的文本证据；只有 IMK 托管的会话能提供，全局会话没有。
+    func voiceRuntimeTargetFingerprint(
+        client: AnyObject,
+        selection: NSRange
+    ) -> VoiceTargetFingerprint? {
+        nil
+    }
+
+    /// 提交前按证据复核：当前聚焦的仍是开始听写的那个输入框。
+    /// 默认实现表示无从复核（全局会话只按前台应用判定）。
+    func voiceRuntimeTargetMatchesFingerprint(
+        client: AnyObject,
+        fingerprint: VoiceTargetFingerprint?,
+        anchorRect: NSRect
+    ) -> Bool {
+        true
+    }
 }
 
 /// 跨输入法全局会话的轻量宿主：当用户切换到 ABC、第三方输入法或非 IMK 区域时
@@ -127,6 +145,8 @@ final class VoiceDictationRuntime {
     private(set) var isTransforming = false
     /// 开始听写时是否存在可自动上屏的光标；用于区分“未检测到光标”与“焦点已切换”。
     private var targetWasEditableAtStart = false
+    /// 开始听写时那个输入框的文本证据；提交前回读比对，防止成稿落到同应用的另一个输入框。
+    private var targetFingerprint: VoiceTargetFingerprint?
     /// 采样式目标校验的去抖状态；每次新会话与清场时复位。
     private var targetValidityDebouncer = VoiceTargetValidityDebouncer()
     /// 本轮会话是否已记录“焦点暂时离开”，避免 150ms 定时器刷屏。
@@ -564,6 +584,10 @@ final class VoiceDictationRuntime {
             .processIdentifier
         targetSelection = selection
         self.anchorRect = anchorRect
+        targetFingerprint = owner.voiceRuntimeTargetFingerprint(
+            client: client,
+            selection: selection
+        )
         self.hasEditableTarget = effectiveEditableTarget
         targetWasEditableAtStart = effectiveEditableTarget
         targetValidityDebouncer.reset()
@@ -2496,16 +2520,53 @@ final class VoiceDictationRuntime {
     ) -> Bool {
         guard (currentOwner === owner || owner.usesClipboardPasteForCommit),
               let client = targetClient,
-              let appSessionID = targetAppSessionID
+              let appSessionID = targetAppSessionID,
+              owner.voiceRuntimeTargetIsValid(
+                  client: client,
+                  appSessionID: appSessionID,
+                  selection: targetSelection,
+                  anchorRect: anchorRect
+              )
         else {
             return false
         }
-        return owner.voiceRuntimeTargetIsValid(
+        // 从开始听写到提交，焦点可能离开又回来。除调用方自己的判定外，再按
+        // 「同一输入框」证据复核一次：成稿不得落到同应用的另一个输入框。
+        guard let fingerprint = targetFingerprint else {
+            return true
+        }
+        if owner === globalOwner {
+            return handedOffTargetMatchesOriginalField(fingerprint)
+        }
+        return owner.voiceRuntimeTargetMatchesFingerprint(
             client: client,
-            appSessionID: appSessionID,
-            selection: targetSelection,
+            fingerprint: fingerprint,
             anchorRect: anchorRect
         )
+    }
+
+    /// IMK 会话移交全局宿主后，提交瞬间若 RimeAI 仍是原应用的输入法，就用它当前
+    /// 聚焦的输入框复核指纹；RimeAI 不是该应用的输入法时无从复核，沿用按前台应用的判定。
+    private func handedOffTargetMatchesOriginalField(
+        _ fingerprint: VoiceTargetFingerprint
+    ) -> Bool {
+        guard let controller = VoiceGlobalHotKeyService.shared.activeIMKController,
+              controller.currentBundleIdentifier == targetBundleIdentifier,
+              let client = controller.activeClientObject
+        else {
+            return true
+        }
+        let matches = controller.voiceRuntimeTargetMatchesFingerprint(
+            client: client,
+            fingerprint: fingerprint,
+            anchorRect: anchorRect
+        )
+        if !matches {
+            voiceDictationLog.notice(
+                "移交会话提交前复核：当前输入框不是开始听写的那个，转为手动复制"
+            )
+        }
+        return matches
     }
 
     private func invalidateActiveSession(
@@ -2557,6 +2618,7 @@ final class VoiceDictationRuntime {
         targetBundleIdentifier = "unknown-client"
         targetFrontmostPID = nil
         targetSelection = NSRange(location: NSNotFound, length: 0)
+        targetFingerprint = nil
         hasEditableTarget = false
         targetWasEditableAtStart = false
         targetValidityDebouncer.reset()

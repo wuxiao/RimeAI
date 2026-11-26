@@ -444,6 +444,53 @@ extension RimeAIInputController {
         return true
     }
 
+    /// 开始听写时那个输入框的文本证据：光标前最多 16 个字（光标在文首时改取
+    /// 光标后的文字）的绝对位置与内容。
+    func voiceRuntimeTargetFingerprint(
+        client: AnyObject,
+        selection: NSRange
+    ) -> VoiceTargetFingerprint? {
+        guard let inputClient = client as? any IMKTextInput,
+              selection.location != NSNotFound
+        else {
+            return nil
+        }
+        return VoiceTargetFingerprint.capture(
+            caretLocation: selection.location,
+            selectionLength: selection.length,
+            read: { inputClient.attributedSubstring(from: $0)?.string }
+        )
+    }
+
+    /// 提交前按证据复核「还是开始听写的那个输入框」：有文字证据时原样回读比对，
+    /// 滚动、重排、在同一输入框内移动光标都不影响；没有文字证据（空输入框，或
+    /// 宿主不支持回读）时退回光标矩形比对。
+    func voiceRuntimeTargetMatchesFingerprint(
+        client: AnyObject,
+        fingerprint: VoiceTargetFingerprint?,
+        anchorRect: NSRect
+    ) -> Bool {
+        guard let fingerprint else {
+            return true
+        }
+        guard let inputClient = client as? any IMKTextInput else {
+            return false
+        }
+        if fingerprint.hasTextEvidence {
+            return fingerprint.matches { inputClient.attributedSubstring(from: $0)?.string }
+        }
+        let selection = inputClient.selectedRange()
+        guard selection.location != NSNotFound,
+              let currentAnchor = voiceCaretRect(
+                  client: inputClient,
+                  characterIndex: selection.location
+              )
+        else {
+            return false
+        }
+        return VoiceCaretRectMatch.isSameCaretRect(anchorRect, currentAnchor)
+    }
+
     func voiceRuntimeDidBecomeUnavailable() {
         VoiceHotKeyManager.shared.deactivate(owner: self)
         voiceHotKeyIsRegistered = false
