@@ -355,18 +355,20 @@ extension RimeAIInputController {
               !composition.hasComposition,
               !VoiceClientMarkedRangePolicy.hasMarkedText(inputClient.markedRange()),
               !composition.isSecureInput,
-              !IsSecureEventInputEnabled(),
-              inputClient.selectedRange() == selection
+              !IsSecureEventInputEnabled()
         else {
             return false
         }
-        guard let currentAnchor = voiceCaretRect(
-            client: inputClient,
-            characterIndex: selection.location
-        ) else {
+        let currentSelection = inputClient.selectedRange()
+        guard currentSelection.location != NSNotFound else {
             return false
         }
-        return voiceRectsMatch(anchorRect, currentAnchor)
+        // 不再把选区偏移与光标坐标锁死在启动时的 8pt 容差内：Electron/网页输入框在
+        // 流式输出、滚动或用户点击重定位光标时，同会话内光标仍在可编辑区域，应允许上屏。
+        return voiceCaretRect(
+            client: inputClient,
+            characterIndex: currentSelection.location
+        ) != nil
     }
 
     func voiceRuntimeCommit(
@@ -393,13 +395,17 @@ extension RimeAIInputController {
         }
 
         // 上屏前记下插入区段的原有内容：部分宿主（Electron/网页输入框）的
-        // insertText 会“成功返回”却什么也没写入。
-        let insertedRange = NSRange(location: selection.location, length: text.utf16.count)
+        // insertText 会“成功返回”却什么也没写入。按提交瞬间的实时光标位置回读，
+        // 避免同会话内光标微调后回读范围错位。
+        let caretBefore = inputClient.selectedRange()
+        let readbackLocation = caretBefore.location == NSNotFound
+            ? selection.location
+            : caretBefore.location
+        let insertedRange = NSRange(location: readbackLocation, length: text.utf16.count)
         let readback: (NSRange) -> String? = { range in
             inputClient.attributedSubstring(from: range)?.string
         }
         let baseline = readback(insertedRange)
-        let caretBefore = inputClient.selectedRange()
         inputClient.insertText(text, replacementRange: notFoundRange)
         if VoiceCommitReadback.verify(
             committedText: text,
@@ -437,15 +443,5 @@ extension RimeAIInputController {
 
     func voiceRuntimeSecureInputDetected() {
         enterSecureInputIfPossible()
-    }
-
-    func voiceRectsMatch(_ lhs: NSRect, _ rhs: NSRect) -> Bool {
-        // 放宽至 8pt 容差，避免 Electron / 浏览器输入框光标轻微抖动误触发取消；
-        // 真正切换输入框、切窗或大幅滚动仍会立即拦截。
-        let tolerance: CGFloat = 8
-        return abs(lhs.minX - rhs.minX) <= tolerance
-            && abs(lhs.minY - rhs.minY) <= tolerance
-            && abs(lhs.width - rhs.width) <= tolerance
-            && abs(lhs.height - rhs.height) <= tolerance
     }
 }

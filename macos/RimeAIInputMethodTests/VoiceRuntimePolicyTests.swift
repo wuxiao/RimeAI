@@ -456,4 +456,108 @@ final class VoiceRuntimePolicyTests: XCTestCase {
         debouncer.reset()
         XCTAssertEqual(debouncer, VoiceTargetValidityDebouncer())
     }
+
+    // MARK: - 录音/处理期焦点暂离与回切恢复
+
+    func testTargetRecoveryPolicyPreservesTargetDuringInProgressPhasesAndLocksOutPendingConfirm() {
+        let inProgressPhases: [(VoiceDictationClientPhase, Bool)] = [
+            (.connecting, false),
+            (.listening(requestID: "r1"), false),
+            (.finalizing(requestID: "r1"), false),
+            (.pendingConfirm(requestID: "r1"), true),
+        ]
+        for (phase, isTransforming) in inProgressPhases {
+            XCTAssertFalse(
+                VoiceSessionTargetRecoveryPolicy.shouldLockOutAutoPasteOnSustainedInvalidity(
+                    phase: phase,
+                    isTransforming: isTransforming
+                ),
+                "录音/收尾/润色期间临时失焦（通知弹窗或切窗查资料）不得永久锁死自动上屏"
+            )
+            XCTAssertTrue(
+                VoiceSessionTargetRecoveryPolicy.shouldHandOffControllerToGlobal(
+                    phase: phase,
+                    isTransforming: isTransforming,
+                    isSameApp: false,
+                    targetWasEditableAtStart: true,
+                    hasTargetPID: true,
+                    isGlobalMonitorActive: true
+                ),
+                "IMK 会话中途切到其他应用时应移交 globalOwner 绑定原 PID，切回原应用后照常上屏"
+            )
+            XCTAssertFalse(
+                VoiceSessionTargetRecoveryPolicy.shouldDetachGlobalSessionOnClaim(
+                    phase: phase,
+                    isTransforming: isTransforming,
+                    targetCurrentlyValid: false
+                ),
+                "录音/收尾/润色期间其他应用激活 IMK 控制器不得永久拆离绑定原 PID 的全局会话"
+            )
+        }
+
+        // 开始时本就无光标，或全局监控不可用 / 无原 PID：绝不错误升级。
+        XCTAssertFalse(
+            VoiceSessionTargetRecoveryPolicy.shouldHandOffControllerToGlobal(
+                phase: .listening(requestID: "r1"),
+                isTransforming: false,
+                isSameApp: false,
+                targetWasEditableAtStart: false,
+                hasTargetPID: true,
+                isGlobalMonitorActive: true
+            )
+        )
+        XCTAssertFalse(
+            VoiceSessionTargetRecoveryPolicy.shouldHandOffControllerToGlobal(
+                phase: .listening(requestID: "r1"),
+                isTransforming: false,
+                isSameApp: true,
+                targetWasEditableAtStart: true,
+                hasTargetPID: true,
+                isGlobalMonitorActive: false
+            )
+        )
+
+        // 手动待确认态（非转换中）：切去其他应用时应立即拆离为常驻复制卡片，同应用切输入法则保留。
+        let pending = VoiceDictationClientPhase.pendingConfirm(requestID: "r1")
+        XCTAssertTrue(
+            VoiceSessionTargetRecoveryPolicy.shouldLockOutAutoPasteOnSustainedInvalidity(
+                phase: pending,
+                isTransforming: false
+            )
+        )
+        XCTAssertTrue(
+            VoiceSessionTargetRecoveryPolicy.shouldHandOffControllerToGlobal(
+                phase: pending,
+                isTransforming: false,
+                isSameApp: true,
+                targetWasEditableAtStart: true,
+                hasTargetPID: true,
+                isGlobalMonitorActive: true
+            )
+        )
+        XCTAssertFalse(
+            VoiceSessionTargetRecoveryPolicy.shouldHandOffControllerToGlobal(
+                phase: pending,
+                isTransforming: false,
+                isSameApp: false,
+                targetWasEditableAtStart: true,
+                hasTargetPID: true,
+                isGlobalMonitorActive: true
+            )
+        )
+        XCTAssertTrue(
+            VoiceSessionTargetRecoveryPolicy.shouldDetachGlobalSessionOnClaim(
+                phase: pending,
+                isTransforming: false,
+                targetCurrentlyValid: false
+            )
+        )
+        XCTAssertFalse(
+            VoiceSessionTargetRecoveryPolicy.shouldDetachGlobalSessionOnClaim(
+                phase: pending,
+                isTransforming: false,
+                targetCurrentlyValid: true
+            )
+        )
+    }
 }

@@ -2,6 +2,12 @@ import AppKit
 import ApplicationServices
 import Carbon
 import Foundation
+import os
+
+private let voiceDictationLog = Logger(
+    subsystem: "fun.wwcn.rimeai",
+    category: "voice-dictation"
+)
 
 /// 进程级语音会话宿主。InputMethodKit 可能为不同客户端创建多个
 /// controller；语音 socket、状态机和浮层必须只有一份，并在回调上屏前
@@ -119,6 +125,8 @@ final class VoiceDictationRuntime {
     private var targetWasEditableAtStart = false
     /// 采样式目标校验的去抖状态；每次新会话与清场时复位。
     private var targetValidityDebouncer = VoiceTargetValidityDebouncer()
+    /// 本轮会话是否已记录“焦点暂时离开”，避免 150ms 定时器刷屏。
+    private var loggedTransientTargetLoss = false
     private var activeTransformRequestID: String?
     private var incrementalPolish = VoiceIncrementalPolishPipeline()
     private var pendingRestartAfterFinalizing: (
@@ -286,15 +294,23 @@ final class VoiceDictationRuntime {
 
     func claim(owner: any VoiceDictationRuntimeOwner) {
         if let activeOwner, activeOwner !== owner {
-            // 若当前是同一前台应用内的全局会话，保留它以便切回 RimeAI 后照常上屏。
-            let keepGlobalSession = activeOwner === globalOwner
-                && globalOwner.voiceRuntimeTargetIsValid(
+            if activeOwner === globalOwner {
+                let targetCurrentlyValid = globalOwner.voiceRuntimeTargetIsValid(
                     client: globalOwner,
                     appSessionID: targetAppSessionID ?? "",
                     selection: targetSelection,
                     anchorRect: anchorRect
                 )
-            if !keepGlobalSession {
+                if VoiceSessionTargetRecoveryPolicy.shouldDetachGlobalSessionOnClaim(
+                    phase: phase,
+                    isTransforming: isTransforming,
+                    targetCurrentlyValid: targetCurrentlyValid
+                ) {
+                    detachTargetIfActive()
+                }
+            } else if !handOffActiveControllerToGlobalIfEligible(
+                isSameApp: isTargetAppFrontmost
+            ) {
                 detachTargetIfActive()
             }
         } else if !isShowingPersistentCopy {
@@ -379,31 +395,16 @@ final class VoiceDictationRuntime {
         }
     }
 
-    /// IMK 控制器失活（切换输入法或切换应用）：
-    /// - 若启用了全局监控且仍在同一前台应用（纯切换输入法），将活跃录音/润色平滑升级为
-    ///   全局会话继续进行，不会中断或丢失。
-    /// - 若已切换到其他应用，则保留听写与结果但关闭自动上屏（防误插到错误窗口）。
+    /// IMK 控制器失活（切换输入法、系统弹窗或临时切换应用）：
+    /// - 若启用了全局监控且会话仍在进行中（录音/收尾/润色），将目标平滑移交给绑定原
+    ///   `targetFrontmostPID` 的全局会话宿主：切回原应用后照常自动上屏，若结束时仍
+    ///   停留在其他应用则由提交瞬间的同步复核 fail-closed 拦截。
+    /// - 手动待确认态跨应用切换或全局监控不可用时，拆离目标并降级为常驻手动复制浮窗。
     func controllerDidDeactivate(owner: any VoiceDictationRuntimeOwner) {
         if activeOwner === owner {
-            let currentFrontmostPID = NSWorkspace.shared.frontmostApplication?
-                .processIdentifier
-            let isSameApp = targetFrontmostPID != nil
-                && currentFrontmostPID == targetFrontmostPID
-            let isOngoing: Bool
-            switch phase {
-            case .connecting, .listening, .finalizing, .pendingConfirm:
-                isOngoing = true
-            case .idle, .disabled:
-                isOngoing = isTransforming
-            }
-            if isSameApp,
-               isOngoing,
-               VoiceGlobalHotKeyService.shared.isGlobalMonitorActive
-            {
-                globalOwner.targetFrontmostPID = targetFrontmostPID
-                activeOwner = globalOwner
-                currentOwner = globalOwner
-                targetClient = globalOwner
+            if handOffActiveControllerToGlobalIfEligible(
+                isSameApp: isTargetAppFrontmost
+            ) {
                 return
             }
             detachTargetIfActive()
@@ -544,6 +545,7 @@ final class VoiceDictationRuntime {
         self.hasEditableTarget = effectiveEditableTarget
         targetWasEditableAtStart = effectiveEditableTarget
         targetValidityDebouncer.reset()
+        loggedTransientTargetLoss = false
         activeIntent = intent
         activeHotwords = context.hotwordSnapshot.phrases
         sessionStartedAt = Date()
@@ -929,7 +931,11 @@ final class VoiceDictationRuntime {
             }
             return
         }
-        detachTargetIfActive()
+        if !handOffActiveControllerToGlobalIfEligible(
+            isSameApp: isTargetAppFrontmost
+        ) {
+            detachTargetIfActive()
+        }
     }
 
     func secureInputChanged(
@@ -1724,21 +1730,19 @@ final class VoiceDictationRuntime {
 
     /// 降级诊断：只记原因枚举与布尔状态，绝不记录语音文本或剪贴板内容。
     /// 排查“光标在输入框里却没有自动上屏”时，用
-    /// `log show --predicate 'process == "RimeAIInputMethod"' | grep VoiceDictation` 即可看到真实原因。
+    /// `log show --predicate 'subsystem == "fun.wwcn.rimeai" AND category == "voice-dictation"' --info`
+    /// 即可直接看到公开字段，不再被 NSLog 折叠为 `<private>`。
     private static func logAutoPasteDegraded(
         _ reason: VoicePersistentCopyReason,
         pasteOutcome: VoiceClipboardPaster.Outcome? = nil,
         globalSession: Bool,
         targetValidNow: Bool
     ) {
+        let reasonName = String(describing: reason)
         let paste = pasteOutcome.map { String(describing: $0) } ?? "notAttempted"
-        NSLog(
-            "[VoiceDictation] 自动上屏降级 reason=%@ paste=%@ globalSession=%d targetValidNow=%d axTrusted=%d",
-            String(describing: reason),
-            paste,
-            globalSession ? 1 : 0,
-            targetValidNow ? 1 : 0,
-            VoiceAccessibilityAuthorization.isTrusted ? 1 : 0
+        let axTrusted = VoiceAccessibilityAuthorization.isTrusted ? 1 : 0
+        voiceDictationLog.notice(
+            "自动上屏降级 reason=\(reasonName, privacy: .public) paste=\(paste, privacy: .public) globalSession=\(globalSession ? 1 : 0, privacy: .public) targetValidNow=\(targetValidNow ? 1 : 0, privacy: .public) axTrusted=\(axTrusted, privacy: .public)"
         )
     }
 
@@ -2146,25 +2150,94 @@ final class VoiceDictationRuntime {
         sampleTargetValidity(owner: owner)
     }
 
-    /// 采样式目标校验（150ms 定时器与每次 ASR 预览回调共用）：单次抖动不再永久
-    /// 关闭自动上屏，连续无效持续满去抖窗口才判定目标离开。显式的失活/会话切换
-    /// 事件仍走 `detachTargetIfActive()` 立即生效；上屏瞬间还会同步复核。
+    private var isTargetAppFrontmost: Bool {
+        guard let expectedPID = targetFrontmostPID,
+              let currentPID = NSWorkspace.shared.frontmostApplication?
+                  .processIdentifier
+        else {
+            return false
+        }
+        return currentPID == expectedPID
+    }
+
+    /// 将当前活跃的 IMK 控制器平滑移交给绑定原 `targetFrontmostPID` 的全局会话宿主。
+    @discardableResult
+    private func handOffActiveControllerToGlobalIfEligible(
+        isSameApp: Bool
+    ) -> Bool {
+        guard let activeOwner, activeOwner !== globalOwner else {
+            return false
+        }
+        guard VoiceSessionTargetRecoveryPolicy.shouldHandOffControllerToGlobal(
+            phase: phase,
+            isTransforming: isTransforming,
+            isSameApp: isSameApp,
+            targetWasEditableAtStart: targetWasEditableAtStart,
+            hasTargetPID: targetFrontmostPID != nil,
+            isGlobalMonitorActive: VoiceGlobalHotKeyService.shared.isGlobalMonitorActive
+        ) else {
+            return false
+        }
+        globalOwner.targetFrontmostPID = targetFrontmostPID
+        self.activeOwner = globalOwner
+        currentOwner = globalOwner
+        targetClient = globalOwner
+        targetValidityDebouncer.reset()
+        loggedTransientTargetLoss = false
+        voiceDictationLog.info(
+            "IMK 会话平滑移交全局宿主 sameApp=\(isSameApp ? 1 : 0, privacy: .public)"
+        )
+        return true
+    }
+
+    /// 采样式目标校验（150ms 定时器与每次 ASR 预览回调共用）：
+    /// - 录音/收尾/润色期间不因临时失焦（系统通知弹窗、切窗查资料再切回）永久锁死
+    ///   `hasEditableTarget`；上屏瞬间始终同步复核 `targetIsValid(owner:)`，焦点已回到
+    ///   原应用即照常自动上屏，仍停留在其他应用则 fail-closed 降级为“焦点已切换”。
+    /// - 手动待确认态（`.pendingConfirm` 且非转换中）持续失焦满去抖窗口时转为常驻复制浮窗。
     private func sampleTargetValidity(owner: any VoiceDictationRuntimeOwner) {
         guard hasEditableTarget else {
             return
         }
-        let latched = targetValidityDebouncer.noteSample(
-            isValid: targetIsValid(owner: owner),
-            at: ProcessInfo.processInfo.systemUptime
-        )
-        guard latched else {
+        let validNow = targetIsValid(owner: owner)
+        if validNow {
+            if loggedTransientTargetLoss {
+                loggedTransientTargetLoss = false
+                voiceDictationLog.info(
+                    "目标焦点已恢复 globalSession=\(owner.usesClipboardPasteForCommit ? 1 : 0, privacy: .public)"
+                )
+            }
+            _ = targetValidityDebouncer.noteSample(
+                isValid: true,
+                at: ProcessInfo.processInfo.systemUptime
+            )
             return
         }
-        // 光标焦点离开后不再强行取消录音；降级为“结束时常驻悬浮手动复制”。
-        hasEditableTarget = false
-        targetValidityDebouncer.reset()
-        // 只记诊断状态，不记任何语音文本。
-        NSLog("[VoiceDictation] 目标连续无效超过 %.2fs，本次关闭自动上屏", VoiceTargetValidityDebouncer.lockoutInterval)
+        let sustained = targetValidityDebouncer.noteSample(
+            isValid: false,
+            at: ProcessInfo.processInfo.systemUptime
+        )
+        guard sustained else {
+            return
+        }
+        if VoiceSessionTargetRecoveryPolicy.shouldLockOutAutoPasteOnSustainedInvalidity(
+            phase: phase,
+            isTransforming: isTransforming
+        ) {
+            voiceDictationLog.notice(
+                "待确认态目标连续无效超过 \(VoiceTargetValidityDebouncer.lockoutInterval, format: .fixed(precision: 2), privacy: .public)s，转为手动复制"
+            )
+            targetValidityDebouncer.reset()
+            loggedTransientTargetLoss = false
+            detachTargetIfActive()
+            return
+        }
+        if !loggedTransientTargetLoss {
+            loggedTransientTargetLoss = true
+            voiceDictationLog.info(
+                "目标焦点暂时离开已超过 \(VoiceTargetValidityDebouncer.lockoutInterval, format: .fixed(precision: 2), privacy: .public)s（等待切回原应用恢复） globalSession=\(owner.usesClipboardPasteForCommit ? 1 : 0, privacy: .public)"
+            )
+        }
     }
 
     private func detachTargetIfActive() {
@@ -2276,6 +2349,7 @@ final class VoiceDictationRuntime {
         hasEditableTarget = false
         targetWasEditableAtStart = false
         targetValidityDebouncer.reset()
+        loggedTransientTargetLoss = false
         activeIntent = .dictation
         activeHotwords = []
         sessionStartedAt = nil

@@ -174,6 +174,81 @@ struct VoiceTargetValidityDebouncer: Equatable {
     }
 }
 
+// MARK: - 录音/处理期焦点暂离与回切恢复
+
+/// 语音会话在不同阶段遇到临时失焦（如 `UserNotificationCenter` 系统弹窗、
+/// `⌘Tab` 临时切去浏览器/系统设置查阅资料再切回原应用、或 Electron 内部重激活
+/// IMK 控制器）时，决定是否保留原目标身份以便焦点回到原应用后照常自动上屏。
+///
+/// 安全边界保持不变：所有上屏入口在提交瞬间仍同步复核 `targetIsValid`
+/// （同前台 PID / 同 IMK 会话且非安全输入）；若最终仍停留在其他应用，
+/// fail-closed 降级为常驻手动复制浮窗，绝不跨应用误上屏。
+enum VoiceSessionTargetRecoveryPolicy {
+    /// 会话仍在录音、收尾或云端润色/翻译进行中，尚未进入手动待确认态。
+    static func isInProgress(
+        phase: VoiceDictationClientPhase,
+        isTransforming: Bool
+    ) -> Bool {
+        if isTransforming {
+            return true
+        }
+        switch phase {
+        case .connecting, .listening, .finalizing:
+            return true
+        case .pendingConfirm, .idle, .disabled:
+            return false
+        }
+    }
+
+    /// 采样式校验在持续无效满去抖窗口时，是否应永久锁死本次自动上屏。
+    /// - 录音/收尾/润色期间不锁死：焦点短暂离开（如系统通知或切窗查资料）后
+    ///   只要在提交前回到原应用，同步复核通过即照常自动上屏。
+    /// - 手动待确认态（`.pendingConfirm` 且非转换中）持续失焦时转为常驻复制浮窗。
+    static func shouldLockOutAutoPasteOnSustainedInvalidity(
+        phase: VoiceDictationClientPhase,
+        isTransforming: Bool
+    ) -> Bool {
+        !isInProgress(phase: phase, isTransforming: isTransforming)
+    }
+
+    /// IMK 控制器失活或会话切换时，是否应平滑移交给绑定原 `targetFrontmostPID`
+    /// 的全局会话宿主，而不是永久拆离目标。
+    static func shouldHandOffControllerToGlobal(
+        phase: VoiceDictationClientPhase,
+        isTransforming: Bool,
+        isSameApp: Bool,
+        targetWasEditableAtStart: Bool,
+        hasTargetPID: Bool,
+        isGlobalMonitorActive: Bool
+    ) -> Bool {
+        guard isGlobalMonitorActive, hasTargetPID, targetWasEditableAtStart else {
+            return false
+        }
+        if isInProgress(phase: phase, isTransforming: isTransforming) {
+            return true
+        }
+        if case .pendingConfirm = phase {
+            return isSameApp
+        }
+        return false
+    }
+
+    /// 其他 IMK 控制器通过 `claim(owner:)` 激活时，是否应拆离当前活跃的全局语音会话。
+    /// - 当前前台仍是原目标应用时始终保留。
+    /// - 录音/收尾/润色期间即使暂时切到其他应用并触发了对方应用的 `activateServer`，
+    ///   也保留对原目标 PID 的绑定，以便切回原应用后照常自动上屏。
+    static func shouldDetachGlobalSessionOnClaim(
+        phase: VoiceDictationClientPhase,
+        isTransforming: Bool,
+        targetCurrentlyValid: Bool
+    ) -> Bool {
+        if targetCurrentlyValid {
+            return false
+        }
+        return !isInProgress(phase: phase, isTransforming: isTransforming)
+    }
+}
+
 // MARK: - 宿主 markedRange 判定
 
 /// 部分宿主（Electron / Chromium / 断联 XPC proxy）在没有未上屏组合文本时
